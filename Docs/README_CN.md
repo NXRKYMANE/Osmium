@@ -1,4 +1,4 @@
-# ✨ Osmium — Windows Service Generator Framework
+﻿# ✨ Osmium — Windows Service Generator Framework
 
 <p align="center">
   <img src="https://img.shields.io/github/followers/NXRKYMANE?style=social" />
@@ -15,7 +15,7 @@
 > 项目开发参考自 [WinSW 2](https://github.com/winsw/winsw)。
 > Osmium 基本沿用了 WinSW 的大多数功能，使用 **Rust** 语言编写，一些高级功能采用 OSX 插件化，以便需要的时候可以扩展。
 
-> 我只是一个普通高中生，项目初期功能和漏洞波动较大，更新频率也非常高，望请各位开发者大佬谅解。
+> 项目已基本趋于稳定，不过仍可能有一些小问题，望请各位开发者大佬谅解。
 
 ## Rust 实现
 
@@ -411,11 +411,13 @@ Java 应用经 `java.exe` 启动，与其他可执行程序一样享受崩溃自
 
 脚本从 `Project\Cargo.toml` 读取版本号，自动同步到 `installer.iss`（含版权年份）。测试失败会终止流水线；跳过测试用 `.\BUILD.ps1 -SkipTests`。
 
+**代码签名**：找到证书时，全部产物（`os64.exe`、`osmium-okits.osx`、安装包、`os-upx.exe`）都会做 Authenticode 签名（SHA256 + RFC 3161 时间戳）。证书来源按优先级：环境变量 `OSMIUM_CERT_PFX`（可配 `OSMIUM_CERT_PASSWORD`），或仓库内开发证书 `Misc\codesign.pfx`（自签名，已被 gitignore 不会提交）。没有证书时流水线照常运行仅告警；显式跳过签名用 `.\BUILD.ps1 -SkipSign`。自签名开发证书签名有效但不被其他机器信任——公开发行要消除 SmartScreen 警告，请用商业证书经 `OSMIUM_CERT_PFX` 签名。
+
 ### 单独构建
 
 ```powershell
 Set-Location Project
-cargo build --release                    # → Project\target\release\osmium64.exe
+cargo build --release                     # → Project\target\release\osmium64.exe
 Copy-Item target\release\osmium64.exe ..\Publish\os64.exe
 # 构建插件 → Extension\osmium-okits.osx（见 Extension\osmium-official-kits）
 ISCC installer.iss                        # → Publish\osmium-win-x64-setup-v<版本>.exe
@@ -475,7 +477,7 @@ Osmium/
 │       └── src/
 │           ├── main.rs        # 协议入口：stdin JSON 按 kit 字段分发 → stdout JSON
 │           ├── kits_core.rs   # 共享实现集中文件（同 Project 的 service_core.rs）：
-│           │                   #   SSPI 下载 / 共享映射 / 解压 / 重启
+│           │                  # SSPI 下载 / 共享映射 / 解压 / 重启
 │           └── kits_tests.rs  # 单元 + 集成测试（24 个 + 1 ignored）
 ├── Misc/                      # 图标资源（build.rs / installer 引用）
 │   ├── Osmium.ico             # 安装器 / 分发图标（SetupIconFile）

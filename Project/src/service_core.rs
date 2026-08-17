@@ -2224,7 +2224,8 @@ pub(crate) fn get_file_version(path: &str) -> Option<String> {
             return None;
         }
 
-        if value_len as usize >= size_of::<VS_FIXEDFILEINFO>() {
+        // 指针非空 + 长度足够才解引用（CodeQL: 防止访问无效指针导致未定义行为）
+        if !value_ptr.is_null() && value_len as usize >= size_of::<VS_FIXEDFILEINFO>() {
             let info = &*(value_ptr as *const VS_FIXEDFILEINFO);
             let major = (info.dwFileVersionMS >> 16) & 0xFFFF;
             let minor = info.dwFileVersionMS & 0xFFFF;
@@ -2292,6 +2293,9 @@ pub(crate) fn dpapi_encrypt(plain: &str) -> Option<String> {
         {
             return None;
         }
+        if out_blob.pbData.is_null() {
+            return None;
+        }
         let cipher = std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize);
         let b64 = base64::engine::general_purpose::STANDARD.encode(cipher);
         let _ = windows::Win32::Foundation::LocalFree(
@@ -2319,6 +2323,9 @@ pub(crate) fn dpapi_decrypt(value: &str) -> String {
     let mut out_blob = CRYPT_INTEGER_BLOB::default();
     unsafe {
         if CryptUnprotectData(&in_blob, None, None, None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut out_blob).is_err() {
+            return value.to_string();
+        }
+        if out_blob.pbData.is_null() {
             return value.to_string();
         }
         let plain = std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize);

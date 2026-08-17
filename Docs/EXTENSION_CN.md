@@ -1,4 +1,4 @@
-# Osmium 插件开发与使用指南
+﻿# Osmium 插件开发与使用指南
 
 Osmium 支持万物皆插件：官方的高级功能、第三方的扩展能力，都是一个独立的可执行程序（`.osx`），放到 `exts\` 目录里，由宿主按需拉起。插件的用法、协议和开发方式都在下面了。
 
@@ -8,6 +8,37 @@ Osmium 支持万物皆插件：官方的高级功能、第三方的扩展能力�
 - 插件放在宿主 exe 同级的 `exts\` 目录（平台安装为 `%ProgramFiles%\Osmium\exts\`）
 - 宿主启动时递归扫描 `exts\` 下所有 `.osx`，按请求里的 `kit` 字段分发调用
 - **插件不常驻**：每次调用临时拉起，处理完一个请求就退出
+
+### 文件名叫什么无所谓（改名不影响调用）
+
+宿主调用插件**不认文件名**，只认三样东西：`kit` 能力名、`.osx` 扩展名、`exts\` 目录。所以官方插件（`osmium-okits.osx`）改成任意名字（比如 `my-tools.osx`、`随便什么.osx`），只要满足上面三点，所有功能照常：
+
+- 宿主内置配置字段照常：`download_auth = "sspi"`、`download_unzip = true`、`shared_directory_mappers`、`failure_action = "reboot"` —— 它们调的是 kit 名（`sspi`/`unzip`/`netmap`/`reboot`），跟文件名无关
+- 配置里 `[[plugins]]` 声明的 `kit` 照常命中
+- `--extend` 照常列出（只是显示的名字变成新文件名）
+
+调用链是这样的：
+
+```
+run_plugin("sspi", ...)       # 宿主只关心 kit 名
+  → discover_plugins()        # 扫描 exts\*.osx —— 不看名字，全量收集
+  → 广播 {"kit":"sspi", ...}  # 请求里只有能力名，没有文件名
+  → 插件自己认领              # 内部按 kit 字段分发，认得就干
+  → 首个 ok 即成功
+```
+
+正因为认能力不认文件，才有的这些特性：
+
+- **改名自由**：插件换名字、换版本、升级替换，宿主和配置一行不用动
+- **多插件共存**：`exts\` 下可以同时放官方插件和任意多个第三方插件，互不干扰
+- **同名能力多实现**：多个插件都响应同一个 kit 时，宿主按发现顺序取第一个成功的
+- **一个文件多能力**：官方插件一个文件同时响应 `ping`/`sspi`/`netmap`/`unzip`/`reboot` 五个 kit
+
+唯一要注意的：
+
+1. 扩展名必须是 `.osx`（改成 `.exe` 之类 `discover_plugins` 就找不到了）
+2. 必须放在宿主 exe 同级的 `exts\` 目录
+3. 插件内部的 kit 分发逻辑不能改（比如把 `sspi` 分发改成了别的名字，配置里写 `sspi` 就命中不了了——这种情况才需要同步改配置）
 
 ### 检查插件是否可用
 
@@ -161,7 +192,7 @@ import sys
 
 def fail(msg):
     print(f"osmium-kit error: {msg}", file=sys.stderr)      # stderr: 给人看的
-    print(json.dumps({"ok": False, "error": msg}))         # stdout: 协议响应
+    print(json.dumps({"ok": False, "error": msg}))          # stdout: 协议响应
     sys.exit(1)
 
 

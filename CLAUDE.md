@@ -19,6 +19,13 @@
 - 重大修改和调优前记得备份一个,已经多次发生翻车事故造成项目从头来的情况
 # 项目记录
 
+## v26.7.0（2026-08-18）· 代码签名（Authenticode）集成
+- 生成自签名代码签名证书（CN=Osmium Dev Signing，2026-08 起 5 年，RSA2048/SHA256，CodeSigning EKU），导出 `Misc\codesign.pfx`（固定密码，`.gitignore` 排除，绝不提交）；signtool 用 `F:\DevTools\Windows11 SDK\bin\10.0.28000.0\x64\signtool.exe`
+- BUILD.ps1 集成签名：`Get-SignCert` 证书来源优先级——环境变量 `OSMIUM_CERT_PFX`（+可选 `OSMIUM_CERT_PASSWORD`）→ 仓库 `Misc\codesign.pfx`；`Sign-File` 用 `/fd SHA256 + RFC 3161 时间戳`（DigiCert → Sectigo → Comodoca 依次回退，全不可达时无时间戳签名并告警）；签名对象：os64.exe、exts\osmium-okits.osx、安装包（ISCC 编译后）、os-upx.exe
+- 新参数 `-SkipSign`（跳过签名）；无证书/signtool 缺失时自动跳过仅告警
+- 实测通过：DigiCert 时间戳成功（Done Adding Additional Store），签名链完整；自签名证书 Status=UnknownError 属预期（根不受信任），真机验证签名元数据/时间戳齐全；消除 SmartScreen 需商业证书走 OSMIUM_CERT_PFX
+- 注意：PowerShell 5.1 的 Export-PfxCertificate 产物 signtool 可读（需传 /p 密码）；New-SelfSignedCertificate 证书存储内私钥不可再导出，备份以 pfx 为准
+
 ## v26.7.0（2026-08-15）· 品牌重命名 Silanes → Osmium（按新软件对待，新旧共存）
 - 全项目品牌重命名：exe `osmium64.exe`（Cargo bin）、安装目录 `Program Files\Osmium`、部署目录 `ProgramData\Osmium\svcs`、更新程序服务名 `Osmium Service Updater`、CLI 前缀/帮助/事件日志来源/DPAPI 前缀 `enc:OSMIUM1:`、安装包 `osmium-win-x64-setup`、注册表 App Paths / Uninstall / ProgID、文档 4 README 全部同步
 - 配置扩展名 `.silml` → `.osiml`（部署路径 svcs\<name>\<name>.osiml、宿主 with_extension、文件关联、图标 osiml.ico）；快捷别名 `sil` → `os`（Misc\os.cmd）
@@ -63,6 +70,7 @@
 - sspi 官方插件支持回归（内建配置字段）：download_auth=sspi 由"直接拒绝"改回正式支持——try_download_entry 提前分流 sspi_download_via_plugin（osmium-kit-sspi 插件完成 401 挑战-响应循环并原子落盘，宿主补 sha 校验，凭据/proxy 进 payload）；run_download_entry 的 sspi 拒绝校验删除；download_auth_from_entry 注释说明 sspi 不经映射；配置注释恢复（download_auth/auth 支持 sspi）；测试——sspi_auth_rejected_in_download_config 改名为 sspi_download_missing_plugin_fails_clearly（插件缺失 → 启动失败 + 日志含 sspi 失败详情）；真机端到端冒烟（本机）——宿主 --test + download_auth=sspi + 加固 exts（takeown /a 所有者归 Administrators + icacls 仅 SYSTEM/Admin）→ 日志链路完整（Downloading → SSPI download error: plugin exited with code 1 → Download failed），验证 ACL 信任校验/插件调起/协议交换/失败传播全链路；2 README 的 download_auth 行同步（sspi 由官方插件处理，未装插件明确报错）；主项目 139 + kits 24/1 全过、clippy 零警告
 - 服务更新程序重命名 Osmium Service Updater → Osmium Service Checker：service_core.rs 12 处（保留名校验/注册/移除/更新程序自识别）+ 测试 + 2 README 同步；内部命令名 -internal --install-updater 保留（接口不变）；installer.iss 无服务名字符串无需改；139 + 24/1 全过、clippy 零警告
 - 插件信任模型修正（集成部署支持）：plugin_path_trusted 信任锚点改为宿主 exe 自身位置——exe 位于用户可写目录（inplace 集成部署/开发者目录）时插件与 exe 同级自动放行（攻击面与宿主一致，能替换插件的攻击者同样能替换 exe，不额外增加风险）；exe 位于受保护位置（Program Files 等）时保持严格校验（exts 与插件文件须仅 SYSTEM/Admin 可写，防 P0 提权）；真机双分支验证——可写目录 exts 插件真实执行（Plugin completed: ping）、受保护 exe 目录 + 可写 exts 拒绝（refusing to execute）；2 插件指南安全节同步；139 + 24/1 全过、clippy 零警告
+- 真机测试发现并修复 2 个 bug + CodeQL 修复：①sddl_sid_is_administrative 不识别 TrustedInstaller（S-1-5-80-*）→ System32 下 cmd.exe 被误判"用户可写"导致安装误拒，加前缀识别 + 测试；②installer.iss SecureExtsDir 的 takeown 漏 /A → exts 所有者归当前登录用户而非 Administrators → 官方插件装完必红，补 /A（注释说明）；③CodeQL rust/access-invalid-pointer——get_file_version 的 VerQueryValueW 输出指针解引用缺非空校验，加 is_null 检查；DPAPI 加密/解密两处 from_raw_parts 同样预防性补 pbData 判空；kits SSPI 已有判空无需改；真机全链路验证通过（安装→启动 Running→Ctrl+C 优雅停止→卸载、插件 ping 调用、保留名/路径穿越/插件缺失阻断/快速安装/不存在配置等边缘）；139 + 24/1 全过、clippy 零警告
 - 注意：GitHub 远程与文档 URL 已改为 NXRKYMANE/Osmium，若远端仓库尚未改名需同步重命名
 
 ## v26.6.0（2026-08-12）· 共享宿主部署（去重每服务 exe 副本）

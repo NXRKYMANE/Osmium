@@ -1,4 +1,4 @@
-# Osmium Plugin Development & Usage Guide
+﻿# Osmium Plugin Development & Usage Guide
 
 Osmium is plugin-everything: official advanced features and third-party extensions are all standalone executables (`.osx`) placed in the `exts\` directory, launched by the host on demand. How plugins work, the protocol, and how to write one — it's all here.
 
@@ -8,6 +8,37 @@ Osmium is plugin-everything: official advanced features and third-party extensio
 - Plugins live in the `exts\` directory next to the host exe (platform install: `%ProgramFiles%\Osmium\exts\`)
 - At startup the host recursively scans every `.osx` under `exts\` and dispatches requests by the `kit` field
 - **Plugins are not resident**: each call launches a fresh process, which handles one request and exits
+
+### The File Name Doesn't Matter (Renaming Doesn't Break Calls)
+
+The host does **not** identify plugins by file name — it only cares about three things: the `kit` capability name, the `.osx` extension, and the `exts\` directory. So renaming the official plugin (`osmium-okits.osx`) to any other name (e.g. `my-tools.osx`, `whatever.osx`) keeps every feature working, as long as those three hold:
+
+- Host built-in config fields keep working: `download_auth = "sspi"`, `download_unzip = true`, `shared_directory_mappers`, `failure_action = "reboot"` — they call the kit names (`sspi`/`unzip`/`netmap`/`reboot`), which have nothing to do with file names
+- A `kit` declared in a `[[plugins]]` block still matches
+- `--extend` still lists it (just showing the new file name)
+
+The call chain looks like this:
+
+```
+run_plugin("sspi", ...)        # the host only cares about the kit name
+  → discover_plugins()         # scans exts\*.osx — no name matching, collects all
+  → broadcast {"kit":"sspi"}   # the request carries the capability name, not a file name
+  → the plugin claims it       # internal dispatch by the kit field — recognize and run
+  → first ok wins
+```
+
+Because it resolves capabilities instead of files, you get:
+
+- **Free renaming**: swap plugin names, versions, or upgrades — the host and config need zero changes
+- **Multiple plugins coexist**: the official plugin and any number of third-party plugins can live in `exts\` side by side without interference
+- **Multiple implementations of one capability**: when several plugins respond to the same kit, the host takes the first success in discovery order
+- **One file, many capabilities**: the official plugin responds to five kits (`ping`/`sspi`/`netmap`/`unzip`/`reboot`) from a single file
+
+The only things to watch:
+
+1. The extension must stay `.osx` (renaming to `.exe` or similar means `discover_plugins` can't find it)
+2. It must sit in the `exts\` directory next to the host exe
+3. The plugin's internal kit dispatch must not change (e.g. if you rename the `sspi` dispatch inside the plugin, a config writing `sspi` can't hit it anymore — only in that case do you need to update the config too)
 
 ### Checking Whether a Plugin Is Usable
 
@@ -161,7 +192,7 @@ import sys
 
 def fail(msg):
     print(f"osmium-kit error: {msg}", file=sys.stderr)      # stderr: for humans
-    print(json.dumps({"ok": False, "error": msg}))         # stdout: protocol response
+    print(json.dumps({"ok": False, "error": msg}))          # stdout: protocol response
     sys.exit(1)
 
 

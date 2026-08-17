@@ -1,4 +1,4 @@
-# ✨ Osmium — Windows Service Generator Framework
+﻿# ✨ Osmium — Windows Service Generator Framework
 
 <p align="center">
   <img src="https://img.shields.io/github/followers/NXRKYMANE?style=social" />
@@ -15,7 +15,7 @@ Register any executable or script as a Win32 system service. [中文文档](Docs
 > The project is based on [WinSW 2](https://github.com/winsw/winsw).
 > Osmium keeps most of WinSW's features, written in **Rust**, with some advanced features provided through OSX plugins so they can be extended whenever needed.
 
-> I'm just an ordinary high school student. The project is in its early stage — functionality and bugs may fluctuate, and updates are very frequent. Thank you for your understanding, fellow developers.
+> The project is now fairly stable, though a few minor issues may still surface. Thank you for your understanding, fellow developers.
 
 ## Rust Implementation
 
@@ -411,11 +411,13 @@ After the installer is built, the script asks whether to also produce an optiona
 
 The script reads the version from `Project\Cargo.toml` and automatically syncs it (plus the copyright year) into `installer.iss`. A failing test aborts the pipeline; use `.\BUILD.ps1 -SkipTests` to skip testing.
 
+**Code signing**: all artifacts (`os64.exe`, `osmium-okits.osx`, the installer, `os-upx.exe`) are Authenticode-signed (SHA256 + RFC 3161 timestamp) when a certificate is available. Certificate sources, in priority order: the `OSMIUM_CERT_PFX` environment variable (plus optional `OSMIUM_CERT_PASSWORD`), or the repo-local dev certificate `Misc\codesign.pfx` (self-signed, `Misc\codesign.pfx` is gitignored and never committed). Without a certificate the pipeline proceeds unsigned with a warning; use `.\BUILD.ps1 -SkipSign` to skip signing explicitly. The self-signed dev certificate produces valid signatures but is not trusted by other machines — for public releases that must clear SmartScreen, sign with a commercial certificate via `OSMIUM_CERT_PFX`.
+
 ### Build Individually
 
 ```powershell
 Set-Location Project
-cargo build --release                    # → Project\target\release\osmium64.exe
+cargo build --release                     # → Project\target\release\osmium64.exe
 Copy-Item target\release\osmium64.exe ..\Publish\os64.exe
 # build the kits → Extension\osmium-okits.osx (see Extension\osmium-official-kits)
 ISCC installer.iss                        # → Publish\osmium-win-x64-setup-v<VERSION>.exe
@@ -475,7 +477,7 @@ Osmium/
 │       └── src/
 │           ├── main.rs        # Protocol entry: stdin JSON dispatch (kit field) → stdout JSON
 │           ├── kits_core.rs   # Shared implementations (same as Project service_core.rs):
-│           │                   #   SSPI download / share mapping / unzip / reboot
+│           │                  # SSPI download / share mapping / unzip / reboot
 │           └── kits_tests.rs  # Unit + integration tests (24 + 1 ignored)
 ├── Misc/                      # Icon resources (referenced by build.rs / installer)
 │   ├── Osmium.ico             # Installer / distribution icon (SetupIconFile)
