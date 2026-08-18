@@ -45,7 +45,7 @@ const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
 // ==================== 宿主配置路径 ====================
 
 /// 宿主配置路径: 平台部署为 .osiml（服务配置文件），inplace 兼容同目录 .toml
-fn config_path_next_to(exe: &Path) -> PathBuf {
+pub(crate) fn config_path_next_to(exe: &Path) -> PathBuf {
     let osiml = Path::new(exe).with_extension("osiml");
     if osiml.exists() { osiml } else { Path::new(exe).with_extension("toml") }
 }
@@ -513,9 +513,12 @@ impl ServiceHost {
         self.load_deployed_config().ok().map(|c| self.expand_config(&c))
     }
 
-    /// 读取部署目录配置（config_path_next_to → load_config），失败返回 panic 详情
+    /// 读取部署配置（异常重启/停止阶段资源操作需要配置，宿主不常驻整份配置）:
+    /// 优先用启动时记录的配置路径（共享宿主 = svcs\<name>\<name>.osiml），
+    /// 普通宿主回退 exe 旁配置；失败返回 panic 详情
     fn load_deployed_config(&self) -> Result<crate::service_config::ServiceConfig, String> {
-        let config_path = config_path_next_to(Path::new(&crate::service_core::get_own_path()));
+        let config_path = self.config_path.clone()
+            .unwrap_or_else(|| config_path_next_to(Path::new(&crate::service_core::get_own_path())));
         std::panic::catch_unwind(|| crate::service_core::load_config(&config_path))
             .map_err(|p| crate::service_core::panic_msg(&*p, "Unknown error"))
     }
@@ -2236,6 +2239,99 @@ pub(crate) fn collect_descendants(root_pid: u32) -> Vec<u32> {
 }
 
 // ==================== 进程采样 / 进程优先级 / 环境展开 / 事件日志 / 自定义停止 ====================
+
+/// 枚举全部进程 PID（Toolhelp 快照）
+fn all_process_ids() -> Vec<u32> {
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return vec![];
+        };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                out.push(entry.th32ProcessID);
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+        out
+    }
+}
+
+/// 启用 SeDebugPrivilege（管理员默认持有但禁用）: 供 kill 终止 SYSTEM 级服务子进程
+fn enable_debug_privilege() {
+    use windows::Win32::Foundation::{HANDLE, LUID};
+    use windows::Win32::Security::{
+        AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_DEBUG_NAME,
+        SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token).is_err() {
+            return;
+        }
+        let mut luid = LUID::default();
+        if LookupPrivilegeValueW(PCWSTR::null(), SE_DEBUG_NAME, &mut luid).is_err() {
+            let _ = CloseHandle(token);
+            return;
+        }
+        let tp = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_ENABLED }],
+        };
+        let _ = AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None);
+        let _ = CloseHandle(token);
+    }
+}
+
+/// 管理员/开发者工具（对应 WinSW dev kill）: 按 WINSGF_SERVICE_ID 定位并强制终止
+/// 某服务的目标子进程（整棵进程树）。返回终止的进程数；服务未运行返回 0。
+/// 需管理员权限，必要时启用 SeDebugPrivilege 以终止 SYSTEM 级进程
+pub(crate) fn kill_service_processes(service_id: &str) -> Result<u32, String> {
+    enable_debug_privilege();
+    let mut killed = 0u32;
+    let mut errors = Vec::new();
+    for pid in all_process_ids() {
+        let matched = process_env_var(pid, "WINSGF_SERVICE_ID")
+            .map(|v| v.eq_ignore_ascii_case(service_id))
+            .unwrap_or(false);
+        if !matched {
+            continue;
+        }
+        unsafe {
+            // 先杀子树再杀自身（与 runaway_cleanup_pid_file 顺序一致）
+            for desc in collect_descendants(pid) {
+                if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, desc) {
+                    let _ = TerminateProcess(h, 1);
+                    let _ = CloseHandle(h);
+                }
+            }
+            match OpenProcess(PROCESS_TERMINATE, false, pid) {
+                Ok(h) => {
+                    if TerminateProcess(h, 1).is_err() {
+                        let _ = CloseHandle(h);
+                        errors.push(format!("PID {pid} refused to terminate"));
+                    } else {
+                        let _ = CloseHandle(h);
+                        killed += 1;
+                    }
+                }
+                Err(_) => errors.push(format!("PID {pid} is not accessible (run as administrator)")),
+            }
+        }
+    }
+    if killed == 0 && !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    Ok(killed)
+}
 
 /// 进程工作集内存（MB），失败返回 None（RunawayProcessKiller 采样用）
 pub(crate) fn process_working_set_mb(pid: u32) -> Option<u64> {

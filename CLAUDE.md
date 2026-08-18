@@ -19,6 +19,18 @@
 - 重大修改和调优前记得备份一个,已经多次发生翻车事故造成项目从头来的情况
 # 项目记录
 
+## v26.7.1（2026-08-18）· 新增 --kill 命令 + 修复共享宿主异常重启读错配置
+- `os --kill <name>`（简写 `--kil`，对应 WinSW dev kill）：管理员/开发者工具——按宿主注入的 `WINSGF_SERVICE_ID` 环境变量枚举全部进程定位某服务的子进程，强杀整棵进程树（先子树后自身）；预先启用 SeDebugPrivilege（SE_DEBUG_NAME 常量 + AdjustTokenPrivileges，管理员默认持有但禁用，否则无法终止 SYSTEM 级子进程）
+- 实现：`service_host::kill_service_processes`（Toolhelp 枚举 + process_env_var 匹配 + collect_descendants 子树）+ `all_process_ids`/`enable_debug_privilege` 工具；CLI 帮助/路由/别名/别名测试补 4 项
+- 顺带修复真 bug：共享宿主（-internal --run）异常重启路径 `load_deployed_config` 原来读**宿主 exe 旁配置**（Program Files\Osmium\os.toml 不存在 → 重启必失败），改为优先用启动时记录的 config_path（svcs\<name>\<name>.osiml）；真机验证 kill 后 5s 延迟重启成功拉起新子进程
+- 真机验证全链路（ping -t localhost 常驻 → kill 进程消失 → 宿主按 restart 动作恢复）；144 全过、clippy 零警告；2 README 命令表/别名行同步；边缘测试 +2（两层进程树匹配杀整树、未知服务 Ok(0)）
+
+## v26.7.1（2026-08-18）· 新增 --refresh 命令（对应 WinSW refresh）
+- `os --refresh <name>`（简写 `--rfs`）：从已部署配置重新同步 SCM 服务注册属性，不重建服务、不触碰 ImagePath/部署文件——显示名/描述/启动类型/依赖/账户密码/故障恢复/延迟启动/交互标志/SDDL 全部按 .osiml（inplace 为 exe 旁同名 toml）重写；allow_service_logon 同步授权
+- 实现：`service_core::refresh_service` 用 `ChangeServiceConfigW`（含 lpDisplayName 显示名，windows crate 0.62 签名带该参数）+ 闭包内 ChangeServiceConfig2W（描述/故障恢复/延迟启动显式 true/false/SDDL）统一关句柄；OpenServiceW 须 `SERVICE_ALL_ACCESS`（SERVICE_CHANGE_CONFIG 设 failure actions 会拒绝访问 0x80070005）
+- CLI：帮助文本/路由/is_cli_command 补 `--refresh | --rfs`；别名测试补 2 项；service_host 的 config_path_next_to 转 pub(crate) 供 refresh 定位 inplace 配置
+- 2 README 命令表/别名行同步；真机验证（临时服务：改显示名/描述 → refresh → SCM 属性更新成功 → 卸载无残留）；144 全过、clippy 零警告；边缘测试 +3（非法名/系统服务/未知服务拒绝，只读 SCM）
+
 ## v26.7.1（2026-08-18）· 资产重命名 + 插件发现放宽 + 安装器无重启升级
 - 资产重命名（与元素锇全称统一）：`os64.exe` → `osmium64.exe`、`os-upx.exe` → `osmium64-upx.exe`、`osmium-okits.osx` → `exts\osmium64-official-kits.osx`（BUILD.ps1 输出/签名/提示 + installer.iss Source/组件描述同步；安装后仍改名 `os.exe`）
 - 插件发现放宽：`plugin_dir()` 从 exe 同级 `exts` 改为 **exe 所在目录本身**，递归扫描全部 `.osx`（仅跳过 `.` 开头隐藏目录）——独立部署不再强制 exts 子目录；平台安装仍装 `{app}\exts`；run_plugin 缺失错误消息同步

@@ -106,15 +106,19 @@ fn print_help() {
     println!("  os.exe | os --start     <service name>                Start service");
     println!("  os.exe | os --stop      <service name>                Stop service");
     println!("  os.exe | os --restart   <service name>                Restart service");
+    println!("  os.exe | os --refresh   <service name>                Refresh service properties");
+    println!("  os.exe | os --kill      <service name>                Kill the service's target process");
     println!("  os.exe | os --status    <service name>                Check status");
     println!("  os.exe | os --delete    <service name>                Force delete");
+    println!();
+    println!("  os.exe | os --test      <config.toml>                 Run in foreground");
     println!("  os.exe | os --list                                    List all services");
     println!("  os.exe | os --extend                                  List installed extensions");
-    println!("  os.exe | os --test      <config.toml>                 Run in foreground");
     println!();
-    println!("  Short aliases: --ins --uin --str --stp --rst --sts --del --lst | --ext --tst");
+    println!("  Short aliases: --ins --uin --str --stp --rst --rfs --kil --sts --del --lst");
+    println!("  Short aliases for developer: --tst --lst --ext");
     println!();
-    println!("  No arguments -> Service host mode (launched by SCM)");
+    println!("  No arguments -> Service host mode (Launched by SCM)");
     println!();
     println!("{}", "-".repeat(90));
     println!();
@@ -137,13 +141,15 @@ fn print_help() {
 // ==================== 辅助判定 ====================
 
 /// 服务操作命令（可省略 -m 前缀直接使用，如 --start foo）；
-/// 支持简化别名: --ins/--uin/--str/--stp/--rst/--sts/--del/--lst（--test 可简写 --tst，--extend 可简写 --ext）
+/// 支持简化别名: --ins/--uin/--str/--stp/--rst/--sts/--del/--lst（--test 可简写 --tst，--extend 可简写 --ext，--refresh 可简写 --rfs，--kill 可简写 --kil）
 pub(crate) fn is_cli_command(tag: &str) -> bool {
     matches!(tag,
         "--install" | "--uninstall" | "--start" | "--stop"
         | "--restart" | "--status" | "--delete" | "--list"
         | "--extend" | "--ext"
         | "--test" | "--tst"
+        | "--refresh" | "--rfs"
+        | "--kill" | "--kil"
         | "--ins" | "--uin" | "--str" | "--stp" | "--rst" | "--sts" | "--del" | "--lst")
 }
 
@@ -213,6 +219,8 @@ fn run_cli(args: &[String]) {
         "start" | "str" => start_command(&cmd_args),
         "stop" | "stp" => stop_command(&cmd_args),
         "restart" | "rst" => restart_command(&cmd_args),
+        "refresh" | "rfs" => refresh_command(&cmd_args),
+        "kill" | "kil" => kill_command(&cmd_args),
         "status" | "sts" => status_command(&cmd_args),
         "delete" | "del" => force_delete_command(&cmd_args),
         "list" | "lst" => list_command(),
@@ -314,6 +322,31 @@ fn status_command(args: &[&str]) {
     match crate::service_core::get_status(svc_name) {
         Ok(status) => println!("{CLI_PREFIX}: {}", f("Status: {0}", &[&status])),
         Err(e) => error(&f("Query failed: {0}", &[&e])),
+    }
+}
+
+/// -m --refresh <name>: 从已部署配置重新同步 SCM 服务注册属性（对应 WinSW refresh，
+/// 不重装刷新——显示名/描述/启动类型/依赖/账户/故障恢复等）
+fn refresh_command(args: &[&str]) {
+    if args.is_empty() { usage("refresh <service name>"); return; }
+    let svc_name = args[0];
+    require_registered(svc_name);
+    match crate::service_core::refresh_service(svc_name) {
+        Ok(()) => println!("{CLI_PREFIX}: Service properties refreshed successfully"),
+        Err(e) => error(&f("Service refresh failed: {0}", &[&e])),
+    }
+}
+
+/// -m --kill <name>: 管理员/开发者工具——强制终止该服务的目标子进程（整棵进程树，对应 WinSW dev kill）。
+/// 按 WINSGF_SERVICE_ID 定位进程（宿主为子进程注入），不触发宿主优雅停止；随后服务可能按故障策略重启
+fn kill_command(args: &[&str]) {
+    if args.is_empty() { usage("kill <service name>"); return; }
+    let svc_name = args[0];
+    require_registered(svc_name);
+    match crate::service_host::kill_service_processes(svc_name) {
+        Ok(n) if n > 0 => println!("{CLI_PREFIX}: Killed {0} process(es) of service '{1}'", n, svc_name),
+        Ok(_) => println!("{CLI_PREFIX}: No running process found for service '{0}'", svc_name),
+        Err(e) => error(&f("Kill failed: {0}", &[&e])),
     }
 }
 

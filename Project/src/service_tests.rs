@@ -105,11 +105,11 @@ where
 
 #[test]
 fn cli_short_aliases_cover_test() {
-    // 服务操作命令与全部简化别名（含 --test/--tst、--extend/--ext）均可省略 -m 直接使用
+    // 服务操作命令与全部简化别名（含 --test/--tst、--extend/--ext、--refresh/--rfs、--kill/--kil）均可省略 -m 直接使用
     for tag in [
         "--install", "--uninstall", "--start", "--stop", "--restart",
         "--status", "--delete", "--list", "--test", "--tst",
-        "--extend", "--ext",
+        "--extend", "--ext", "--refresh", "--rfs", "--kill", "--kil",
         "--ins", "--uin", "--str", "--stp", "--rst", "--sts", "--del", "--lst",
     ] {
         assert!(crate::service_cli::is_cli_command(tag), "{tag} should be recognized as a CLI command");
@@ -163,6 +163,29 @@ fn shared_host_rejects_invalid_service_name_from_scm() {
     assert!(!host.on_start_with_name(""));
     // 合法服务名但配置不存在 → 启动失败（而非 panic）
     assert!(!host.on_start_with_name("nonexistent-svc-xyz"));
+}
+
+#[test]
+fn refresh_service_rejects_invalid_name() {
+    // 非法服务名（路径穿越/DOS 设备名/控制字符）→ Err，绝不触碰 SCM
+    for bad in ["..", "..\\..\\Windows\\evil", "a/b", "", "CON", "bad\x01name"] {
+        let err = crate::service_core::refresh_service(bad).unwrap_err();
+        assert!(err.contains("Invalid service name"), "bad name '{bad}': {err}");
+    }
+}
+
+#[test]
+fn refresh_service_rejects_non_osmium_service() {
+    // 系统服务（services.exe，非 Osmium 管理）→ 拒绝刷新，不修改其注册属性
+    let err = crate::service_core::refresh_service("EventLog").unwrap_err();
+    assert!(err.contains("not managed"), "{err}");
+}
+
+#[test]
+fn refresh_service_rejects_unknown_service() {
+    // 不存在的服务: ImagePath 读不到 → 同样按"非 Osmium 管理"拒绝（不创建/不修改）
+    let err = crate::service_core::refresh_service("osmium-no-such-svc-xyz").unwrap_err();
+    assert!(err.contains("not managed"), "{err}");
 }
 
 #[test]
@@ -2420,6 +2443,36 @@ fn runaway_cleanup_pid_file_skips_foreign_pid() {
     let _ = child2.kill();
     let _ = child2.wait();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn kill_service_processes_matches_env_var_and_kills_tree() {
+    // 两层进程树（powershell 父 + ping 孙，均继承 WINSGF_SERVICE_ID）: kill 按标识匹配并杀整树
+    let svc = "osmium-kill-test-svc";
+    let script = "Start-Process -FilePath 'C:\\Windows\\System32\\ping.exe' -ArgumentList '-t','127.0.0.1' -WindowStyle Hidden; Start-Sleep -Seconds 30";
+    let mut child = Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", script])
+        .env("WINSGF_SERVICE_ID", svc)
+        .creation_flags(0x08000000)
+        .spawn()
+        .expect("spawn powershell");
+    let pid = child.id();
+    // 等孙进程起来（Start-Process 异步）
+    thread::sleep(Duration::from_millis(1500));
+    let killed = crate::service_host::kill_service_processes(svc).expect("kill should succeed");
+    assert!(killed >= 1, "should kill at least the parent process");
+    // 父进程已被终止（wait 立即返回）
+    let status = child.wait().expect("wait should succeed");
+    assert!(!status.success(), "parent process must be terminated");
+    assert!(!crate::service_host::process_alive(pid), "parent must be dead");
+}
+
+#[test]
+fn kill_service_processes_unknown_service_returns_zero() {
+    // 不存在/无运行进程的服务: 枚举匹配不到 → Ok(0)，不动任何进程
+    let killed = crate::service_host::kill_service_processes("osmium-no-such-svc-xyz")
+        .expect("unknown service must not error");
+    assert_eq!(killed, 0);
 }
 
 #[test]

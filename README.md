@@ -65,6 +65,8 @@ os --list
 | `--start <name>`                           | Start a service                                                                                                                                |
 | `--stop <name>`                            | Stop a service                                                                                                                                 |
 | `--restart <name>`                         | Restart a service                                                                                                                              |
+| `--refresh <name>`                         | Refresh SCM service properties (display name / description / start type / account / recovery, etc.) from the deployed config without reinstalling |
+| `--kill <name>`                            | Admin/dev tool: force-kill the service's target process tree (via `WINSGF_SERVICE_ID`; short alias `--kil`)                                          |
 | `--status <name>`                          | Query service status                                                                                                                           |
 | `--delete <name>`                          | Force delete (stop + uninstall)                                                                                                                |
 | `--list`                                   | List all platform-deployed services (excludes inplace embedded services)                                                                       |
@@ -74,7 +76,7 @@ os --list
 
 > Management commands are equivalent to the legacy `-m --xxx` form (the prefix is optional); after a framework install you can use the `os` shortcut alias instead of `os.exe`.
 
-> Every command has a short alias: `--ins` / `--uin` / `--str` / `--stp` / `--rst` / `--sts` / `--del` / `--lst` / `--tst` / `--ext` (install / uninstall / start / stop / restart / status / delete / list / test / extend).
+> Every command has a short alias: `--ins` / `--uin` / `--str` / `--stp` / `--rst` / `--rfs` / `--kil` / `--sts` / `--del` / `--lst` / `--tst` / `--ext` (install / uninstall / start / stop / restart / refresh / kill / status / delete / list / test / extend).
 
 > The service name `Osmium Service Checker` is reserved; service names are validated: empty names, `.` / `..` (path traversal), path separators and control characters are rejected, length capped at 256.
 

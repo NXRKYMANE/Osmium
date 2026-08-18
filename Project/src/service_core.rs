@@ -16,13 +16,14 @@ use windows::Win32::System::Registry::{
     RRF_RT_REG_SZ, RegCloseKey, RegGetValueW, RegOpenKeyExW,
 };
 use windows::Win32::System::Services::{
-    ChangeServiceConfig2W, CloseServiceHandle, ControlService, CreateServiceW,
-    DeleteService, ENUM_SERVICE_TYPE, OpenSCManagerW, OpenServiceW, QueryServiceStatus,
-    SC_HANDLE, SC_MANAGER_ALL_ACCESS, SERVICE_AUTO_START,
-    SERVICE_CONFIG_DELAYED_AUTO_START_INFO, SERVICE_CONFIG_DESCRIPTION,
-    SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_CONTROL_STOP, SERVICE_DELAYED_AUTO_START_INFO,
-    SERVICE_DEMAND_START, SERVICE_DESCRIPTIONW, SERVICE_DISABLED, SERVICE_ERROR_NORMAL,
-    SERVICE_FAILURE_ACTIONSW, SERVICE_QUERY_STATUS, SERVICE_START, SERVICE_START_TYPE,
+    ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, ControlService,
+    CreateServiceW, DeleteService, ENUM_SERVICE_TYPE, OpenSCManagerW, OpenServiceW,
+    QueryServiceStatus, SC_HANDLE, SC_MANAGER_ALL_ACCESS, SERVICE_AUTO_START,
+    SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
+    SERVICE_CONFIG_DESCRIPTION, SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_CONTROL_STOP,
+    SERVICE_DELAYED_AUTO_START_INFO, SERVICE_DEMAND_START, SERVICE_DESCRIPTIONW,
+    SERVICE_DISABLED, SERVICE_ERROR, SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONSW,
+    SERVICE_NO_CHANGE, SERVICE_QUERY_STATUS, SERVICE_START, SERVICE_START_TYPE,
     SERVICE_STATUS, SERVICE_STOP, SERVICE_STOPPED, SERVICE_WIN32_OWN_PROCESS, StartServiceW,
 };
 // SERVICE_INTERACTIVE_PROCESS 位于 SystemServices（u32 位标志，非 ENUM_SERVICE_TYPE）
@@ -419,6 +420,113 @@ pub(crate) fn do_stop(svc_name: &str) -> bool {
             false
         }
     }
+}
+
+/// -m --refresh <name>: 从已部署配置重新同步 SCM 服务注册属性（对应 WinSW refresh）。
+/// 不重建服务、不触碰 ImagePath/部署文件——显示名/描述/启动类型/依赖/账户/故障恢复/
+/// 延迟启动/交互标志/SDDL 全部按 .osiml（inplace 为 exe 旁同名 toml）重写
+pub(crate) fn refresh_service(svc_name: &str) -> Result<(), String> {
+    if !is_valid_service_name(svc_name) {
+        return Err(f(INVALID_NAME_MSG, &[svc_name]));
+    }
+    // 配置来源: 平台部署读 svcs\<name>\<name>.osiml；inplace 读 exe 旁同名 toml
+    let config_path = if is_osmium_deployed(svc_name) {
+        deployed_config_path(svc_name)
+    } else if is_inplace_service(svc_name) {
+        let image = get_service_image_path(svc_name).unwrap_or_default();
+        crate::service_host::config_path_next_to(Path::new(image.trim_matches('"')))
+    } else {
+        return Err(f("Service '{0}' is not managed by Osmium. Use --list to see registered services.", &[svc_name]));
+    };
+    if !config_path.exists() {
+        return Err(f("Service config file not found: {0}. Reinstall the service if the file is missing.", &[&config_path.display().to_string()]));
+    }
+    let config = load_config(&config_path);
+
+    let (start_mode, delayed_auto) = parse_start_mode(config.service_start_mode.as_deref());
+    let failure_reset = if config.failure_reset_sec > 0 { config.failure_reset_sec } else { 86400 };
+    let restart_delay = if config.restart_delay_ms > 0 { config.restart_delay_ms } else { 60000 };
+
+    unsafe {
+        let name_wide = to_wide(svc_name);
+        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
+            .map_err(|e| format!("{}: {e}", "Failed to open service control manager"))?;
+        let svc = OpenServiceW(scm, PCWSTR::from_raw(name_wide.as_ptr()), windows::Win32::System::Services::SERVICE_ALL_ACCESS)
+            .map_err(|e| format!("{}: {e}", "Failed to open service"))?;
+
+        // 宽字符串必须保持存活直到 ChangeServiceConfigW 调用完成
+        let dep_str = build_dependency_string(config.service_dependencies.as_deref());
+        let dep_wide = dep_str.as_deref().map(to_wide);
+        let dep_pcwstr = dep_wide.as_deref()
+            .map(|w| PCWSTR::from_raw(w.as_ptr()))
+            .unwrap_or(PCWSTR::null());
+        let account_wide = config.service_account.as_deref().map(to_wide);
+        let account_pcwstr = account_wide.as_deref()
+            .map(|w| PCWSTR::from_raw(w.as_ptr()))
+            .unwrap_or(PCWSTR::null());
+        let password_wide = config.service_password.as_deref().map(to_wide);
+        let password_pcwstr = password_wide.as_deref()
+            .map(|w| PCWSTR::from_raw(w.as_ptr()))
+            .unwrap_or(PCWSTR::null());
+        let display_wide = to_wide(&config.service_display_name);
+
+        // 服务类型: interactive 标志按配置重算（ImagePath/错误控制保持 SERVICE_NO_CHANGE）
+        let mut service_type = SERVICE_WIN32_OWN_PROCESS;
+        if config.interactive {
+            service_type |= ENUM_SERVICE_TYPE(SERVICE_INTERACTIVE_PROCESS);
+        }
+        let change = ChangeServiceConfigW(
+            svc,
+            service_type,
+            start_mode,
+            SERVICE_ERROR(SERVICE_NO_CHANGE),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            None,
+            dep_pcwstr,
+            account_pcwstr,
+            password_pcwstr,
+            PCWSTR::from_raw(display_wide.as_ptr()),
+        );
+        if let Err(e) = change {
+            let _ = CloseServiceHandle(svc);
+            let _ = CloseServiceHandle(scm);
+            return Err(format!("{}: {e}", "Failed to update service configuration"));
+        }
+
+        // 描述/故障恢复/延迟启动/SDDL: 统一闭包内执行，失败统一关句柄后传播
+        let apply = (|| -> Result<(), String> {
+            let desc_wide = to_wide(&config.service_description);
+            let desc_info = SERVICE_DESCRIPTIONW {
+                lpDescription: PWSTR::from_raw(desc_wide.as_ptr() as *mut _),
+            };
+            ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, Some(&desc_info as *const _ as *const _))
+                .map_err(|e| format!("{}: {e}", "Failed to set service description"))?;
+            if failure_reset > 0 {
+                set_failure_actions(svc, failure_reset as u32, restart_delay as u32, config.failure_action.as_deref())?;
+            }
+            // 延迟启动: 显式按配置写入 true/false（refresh 需精确同步）
+            let delay_info = SERVICE_DELAYED_AUTO_START_INFO { fDelayedAutostart: delayed_auto.into() };
+            ChangeServiceConfig2W(svc, SERVICE_CONFIG_DELAYED_AUTO_START_INFO, Some(&delay_info as *const _ as *const _))
+                .map_err(|e| format!("{}: {e}", "Failed to set delayed auto start"))?;
+            if let Some(sddl) = config.security_descriptor.as_deref() {
+                apply_service_sddl(svc, sddl)
+                    .map_err(|e| format!("{}: {e}", "Failed to set service security descriptor"))?;
+            }
+            Ok(())
+        })();
+        let _ = CloseServiceHandle(svc);
+        let _ = CloseServiceHandle(scm);
+        apply?;
+    }
+
+    // allow_service_logon: 使用自定义账户时授予"作为服务登录"权限（失败仅告警，与 install 一致）
+    if config.allow_service_logon
+        && let Some(account) = config.service_account.as_deref()
+    {
+        grant_service_logon_right(account);
+    }
+    Ok(())
 }
 
 // ==================== 输出 / 错误 ====================
