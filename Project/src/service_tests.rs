@@ -2717,5 +2717,39 @@ fn write_log_line_appends_dated_entry() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ==================== 安装更新保留日志（install 更新不丢 logs） ====================
+
+#[test]
+fn backup_restore_logs_preserves_log_dir() {
+    // install 更新: logs 先挪出系统临时目录，删除宿主目录后还原，内容完整
+    let dir = unique_temp_dir("logs_keep");
+    let logs = dir.join("logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    std::fs::write(logs.join("2026-08-18.log"), "keep-me").unwrap();
+
+    let backup = crate::service_core::backup_logs_dir(&dir, "logs_keep");
+    assert!(backup.is_some(), "有 logs 时应成功挪出");
+    assert!(!logs.exists(), "挪出后原目录应消失");
+
+    // 模拟 force_remove_service 删除宿主目录后还原
+    std::fs::remove_dir_all(&dir).unwrap();
+    crate::service_core::restore_logs_dir(&dir, backup);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("logs").join("2026-08-18.log")).unwrap(),
+        "keep-me",
+        "还原后日志内容应完整"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn backup_logs_returns_none_without_logs_dir() {
+    // 无 logs 目录（首次安装）时不应产生备份，还原为空操作
+    let dir = unique_temp_dir("logs_none");
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(crate::service_core::backup_logs_dir(&dir, "logs_none").is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 
 

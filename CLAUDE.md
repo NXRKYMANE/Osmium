@@ -25,6 +25,11 @@
 - 顺带修复真 bug：共享宿主（-internal --run）异常重启路径 `load_deployed_config` 原来读**宿主 exe 旁配置**（Program Files\Osmium\os.toml 不存在 → 重启必失败），改为优先用启动时记录的 config_path（svcs\<name>\<name>.osiml）；真机验证 kill 后 5s 延迟重启成功拉起新子进程
 - 真机验证全链路（ping -t localhost 常驻 → kill 进程消失 → 宿主按 restart 动作恢复）；144 全过、clippy 零警告；2 README 命令表/别名行同步；边缘测试 +2（两层进程树匹配杀整树、未知服务 Ok(0)）
 
+## v26.7.2（2026-08-18）· 修复 --install 更新删除服务日志
+- 事故：`--install` 更新已注册服务时 `force_remove_service(&svc_name, true)` 删除整个 svcs\<name> 目录（含 logs），重装/升级后历史日志全部丢失（Hydride 安装器已改 --stop 仍复现，根因在此）
+- 修复：更新分支先 `backup_service_logs`（logs 挪到系统临时目录 `osmium-logs-backup-<name>`）→ force_remove_service 重建 → `restore_service_logs` 还原回新目录；新增底层可测函数 `backup_logs_dir`/`restore_logs_dir`（pub(crate)，tag 保证备份路径唯一）；无 logs（首次安装）不产生备份，挪出失败保持旧行为
+- 测试：+2（backup_restore_logs_preserves_log_dir 完整还原、backup_logs_returns_none_without_logs_dir），146 全过、clippy 零警告
+
 ## v26.7.1（2026-08-18）· 新增 --refresh 命令（对应 WinSW refresh）
 - `os --refresh <name>`（简写 `--rfs`）：从已部署配置重新同步 SCM 服务注册属性，不重建服务、不触碰 ImagePath/部署文件——显示名/描述/启动类型/依赖/账户密码/故障恢复/延迟启动/交互标志/SDDL 全部按 .osiml（inplace 为 exe 旁同名 toml）重写；allow_service_logon 同步授权
 - 实现：`service_core::refresh_service` 用 `ChangeServiceConfigW`（含 lpDisplayName 显示名，windows crate 0.62 签名带该参数）+ 闭包内 ChangeServiceConfig2W（描述/故障恢复/延迟启动显式 true/false/SDDL）统一关句柄；OpenServiceW 须 `SERVICE_ALL_ACCESS`（SERVICE_CHANGE_CONFIG 设 failure actions 会拒绝访问 0x80070005）

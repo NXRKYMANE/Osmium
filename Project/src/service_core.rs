@@ -290,7 +290,11 @@ pub(crate) fn install_from_config_path(config_path_str: &str) {
                 error(&f(ALREADY_REGISTERED_MSG, &[&svc_name]));
             }
         }
+        // 更新已注册服务：force_remove_service 会删除整个 svcs 目录（含 logs），
+        // 先临时挪出 logs 到系统临时目录，卸载重建后还原，保证重装不丢日志
+        let logs_backup = backup_service_logs(&svc_name);
         force_remove_service(&svc_name, true);
+        restore_service_logs(&svc_name, logs_backup);
         true
     } else {
         false
@@ -1370,6 +1374,35 @@ fn force_remove_service(svc_name: &str, delete_host_dir: bool) {
     wait_service_deleted(svc_name);
     if delete_host_dir {
         safe_delete_dir(&base_dir(svc_name));
+    }
+}
+
+/// 挪出 svcs\<name>\logs 到系统临时目录（install 更新前调用），无 logs 或挪出失败返回 None
+fn backup_service_logs(svc_name: &str) -> Option<PathBuf> {
+    backup_logs_dir(&base_dir(svc_name), svc_name)
+}
+
+/// install 更新后把备份的 logs 还原回新建的 svcs\<name> 目录
+fn restore_service_logs(svc_name: &str, backup: Option<PathBuf>) {
+    restore_logs_dir(&base_dir(svc_name), backup);
+}
+
+/// 挪出 base\logs 到系统临时目录（供测试复用），tag 用于保证备份路径唯一
+pub(crate) fn backup_logs_dir(base: &Path, tag: &str) -> Option<PathBuf> {
+    let logs = base.join("logs");
+    if !logs.is_dir() {
+        return None;
+    }
+    let backup = std::env::temp_dir().join(format!("osmium-logs-backup-{tag}"));
+    let _ = std::fs::remove_dir_all(&backup);
+    std::fs::rename(&logs, &backup).ok().map(|_| backup)
+}
+
+/// 还原备份的 logs 到 base 目录（目录不存在时先创建）
+pub(crate) fn restore_logs_dir(base: &Path, backup: Option<PathBuf>) {
+    if let Some(b) = backup {
+        let _ = std::fs::create_dir_all(base);
+        let _ = std::fs::rename(&b, base.join("logs"));
     }
 }
 
