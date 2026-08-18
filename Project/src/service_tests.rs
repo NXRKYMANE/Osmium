@@ -1727,14 +1727,14 @@ fn reboot_missing_plugin_reports_error() {
 
 #[test]
 fn discover_plugins_returns_osx_entries_only() {
-    // 扫描环境: 插件目录（exe 同目录 \exts）随运行环境而定——
+    // 扫描环境: 插件目录（exe 同级）随运行环境而定——
     // 未安装插件时为空；若存在插件则逐项校验扩展名与目录跳过规则
     let plugins = crate::service_host::discover_plugins();
     for p in &plugins {
         assert_eq!(p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default(),
                    "osx", "发现的条目必须是 .osx 文件: {}", p.display());
     }
-    // 安装环境（Publish\exts 存在真实插件）时不应发现隐藏目录条目
+    // 安装环境（Publish 存在真实插件）时不应发现隐藏目录条目
     let names: Vec<String> = plugins.iter().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned()).collect();
     assert!(!names.iter().any(|n| n.starts_with('.')), "不得包含隐藏条目: {names:?}");
 }

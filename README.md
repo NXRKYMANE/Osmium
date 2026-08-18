@@ -395,7 +395,7 @@ The installer automatically registers a **Service Updater** (`Osmium Service Che
 5. **Auto-stop** — The service stops itself after one full scan; it does not stay resident.
 6. **Removal (uninstall time)** — The Inno Setup uninstaller calls `os.exe -internal --uninstall-updater` to stop and remove the service.
 
-> A **system reboot** is required after installation for the Service Updater to run on the next boot.
+> The Service Updater runs at the next boot; the installer also restarts previously stopped services immediately after install.
 
 ## Build
 
@@ -442,7 +442,7 @@ The installer places `os.exe` in `%ProgramFiles%\Osmium\` and registers the Cont
 - Automatically registers the boot-time Service Updater (`--install-updater`)
 - Registers an uninstall entry in Windows Control Panel
 - Auto-detects old versions: silently upgrades on newer, prompts to reinstall on identical, warns on downgrade
-- Prompts to reboot after installation
+- Stops services that use `os.exe` before replacing it, then restarts them automatically after install — no reboot prompt
 
 ### Inno Setup Integration Tips
 

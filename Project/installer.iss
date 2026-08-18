@@ -2,7 +2,7 @@
 ; 服务更新程序注册与卸载 / PATH 注册 / 可选扩展组件
 
 #define MyAppName "Osmium"
-#define MyAppVersion "26.7.0"
+#define MyAppVersion "26.7.1"
 #define MyAppPublisher "Copyright (C) 2026 NXRKYMANE SOFTWARE"
 #define MyAppURL "https://github.com/NXRKYMANE/Osmium"
 #define MyAppExeName "os.exe"
@@ -62,7 +62,7 @@ Name: "custom"; Description: "Custom installation"; Flags: iscustom
 [Components]
 ; core 固定必选；osx 扩展默认不勾选（不属于 custom 类型的组件默认取消勾选）
 Name: "core"; Description: "Osmium core (os.exe)"; Types: custom; Flags: fixed
-Name: "osx"; Description: "Official extension kit (osmium-okits.osx)"
+Name: "osx"; Description: "Official extension kit (osmium64-official-kits.osx)"
 
 [CustomMessages]
 english.SameVersionPrompt=An identical version (v%1) is already installed. Reinstall?
@@ -75,8 +75,6 @@ english.UpdaterRemoveFail=Failed to remove service updater.%n%n%1%n%nAbort: exit
 chinesesimp.UpdaterRemoveFail=移除服务更新程序失败。%n%n%1%n%n「终止」退出卸载  「重试」重新尝试  「忽略」跳过并继续
 english.NoOutput=(no output captured; exit code %1)
 chinesesimp.NoOutput=（未捕获到输出；退出码 %1）
-english.RebootPrompt=A reboot is required to complete the installation.%n%nReboot now?
-chinesesimp.RebootPrompt=需要重启系统才能完成安装。%n%n是否立即重启？
 english.InstallCancelled=Installation cancelled.
 chinesesimp.InstallCancelled=安装已取消。
 ; .osiml 文件类型描述统一英文（所有语言均回退到该默认值）
@@ -90,11 +88,11 @@ Name: "{app}\exts"
 
 [Files]
 ; [Setup] CloseApplications=yes 已在覆盖运行中的 os.exe 时自动关闭进程
-Source: "..\Publish\os64.exe"; DestDir: "{app}"; DestName: "os.exe"; Flags: ignoreversion; Components: core; AfterInstall: LogFile('{app}\os.exe')
+Source: "..\Publish\osmium64.exe"; DestDir: "{app}"; DestName: "os.exe"; Flags: ignoreversion; Components: core; AfterInstall: LogFile('{app}\os.exe')
 Source: "..\Misc\Setup.ico"; DestDir: "{app}\icons"; DestName: "osiml.ico"; Flags: ignoreversion; Components: core; AfterInstall: LogFile('{app}\icons\osiml.ico')
 Source: "..\Misc\Extension.ico"; DestDir: "{app}\icons"; DestName: "osx.ico"; Flags: ignoreversion; Components: core; AfterInstall: LogFile('{app}\icons\osx.ico')
 ; 官方扩展组件（默认不勾选）: 安装到 exts 目录，宿主 os.exe 运行时按需调用
-Source: "..\Publish\exts\osmium-okits.osx"; DestDir: "{app}\exts"; Flags: ignoreversion; Components: osx; AfterInstall: LogFile('{app}\exts\osmium-okits.osx')
+Source: "..\Publish\exts\osmium64-official-kits.osx"; DestDir: "{app}\exts"; Flags: ignoreversion; Components: osx; AfterInstall: LogFile('{app}\exts\osmium64-official-kits.osx')
 
 ; 卸载: 清空安装目录所有残留（旧版遗留图标/别名等一并删除），保留目录本身
 [UninstallDelete]
@@ -488,11 +486,11 @@ begin
   Result := True;
 end;
 
-// ── 安装前清理（PrepareToInstall 在文件复制前调用）：运行旧版卸载器清理旧服务与旧文件；
-// 静默模式下等待旧 os.exe 退出（避免覆盖运行中文件）
+// ── 安装前清理（PrepareToInstall 在文件复制前调用）：运行旧版卸载器清理旧服务与旧文件，
+// 停止所有引用 os.exe 的服务并等待其退出（避免覆盖运行中的文件）
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  OldVer, OldUninst: String;
+  OldVer, OldUninst, SvcList: String;
   ResultCode: Integer;
 begin
   Result := '';
@@ -515,12 +513,17 @@ begin
     end;
   end;
 
-  // 3. 静默模式: 等待旧 os.exe 完全退出（最长 30 秒）
-  if WizardSilent then
-  begin
-    AddLog('Waiting for os.exe to exit...');
-    WaitForOsmiumExit(30);
-  end;
+  // 3. 停止所有引用 os.exe 的服务（共享宿主/更新程序运行时占用 os.exe，文件无法覆盖替换），
+  // 并把服务名记录到临时文件，安装完成后由 ssPostInstall 重新启动。
+  // WMI StopService() 异步触发：所有服务并行停止（不等单个服务走完优雅流程），
+  // 随后轮询等待全部进入 Stopped（总超时 3 分钟，覆盖 poststop 钩子/停止超时），失败容忍
+  SvcList := ExpandConstant('{tmp}\osmium-svc-list.txt');
+  AddLog('Stopping services that use os.exe...');
+  Exec('powershell.exe', '-NoProfile -NonInteractive -Command "$svcs = Get-WmiObject Win32_Service | Where-Object { $_.PathName -match ''os\.exe'' }; $svcs.Name | Set-Content ''' + SvcList + '''; $svcs | ForEach-Object { $_.StopService() } | Out-Null; $deadline = (Get-Date).AddMinutes(3); do { $running = Get-WmiObject Win32_Service | Where-Object { $svcs.Name -contains $_.Name -and $_.State -ne ''Stopped'' }; if (-not $running) { break }; Start-Sleep -Seconds 2 } while ((Get-Date) -lt $deadline)"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  // 4. 等待旧 os.exe 完全退出（最长 30 秒），避免覆盖运行中的 exe
+  AddLog('Waiting for os.exe to exit...');
+  WaitForOsmiumExit(30);
 
   AddLog('Cleanup done.');
 end;
@@ -554,6 +557,7 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
+  SvcList: String;
 begin
   if CurStep = ssInstall then
     AddLog('Starting installation...')
@@ -562,16 +566,19 @@ begin
     // exts 插件目录安全加固: 宿主以 LocalSystem 执行 exts 下 .osx 插件，
     // 目录/文件须仅 SYSTEM/Administrators 可写，否则任意登录用户可替换插件获得 SYSTEM 提权（P0）
     SecureExtsDir;
-    ConfigureService
+    ConfigureService;
+    // 重新启动安装前被停止的服务（共享宿主/更新程序已由新版 os.exe 接管，无需重启系统）。
+    // WMI StartService() 异步触发即返回：安装器不被慢启动服务阻塞（宿主自身在 SCM 下完成
+    // 下载/钩子等流程），失败容忍
+    SvcList := ExpandConstant('{tmp}\osmium-svc-list.txt');
+    if FileExists(SvcList) then
+    begin
+      AddLog('Restarting previously stopped services...');
+      Exec('powershell.exe', '-NoProfile -NonInteractive -Command "if (Test-Path ''' + SvcList + ''') { Get-Content ''' + SvcList + ''' | Where-Object { $_.Trim() -ne '''' } | ForEach-Object { $n = $_.Trim(); $s = Get-WmiObject Win32_Service | Where-Object { $_.Name -eq $n }; if ($s) { $s.StartService() | Out-Null } } }"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    end;
   end
   else if CurStep = ssDone then
-  begin
     AddLog('Installation complete.');
-    // 非静默: 重启提示（与 NSI 一致，安装完成即询问是否重启）
-    if not WizardSilent then
-      if MsgBox(CustomMessage('RebootPrompt'), mbConfirmation, MB_YESNO) = IDYES then
-        Exec(ExpandConstant('{sys}\shutdown.exe'), '/r /t 0', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  end;
 end;
 
 // ── 卸载：移除服务更新程序；失败弹「终止 / 重试 / 忽略」──

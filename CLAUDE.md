@@ -19,6 +19,13 @@
 - 重大修改和调优前记得备份一个,已经多次发生翻车事故造成项目从头来的情况
 # 项目记录
 
+## v26.7.1（2026-08-18）· 资产重命名 + 插件发现放宽 + 安装器无重启升级
+- 资产重命名（与元素锇全称统一）：`os64.exe` → `osmium64.exe`、`os-upx.exe` → `osmium64-upx.exe`、`osmium-okits.osx` → `exts\osmium64-official-kits.osx`（BUILD.ps1 输出/签名/提示 + installer.iss Source/组件描述同步；安装后仍改名 `os.exe`）
+- 插件发现放宽：`plugin_dir()` 从 exe 同级 `exts` 改为 **exe 所在目录本身**，递归扫描全部 `.osx`（仅跳过 `.` 开头隐藏目录）——独立部署不再强制 exts 子目录；平台安装仍装 `{app}\exts`；run_plugin 缺失错误消息同步
+- 安装器修复 os.exe 占用：PrepareToInstall 新增"停止所有 ImagePath 含 os.exe 的 SCM 服务"（PowerShell 枚举），等待退出从仅静默模式改为全部模式
+- 取消安装后重启提示（删 RebootPrompt 消息 + ssDone shutdown）：停止服务时服务名写入 `{tmp}\osmium-svc-list.txt`，ssPostInstall 自动重启全部——WMI `StopService()` 并行停止 + 轮询等 Stopped（总超时 3 分钟，防 N 服务串行叠加），`StartService()` 异步触发不等待（防慢启动服务阻塞安装器）
+- 版本升至 26.7.1；2 README 安装器特性/重启说明同步；139 + 24/1 全过、ISCC 编译通过、真机验证停止/重启链路（hydride_svc64 停止 4.6s → 重启 2s 返回恢复 Running）
+
 ## v26.7.0（2026-08-18）· 代码签名（Authenticode）集成
 - 生成自签名代码签名证书（CN=Osmium Dev Signing，2026-08 起 5 年，RSA2048/SHA256，CodeSigning EKU），导出 `Misc\codesign.pfx`（固定密码，`.gitignore` 排除，绝不提交）；signtool 用 `F:\DevTools\Windows11 SDK\bin\10.0.28000.0\x64\signtool.exe`
 - BUILD.ps1 集成签名：`Get-SignCert` 证书来源优先级——环境变量 `OSMIUM_CERT_PFX`（+可选 `OSMIUM_CERT_PASSWORD`）→ 仓库 `Misc\codesign.pfx`；`Sign-File` 用 `/fd SHA256 + RFC 3161 时间戳`（DigiCert → Sectigo → Comodoca 依次回退，全不可达时无时间戳签名并告警）；签名对象：os64.exe、exts\osmium-okits.osx、安装包（ISCC 编译后）、os-upx.exe

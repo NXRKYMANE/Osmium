@@ -297,7 +297,7 @@ pub struct ServiceConfig {
     // ==================== 生命周期插件调用（可选） ====================
 
     /// 生命周期插件调用（多条），phase 与 extensions 相同四阶段；
-    /// 按 kit 分发到 exts\*.osx 插件（stdin/stdout JSON 协议），第三方插件无需改宿主代码
+    /// 按 kit 分发到 exe 同级 .osx 插件（stdin/stdout JSON 协议），第三方插件无需改宿主代码
     #[serde(rename = "plugins", default)]
     pub plugins: Option<Vec<PluginCallConfig>>,
 
@@ -358,7 +358,7 @@ pub struct ExtensionConfig {
     pub stderr_path: Option<String>,
 }
 
-/// 生命周期插件调用配置: 按 kit 分发到 exts\*.osx 插件（stdin 单行 JSON，
+/// 生命周期插件调用配置: 按 kit 分发到 exe 同级 .osx 插件（stdin 单行 JSON，
 /// 响应 stdout 单行 JSON ok:true/false）；payload 合并进请求 JSON 根对象透传
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginCallConfig {

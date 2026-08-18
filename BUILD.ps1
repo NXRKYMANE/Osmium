@@ -1,4 +1,4 @@
-# Osmium 一键构建: Rust 构建与测试 + 官方插件 + 安装包
+﻿# Osmium 一键构建: Rust 构建与测试 + 官方插件 + 安装包
 # 用法: .\BUILD.ps1 [-SkipTests] [-Upx] [-SkipSign]
 
 param(
@@ -117,20 +117,20 @@ try {
 $publishDir = Join-Path $ProjectRoot "Publish"
 New-Item -ItemType Directory -Force -Path $publishDir | Out-Null
 Get-ChildItem $publishDir -Force | Remove-Item -Recurse -Force
-# 主程序: osmium64.exe → os64.exe（安装时改名为 os.exe）
-Copy-Item (Join-Path $ProjectRoot "target\release\osmium64.exe") (Join-Path $publishDir "os64.exe") -Force
-# 官方插件: osmium-kit.exe → exts\osmium-okits.osx
+# 主程序: 直接以 osmium64.exe 输出（安装时改名为 os.exe）
+Copy-Item (Join-Path $ProjectRoot "target\release\osmium64.exe") (Join-Path $publishDir "osmium64.exe") -Force
+# 官方插件: osmium-kit.exe → exts\osmium64-official-kits.osx
 $extDir = Join-Path $publishDir "exts"
 New-Item -ItemType Directory -Force -Path $extDir | Out-Null
-Copy-Item (Join-Path $ProjectRoot "target\release\osmium-kit.exe") (Join-Path $extDir "osmium-okits.osx") -Force
+Copy-Item (Join-Path $ProjectRoot "target\release\osmium-kit.exe") (Join-Path $extDir "osmium64-official-kits.osx") -Force
 
-# 4.5 代码签名: os64.exe + osmium-okits.osx（安装包在第 6 步编译完成后签名）
+# 4.5 代码签名: osmium64.exe + osmium64-official-kits.osx（安装包在第 6 步编译完成后签名）
 $signCert = $null
 if (-not $SkipSign) {
     $signCert = Get-SignCert
     if ($signCert) {
-        Sign-File (Join-Path $publishDir "os64.exe") $signCert
-        Sign-File (Join-Path $extDir "osmium-okits.osx") $signCert
+        Sign-File (Join-Path $publishDir "osmium64.exe") $signCert
+        Sign-File (Join-Path $extDir "osmium64-official-kits.osx") $signCert
     } else {
         Write-Warning "No code-signing certificate found (OSMIUM_CERT_PFX or Misc\codesign.pfx), skipping signature."
     }
@@ -155,12 +155,12 @@ $setupName = "osmium-win-x64-setup-v$rsVersion.exe"
 if ($signCert) {
     Sign-File (Join-Path $publishDir $setupName) $signCert
 }
-Write-Host "Done: Publish\os64.exe" -ForegroundColor Green
-Write-Host "Done: Publish\exts\osmium-okits.osx" -ForegroundColor Green
+Write-Host "Done: Publish\osmium64.exe" -ForegroundColor Green
+Write-Host "Done: Publish\exts\osmium64-official-kits.osx" -ForegroundColor Green
 Write-Host "Done: Publish\$setupName" -ForegroundColor Green
 
 # 7. 可选: UPX 压缩版本 (opt-level="z" 体积优先 + UPX --ultra-brute --lzma)
-# 仅生成 Publish\os-upx.exe, 不覆盖普通版, 也不生成安装包
+# 仅生成 Publish\osmium64-upx.exe, 不覆盖普通版, 也不生成安装包
 $upxPath = "F:\DevTools\UPX\upx.exe"
 if (Test-Path $upxPath) {
     # -Upx 参数强制生成；否则交互询问（非交互终端自动跳过）
@@ -194,10 +194,10 @@ if (Test-Path $upxPath) {
             Copy-Item "$ProjectRoot\target\release\osmium64.exe" $upxTmp -Force
             & $upxPath --ultra-brute --lzma $upxTmp
             if ($LASTEXITCODE -ne 0) { throw "UPX compression failed" }
-            Copy-Item $upxTmp (Join-Path $publishDir "os-upx.exe") -Force
+            Copy-Item $upxTmp (Join-Path $publishDir "osmium64-upx.exe") -Force
             Remove-Item $upxTmp -Force
-            if ($signCert) { Sign-File (Join-Path $publishDir "os-upx.exe") $signCert }
-            Write-Host "Done: Publish\os-upx.exe" -ForegroundColor Green
+            if ($signCert) { Sign-File (Join-Path $publishDir "osmium64-upx.exe") $signCert }
+            Write-Host "Done: Publish\osmium64-upx.exe" -ForegroundColor Green
         } finally {
             # 恢复 opt-level = 3 (速度优先, 供下次普通构建使用)
             $cargo = Get-Content $cargoPath -Raw

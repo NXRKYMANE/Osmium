@@ -875,7 +875,7 @@ impl ServiceHost {
         }
     }
 
-    /// 执行指定阶段的全部生命周期插件调用（exts\*.osx，kit 分发 + payload 透传）;
+    /// 执行指定阶段的全部生命周期插件调用（exe 同级 .osx，kit 分发 + payload 透传）;
     /// phase 兼容规则同 extensions；fail_on_error=true 时返回 Err（start 阶段阻断启动），
     /// 否则失败仅告警不阻断
     fn run_plugin_calls(&self, plugins: Option<&[crate::service_config::PluginCallConfig]>, phase: &str) -> Result<(), String> {
@@ -1586,20 +1586,20 @@ fn sspi_download_via_plugin(
     }
 }
 
-// ==================== 插件调用（exts\*.osx） ====================
+// ==================== 插件调用（exe 同级 .osx） ====================
 
-/// 插件目录: exe 同级 exts 子目录
+/// 插件根目录: exe 所在目录（独立部署/平台安装通用——不强制 exts 子目录）
 fn plugin_dir() -> PathBuf {
     Path::new(&crate::service_core::get_own_path())
         .parent()
-        .map(|p| p.join("exts"))
-        .unwrap_or_else(|| PathBuf::from("exts"))
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// 插件文件是否可信: 信任锚点 = 宿主 exe 自身位置——
-/// 宿主位于用户可写目录（inplace 集成部署 / 开发者目录）时，插件与 exe 同级，
+/// 宿主位于用户可写目录（inplace 集成部署 / 开发者目录）时，插件与 exe 同级或在其子目录，
 /// 攻击面与宿主一致（能替换插件的攻击者同样能替换 exe），不额外增加风险，直接放行；
-/// 宿主位于受保护位置（如 Program Files）时，严格要求 exts 目录及插件文件
+/// 宿主位于受保护位置（如 Program Files）时，严格要求插件所在目录及插件文件
 /// 仅 SYSTEM/Administrators 可写（对齐 secure_directory 语义，防任意登录用户
 /// 替换插件获得 SYSTEM 提权，P0）。校验失败返回错误原因，调用方拒绝执行该插件
 fn plugin_path_trusted(path: &Path) -> Result<(), String> {
@@ -1621,7 +1621,7 @@ fn plugin_path_trusted(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 递归扫描 exts 下所有 .osx 插件（跳过名称以 . 开头的目录，防隐藏目录混入）
+/// 递归扫描 exe 同级目录下所有 .osx 插件（跳过名称以 . 开头的隐藏目录，防混入）
 pub(crate) fn discover_plugins() -> Vec<PathBuf> {
     let mut out = Vec::new();
     scan_plugin_dir(&plugin_dir(), &mut out);
@@ -1660,16 +1660,16 @@ pub(crate) fn plugin_usable(path: &Path) -> bool {
     invoke_plugin(path, "ping", &serde_json::json!({})).is_ok()
 }
 
-/// 运行插件: 遍历 exts 下全部 .osx，喂 stdin JSON（kit 字段分发），首个 ok=true 即成功；
+/// 运行插件: 遍历 exe 同级发现的全部 .osx，喂 stdin JSON（kit 字段分发），首个 ok=true 即成功；
 /// 全部失败返回最后一个错误；ACL 不可信的插件（任意用户可写）跳过执行并告警（P0 防提权）
 pub(crate) fn run_plugin(kit: &str, payload: &serde_json::Value) -> Result<(), String> {
     let plugins = discover_plugins();
     if plugins.is_empty() {
-        return Err(f("plugin '{0}' not found (exts\\*.osx missing)", &[kit]));
+        return Err(f("plugin '{0}' not found (no .osx plugin next to the executable)", &[kit]));
     }
     let mut last_err = String::from("no plugin responded ok");
     for plugin in &plugins {
-        // 信任校验: exts 目录/插件文件被非管理员可写 → 拒绝执行（防恶意插件替换提权）
+        // 信任校验: 插件目录/文件被非管理员可写 → 拒绝执行（防恶意插件替换提权）
         if let Err(reason) = plugin_path_trusted(plugin) {
             last_err = f("plugin '{0}' skipped: {1}", &[&plugin.display().to_string(), &reason]);
             continue;
