@@ -332,6 +332,32 @@ pub struct ServiceConfig {
     #[serde(rename = "shared_directory_mappers", default)]
     pub shared_directory_mappers: Option<Vec<SharedMapperConfig>>,
 
+    // ==================== 效率模式（EcoQoS，可选） ====================
+
+    /// 子进程效率模式: none（默认）| always（常开）| auto（空闲进/繁忙退）
+    #[serde(rename = "eco_qos", default)]
+    pub eco_qos: Option<String>,
+
+    /// auto 模式: 空闲进入阈值（CPU %），默认 10
+    #[serde(rename = "eco_qos_idle_cpu_pct", default)]
+    pub eco_qos_idle_cpu_pct: Option<f64>,
+
+    /// auto 模式: 繁忙退出阈值（CPU %），默认 30
+    #[serde(rename = "eco_qos_busy_cpu_pct", default)]
+    pub eco_qos_busy_cpu_pct: Option<f64>,
+
+    /// 宿主自身效率模式: none（默认）| always | auto（自身 CPU 低进/高退 + 子进程繁忙联动退出）
+    #[serde(rename = "host_eco_qos", default)]
+    pub host_eco_qos: Option<String>,
+
+    /// 宿主 auto: 空闲进入阈值（CPU %），默认 5
+    #[serde(rename = "host_eco_qos_idle_cpu_pct", default)]
+    pub host_eco_qos_idle_cpu_pct: Option<f64>,
+
+    /// 宿主 auto: 繁忙退出阈值（CPU %），默认 20
+    #[serde(rename = "host_eco_qos_busy_cpu_pct", default)]
+    pub host_eco_qos_busy_cpu_pct: Option<f64>,
+
     // ==================== SCM 上报（可选） ====================
 
     /// SCM 状态上报 dwWaitHint（毫秒），默认 3600000（1 小时）；

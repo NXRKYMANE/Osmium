@@ -10,7 +10,7 @@
   <img src="https://komarev.com/ghpvc/?username=NXRKYMANE&repo=Osmium&label=Views&color=00BFFF&style=flat" />
 </p>
 
-Register any executable or script as a Win32 system service. [中文文档](Docs/README_CN.md)
+Register any executable or script as a Win32 system service. [中文文档](README_CN.md)
 
 > The project is based on [WinSW 2](https://github.com/winsw/winsw).
 > Osmium keeps most of WinSW's features, written in **Rust**, with some advanced features provided through OSX plugins so they can be extended whenever needed.
@@ -149,6 +149,17 @@ service_executable_path = 'C:\app\myapp.exe'
 | `runaway_stop_timeout_ms`     | int    | `5000`  | Graceful-stop timeout for the leftover process during startup cleanup, then force-kill                                                                                                                                                                                                             |
 | `runaway_stop_parent_first`   | bool   | `false` | During startup cleanup, kill the parent process before its children                                                                                                                                                                                                                                |
 | `shared_directory_mappers`    | array  | none    | SharedDirectoryMapper: map network shares at service start and disconnect at stop: `[{ local_path = "Z:", remote_path = "\\\\server\\share", username?, password? }]`                                                                                                                              |
+
+### Advanced — Efficiency Mode (EcoQoS)
+
+| Field                        | Type  | Default | Description                                                                                                                                                                                                          |
+| --- | --- | --- | --- |
+| `eco_qos`                    | string | `none`  | Child-process efficiency mode (Task Manager "efficiency mode", ProcessPowerThrottling): `none` (no interference) / `always` (on at start) / `auto` (enter when idle, exit when busy)                                    |
+| `eco_qos_idle_cpu_pct`       | float | `10`    | `auto`: enter efficiency mode after 2 consecutive samples below this CPU %                                                                                                                                            |
+| `eco_qos_busy_cpu_pct`       | float | `30`    | `auto`: exit efficiency mode when CPU rises above this %                                                                                                                                                              |
+| `host_eco_qos`               | string | `none`  | Host process efficiency mode: `none` / `always` / `auto` (enter when the host's own CPU is low; exits when the host or the child gets busy)                                                                           |
+| `host_eco_qos_idle_cpu_pct`  | float | `5`     | `auto`: host enters after 2 consecutive samples below this CPU %                                                                                                                                                      |
+| `host_eco_qos_busy_cpu_pct`  | float | `20`    | `auto`: host exits when its own CPU rises above this %, or when the child exceeds `eco_qos_busy_cpu_pct` (linked exit during heavy work)                                                                             |
 
 ### Advanced — Pre-Start Download
 
@@ -493,7 +504,6 @@ Osmium/
 │   ├── Extension.ico          # .osx plugin icon (installed as icons\osx.ico)
 │   └── Extension.png          # .osx icon source
 ├── Docs/                      # Documentation
-│   ├── README_CN.md           # Chinese documentation
 │   ├── EXTENSION_CN.md        # Plugin development & usage guide (CN)
 │   └── EXTENSION_EN.md        # Plugin development & usage guide (EN)
 ├── Publish/                   # Build artifacts (exe + installer, not committed)
@@ -504,6 +514,7 @@ Osmium/
 ├── CONTRIBUTING.md            # Contributing guidelines
 ├── SECURITY.md                # Security policy
 ├── LICENSE                    # License
+├── README_CN.md               # Chinese documentation
 └── README.md                  # English documentation
 ```
 

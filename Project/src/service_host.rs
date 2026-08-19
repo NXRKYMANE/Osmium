@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Read, Write};
+﻿use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -41,6 +41,25 @@ const HOOK_PRESTART_TIMEOUT_MS: u64 = 60_000;
 const HOOK_POSTSTOP_TIMEOUT_MS: u64 = 30_000;
 /// 下载超时（秒），覆盖整个下载过程
 const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
+
+/// 效率模式（EcoQoS）档位: None 不干预 | Always 常开 | Auto 空闲进/繁忙退
+#[derive(PartialEq, Clone, Copy)]
+pub(crate) enum EcoQosMode {
+    None,
+    Always,
+    Auto,
+}
+
+impl EcoQosMode {
+    /// 解析配置值（大小写不敏感）; 未知/缺失 → None
+    fn parse(value: Option<&str>) -> Self {
+        match value.map(|s| s.to_lowercase()).as_deref() {
+            Some("always") => EcoQosMode::Always,
+            Some("auto") => EcoQosMode::Auto,
+            _ => EcoQosMode::None,
+        }
+    }
+}
 
 // ==================== 宿主配置路径 ====================
 
@@ -98,6 +117,27 @@ pub struct ServiceHost {
     runaway_last_sample: Option<(u32, u64, Instant)>,
     /// 上次 RunawayProcessKiller 检查时刻
     runaway_last_check: Option<Instant>,
+    /// 子进程效率模式（EcoQoS）: None | Always | Auto
+    eco_qos_mode: EcoQosMode,
+    /// 子进程 auto: 空闲进入阈值（CPU %）与繁忙退出阈值（CPU %）
+    eco_qos_idle_pct: f64,
+    eco_qos_busy_pct: f64,
+    /// 子进程当前是否处于效率模式 + 连续低占用采样计数
+    eco_qos_active: bool,
+    eco_qos_idle_streak: u32,
+    /// 子进程效率模式采样（独立于 runaway，auto 模式无条件采样）
+    child_eco_sample: Option<(u32, u64, Instant)>,
+    /// 宿主自身效率模式（EcoQoS）: None | Always | Auto
+    host_eco_qos_mode: EcoQosMode,
+    /// 宿主 auto: 空闲进入阈值（CPU %）与繁忙退出阈值（CPU %）
+    host_eco_qos_idle_pct: f64,
+    host_eco_qos_busy_pct: f64,
+    /// 宿主当前是否处于效率模式 + 连续低占用采样计数 + 上次宿主采样
+    host_eco_qos_active: bool,
+    host_eco_qos_idle_streak: u32,
+    host_eco_qos_sample: Option<(u64, Instant)>,
+    /// 子进程 CPU 采样（宿主 auto 联动判定: 子进程繁忙时宿主退出效率模式）
+    host_child_sample: Option<(u32, u64, Instant)>,
     /// 最后一次子进程 PID（供 poststop 钩子注入环境变量）
     last_child_pid: u32,
     /// 最后一次子进程退出码
@@ -173,6 +213,19 @@ impl ServiceHost {
             runaway_stop_parent_first: false,
             runaway_last_sample: None,
             runaway_last_check: None,
+            eco_qos_mode: EcoQosMode::None,
+            eco_qos_idle_pct: 10.0,
+            eco_qos_busy_pct: 30.0,
+            eco_qos_active: false,
+            eco_qos_idle_streak: 0,
+            child_eco_sample: None,
+            host_eco_qos_mode: EcoQosMode::None,
+            host_eco_qos_idle_pct: 5.0,
+            host_eco_qos_busy_pct: 20.0,
+            host_eco_qos_active: false,
+            host_eco_qos_idle_streak: 0,
+            host_eco_qos_sample: None,
+            host_child_sample: None,
             last_child_pid: 0,
             last_child_exit_code: -1,
             consecutive_failures: 0,
@@ -257,6 +310,10 @@ impl ServiceHost {
         }
         // SharedDirectoryMapper: 服务启动时映射网络共享目录（失败仅告警，不阻断启动）
         self.netmap_via_plugin(&config, "map");
+        // 宿主自身效率模式 always: 启动完成后立即进入（auto 由 tick 采样驱动）
+        if self.host_eco_qos_mode == EcoQosMode::Always {
+            let _ = set_eco_qos(std::process::id(), true);
+        }
 
         self.write_log("host", &f("Service starting, config: {0}", &[&config_path.display().to_string()]));
 
@@ -347,6 +404,13 @@ impl ServiceHost {
         self.runaway_cpu_limit = config.runaway_cpu_limit;
         self.runaway_memory_limit_mb = config.runaway_memory_limit_mb;
         self.runaway_check_interval_secs = if config.runaway_check_interval_secs > 0 { config.runaway_check_interval_secs } else { 30 };
+        // 效率模式（EcoQoS）: 子进程与宿主各自独立配置
+        self.eco_qos_mode = EcoQosMode::parse(config.eco_qos.as_deref());
+        self.eco_qos_idle_pct = config.eco_qos_idle_cpu_pct.unwrap_or(10.0);
+        self.eco_qos_busy_pct = config.eco_qos_busy_cpu_pct.unwrap_or(30.0);
+        self.host_eco_qos_mode = EcoQosMode::parse(config.host_eco_qos.as_deref());
+        self.host_eco_qos_idle_pct = config.host_eco_qos_idle_cpu_pct.unwrap_or(5.0);
+        self.host_eco_qos_busy_pct = config.host_eco_qos_busy_cpu_pct.unwrap_or(20.0);
         self.runaway_pid_file = config.runaway_pid_file.as_deref()
             .map(|p| if p.trim().is_empty() { String::new() } else { resolve_deploy_path(p, &self.deploy_dir) })
             .filter(|p| !p.is_empty());
@@ -409,6 +473,8 @@ impl ServiceHost {
                 Ok(Some(status)) => status.code().unwrap_or(-1),
                 Ok(None) => {
                     self.check_runaway();
+                    self.check_child_eco_qos();
+                    self.check_host_eco_qos();
                     // 配置热刷新（autoRefresh）: 配置文件变化时重载并重启子进程
                     if self.auto_refresh {
                         self.check_config_refresh();
@@ -478,6 +544,11 @@ impl ServiceHost {
     /// 停止流程公共路径: 置停止标志 → prestop 钩子 → 停止子进程 → 停止后钩子 → 生命周期扩展 phase=stop
     fn stop_host(&mut self, signal_msg: &str, stopping_msg: &str, done_msg: Option<&str>) {
         self.stopping.store(true, Ordering::SeqCst);
+        // 停止流程前退出宿主效率模式（保证停止/清理不被低调度拖慢）
+        if self.host_eco_qos_active {
+            let _ = set_eco_qos(std::process::id(), false);
+            self.host_eco_qos_active = false;
+        }
         self.write_log("host", signal_msg);
         self.write_log("host", stopping_msg);
         // 停止阶段资源操作需要配置，宿主不常驻整份配置 → 停止流程开始前重读一次
@@ -565,6 +636,96 @@ impl ServiceHost {
                 }
                 self.runaway_last_sample = Some((pid, cpu, now));
             }
+        }
+    }
+
+    /// 子进程 auto 效率模式切换（独立采样，不受 runaway 配置影响）
+    fn check_child_eco_qos(&mut self) {
+        if self.eco_qos_mode != EcoQosMode::Auto { return; }
+        let Some(pid) = self.child.as_ref().map(|c| c.id()) else { return };
+        let now = Instant::now();
+        let Some(cpu) = process_cpu_100ns(pid) else { return };
+        let Some((last_pid, last_cpu, last_at)) = self.child_eco_sample else {
+            self.child_eco_sample = Some((pid, cpu, now));
+            return;
+        };
+        self.child_eco_sample = Some((pid, cpu, now));
+        if last_pid != pid { return; }
+        let wall = now.duration_since(last_at).as_secs_f64();
+        if wall <= 0.5 { return; }
+        let cpu_pct = cpu.saturating_sub(last_cpu) as f64 / 10_000_000.0 / wall * 100.0;
+        if self.eco_qos_active {
+            if cpu_pct > self.eco_qos_busy_pct {
+                if set_eco_qos(pid, false) {
+                    self.write_log("host", &format!("EcoQoS: child exited efficiency mode (CPU {:.1}%)", cpu_pct));
+                }
+                self.eco_qos_active = false;
+            }
+        } else if cpu_pct < self.eco_qos_idle_pct {
+            self.eco_qos_idle_streak += 1;
+            if self.eco_qos_idle_streak >= 2 {
+                if set_eco_qos(pid, true) {
+                    self.write_log("host", &format!("EcoQoS: child entered efficiency mode (CPU {:.1}%)", cpu_pct));
+                }
+                self.eco_qos_active = true;
+                self.eco_qos_idle_streak = 0;
+            }
+        } else {
+            self.eco_qos_idle_streak = 0;
+        }
+    }
+
+    /// 宿主自身 auto 效率模式: 自身 CPU 低（连续 2 次低于 idle）进入、
+    /// 自身或子进程 CPU 高于 busy 退出（子进程繁忙联动，保证密集工作期间宿主全速调度）
+    fn check_host_eco_qos(&mut self) {
+        if self.host_eco_qos_mode == EcoQosMode::None { return; }
+        let now = Instant::now();
+        let host_pid = std::process::id();
+        let Some(cpu) = process_cpu_100ns(host_pid) else { return };
+        let Some((last_cpu, last_at)) = self.host_eco_qos_sample else {
+            self.host_eco_qos_sample = Some((cpu, now));
+            return;
+        };
+        self.host_eco_qos_sample = Some((cpu, now));
+        let wall = now.duration_since(last_at).as_secs_f64();
+        if wall <= 0.5 { return; }
+        let host_pct = cpu.saturating_sub(last_cpu) as f64 / 10_000_000.0 / wall * 100.0;
+        // 子进程 CPU（联动）: 与宿主同间隔采样
+        let mut child_pct = 0.0_f64;
+        if let Some(cid) = self.child.as_ref().map(|c| c.id())
+            && let Some(ccpu) = process_cpu_100ns(cid)
+        {
+            if let Some((lp, lc, la)) = self.host_child_sample
+                && lp == cid
+            {
+                let w = now.duration_since(la).as_secs_f64();
+                if w > 0.5 {
+                    child_pct = ccpu.saturating_sub(lc) as f64 / 10_000_000.0 / w * 100.0;
+                }
+            }
+            self.host_child_sample = Some((cid, ccpu, now));
+        } else {
+            self.host_child_sample = None;
+        }
+        let busy = host_pct > self.host_eco_qos_busy_pct || child_pct > self.eco_qos_busy_pct;
+        if self.host_eco_qos_active {
+            if busy {
+                if set_eco_qos(host_pid, false) {
+                    self.write_log("host", &format!("Host EcoQoS: exited efficiency mode (host CPU {:.1}%, child {:.1}%)", host_pct, child_pct));
+                }
+                self.host_eco_qos_active = false;
+            }
+        } else if host_pct < self.host_eco_qos_idle_pct && child_pct <= self.eco_qos_busy_pct {
+            self.host_eco_qos_idle_streak += 1;
+            if self.host_eco_qos_idle_streak >= 2 {
+                if set_eco_qos(host_pid, true) {
+                    self.write_log("host", &format!("Host EcoQoS: entered efficiency mode (host CPU {:.1}%)", host_pct));
+                }
+                self.host_eco_qos_active = true;
+                self.host_eco_qos_idle_streak = 0;
+            }
+        } else {
+            self.host_eco_qos_idle_streak = 0;
         }
     }
 
@@ -693,6 +854,15 @@ impl ServiceHost {
         self.write_log("host", &f("Child process started, PID: {0}", &[&pid.to_string()]));
         self.child = Some(child);
         self.last_child_pid = pid;
+        // 效率模式 always: 子进程启动后立即进入（auto 由 check_runaway 采样驱动）
+        if self.eco_qos_mode == EcoQosMode::Always {
+            let _ = set_eco_qos(pid, true);
+        } else {
+            // auto 模式: 新子进程重置状态（旧进程的效率模式状态/采样不适用）
+            self.eco_qos_active = false;
+            self.eco_qos_idle_streak = 0;
+            self.child_eco_sample = None;
+        }
         // poststart 钩子（主进程启动后，失败不阻断）
         self.run_extensions("start_after");
         // 生命周期插件 phase=start_after（进程已启动不可回滚，失败仅告警）
@@ -2245,6 +2415,37 @@ pub(crate) fn collect_descendants(root_pid: u32) -> Vec<u32> {
 
 // ==================== 进程采样 / 进程优先级 / 环境展开 / 事件日志 / 自定义停止 ====================
 
+/// 设置进程省电节流（ProcessPowerThrottling，Win10 1709+）: enabled=true 开启
+/// 执行速度节流、false 关闭；失败静默返回 false（旧系统/无权限）
+pub(crate) fn set_eco_qos(pid: u32, enabled: bool) -> bool {
+    use windows::Win32::System::Threading::{
+        OpenProcess, SetProcessInformation, PROCESS_INFORMATION_CLASS, PROCESS_SET_INFORMATION,
+    };
+    // PROCESS_POWER_THROTTLING_STATE: Version=1, ControlMask/StateMask=EXECUTION_SPEED(1)
+    #[repr(C)]
+    struct PowerThrottling {
+        version: u32,
+        control_mask: u32,
+        state_mask: u32,
+    }
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_SET_INFORMATION, false, pid) else { return false };
+        let st = PowerThrottling {
+            version: 1,
+            control_mask: 1,
+            state_mask: if enabled { 1 } else { 0 },
+        };
+        let ok = SetProcessInformation(
+            h,
+            PROCESS_INFORMATION_CLASS(4),
+            &st as *const _ as *const _,
+            size_of::<PowerThrottling>() as u32,
+        )
+        .is_ok();
+        let _ = CloseHandle(h);
+        ok
+    }
+}
 /// 枚举全部进程 PID（Toolhelp 快照）
 fn all_process_ids() -> Vec<u32> {
     unsafe {

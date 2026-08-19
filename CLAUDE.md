@@ -1,4 +1,4 @@
-# 项目规则
+﻿# 项目规则
 
 ## 注释
 - 注释块不超过两行；单行注释过长时折叠为两行
@@ -18,6 +18,21 @@
 - 2个readme必须保持同步
 - 重大修改和调优前记得备份一个,已经多次发生翻车事故造成项目从头来的情况
 # 项目记录
+
+## v26.8.1（2026-08-20）· EcoQoS 实现简化重构（单一 class 4）+ 双模式复验
+- 重构 set_eco_qos：删除 ProcessEcoQoS（class 11/12/19）与 PowerSetEffectiveOverlayMode 的多次尝试链（本机全返回 error 87/入口缺失），改为**单一标准调用 ProcessPowerThrottling（class=4，EXECUTION_SPEED）**；逻辑简化后行为不变（任务管理器"效率模式"同底层）
+- 真机双模式全链路复验（简化版）：
+  - 独立模式（inplace）：auto 空闲进入（child + host）→ 繁忙联动退出 ✓
+  - 平台模式（svcs 共享宿主 osP，自定义阈值 15/40、8/25）：child entered + Host entered（CPU 0.0%）→ 10 秒后 worker 忙循环 → child exited（CPU 71.7%）+ Host exited 联动 ✓
+- 147 全过、clippy 零警告；测试环境清理完毕（osP 已删、临时目录已删、hydride_svc64 恢复 Running）
+
+## v26.8.1（2026-08-19）· 效率模式（EcoQoS）自动化切换：子进程 + 宿主
+- 配置 6 字段：`eco_qos`（none|always|auto）+ `eco_qos_idle_cpu_pct`（默认 10）/`eco_qos_busy_cpu_pct`（默认 30）；`host_eco_qos`（none|always|auto）+ `host_eco_qos_idle_cpu_pct`（默认 5）/`host_eco_qos_busy_cpu_pct`（默认 20）
+- 实现：`set_eco_qos(pid, enabled)` 用 **ProcessPowerThrottling（class=4，Win10 1709+）**——ProcessEcoQoS（class 11/12/19）与 PowerSetEffectiveOverlayMode 在本机均返回 error 87/入口缺失，class 4 实测可用（任务管理器"效率模式"底层，PROCESS_POWER_THROTTLING_STATE: Version=1 + EXECUTION_SPEED）
+- 子进程 auto：独立采样（`child_eco_sample`，不依赖 runaway 配置），连续 2 次 CPU < idle 进入、> busy 退出；子进程重启时重置状态（防旧状态残留）；always 在 start_child_process 直接设置
+- 宿主 auto：自身 CPU 采样 + **子进程繁忙联动退出**（子进程 CPU > busy 时宿主也退出，密集工作期间宿主全速调度）；always 在 on_start_from 末尾设置；stop_host 开头显式退出（防停止/清理被低调度拖慢）
+- 真机验证全链路：空闲 worker → `child entered` + `Host entered`（CPU 0.0%）→ worker 变忙（10 秒后忙循环）→ `child exited (CPU 59.2%)` + `Host exited (host 0.0%, child 59.1%)`（联动生效）；单测 +1（自身开/关 + 无效 PID 静默）
+- 2 README 新增"效率模式"配置表；147 全过、clippy 零警告、release 构建通过
 
 ## v26.8.0（2026-08-19）· 刷新程序日志目录 refresh → refresher
 - 用户要求目录名与刷新程序一致：`ProgramData\Osmium\refresh` → `ProgramData\Osmium\refresher`（refresher_log_dir join/fallback + 2 README 同步）

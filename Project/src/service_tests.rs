@@ -2750,3 +2750,13 @@ fn backup_logs_returns_none_without_logs_dir() {
     assert!(crate::service_core::backup_logs_dir(&dir, "logs_none").is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn set_eco_qos_toggles_on_self() {
+    // ProcessPowerThrottling 设置: 对自身进程开/关效率模式均应成功（Get 读回系统不支持，仅断言 Set）
+    let pid = std::process::id();
+    assert!(crate::service_host::set_eco_qos(pid, true), "开启效率模式应成功");
+    assert!(crate::service_host::set_eco_qos(pid, false), "关闭效率模式应成功");
+    // 无效 PID 静默失败不 panic
+    assert!(!crate::service_host::set_eco_qos(0, true));
+}

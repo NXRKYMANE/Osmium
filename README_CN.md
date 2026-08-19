@@ -150,6 +150,17 @@ service_executable_path = 'C:\app\myapp.exe'
 | `runaway_stop_parent_first`   | bool   | `false` | 启动清理时先终止父进程再杀子树                                                                                                                                                                     |
 | `shared_directory_mappers`    | array  | 无      | SharedDirectoryMapper：服务启动时映射网络共享、停止时断开：`[{ local_path = "Z:", remote_path = "\\\\server\\share", username?, password? }]`                                                      |
 
+### 高级功能 — 效率模式（EcoQoS）
+
+| 字段                        | 类型   | 默认值 | 说明                                                                                                                                                                                                     |
+| --- | --- | --- | --- |
+| `eco_qos`                   | string | `none` | 子进程效率模式（任务管理器"效率模式"，ProcessPowerThrottling）：`none`（不干预）/ `always`（启动即开）/ `auto`（空闲进、繁忙退）                                                                          |
+| `eco_qos_idle_cpu_pct`      | float  | `10`   | `auto`：连续 2 次采样 CPU 低于该百分比时进入效率模式                                                                                                                                                      |
+| `eco_qos_busy_cpu_pct`      | float  | `30`   | `auto`：CPU 超过该百分比时退出效率模式                                                                                                                                                                    |
+| `host_eco_qos`              | string | `none` | 宿主自身效率模式：`none` / `always` / `auto`（自身 CPU 低进入；自身或子进程繁忙时退出）                                                                                                                    |
+| `host_eco_qos_idle_cpu_pct` | float  | `5`    | `auto`：宿主连续 2 次采样 CPU 低于该百分比时进入效率模式                                                                                                                                                  |
+| `host_eco_qos_busy_cpu_pct` | float  | `20`   | `auto`：宿主自身 CPU 超过该百分比、或子进程超过 `eco_qos_busy_cpu_pct` 时退出（密集工作期间联动恢复全速）                                                                                                 |
+
 ### 高级功能 — 启动前下载
 
 | 字段                     | 类型   | 默认值         | 说明                                                                                                                                                                                                                                                                          |
@@ -493,7 +504,6 @@ Osmium/
 │   ├── Extension.ico          # .osx 插件图标（安装为 icons\osx.ico）
 │   └── Extension.png          # .osx 图标源图
 ├── Docs/                      # 文档
-│   ├── README_CN.md           # 中文文档
 │   ├── EXTENSION_CN.md        # 插件开发与使用指南（中文）
 │   └── EXTENSION_EN.md        # 插件开发与使用指南（英文）
 ├── Publish/                   # 构建产物（exe + 安装包，不提交）
@@ -504,6 +514,7 @@ Osmium/
 ├── CONTRIBUTING.md            # 贡献指南
 ├── SECURITY.md                # 安全政策
 ├── LICENSE                    # 许可证
+├── README_CN.md               # 中文文档
 └── README.md                  # 英文文档
 ```
 
