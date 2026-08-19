@@ -553,8 +553,11 @@ impl ServiceHost {
                     let wall = now.duration_since(last_at).as_secs_f64();
                     let delta = cpu.saturating_sub(last_cpu) as f64 / 10_000_000.0; // 100ns → 秒
                     if wall > 0.5 && runaway_exceeded(None, None, Some(delta / wall * 100.0), self.runaway_cpu_limit) {
-                        self.write_log("host", &f("RunawayProcessKiller: CPU {0:.1}% exceeds limit {1:.1}%, killing child",
-                            &[&(delta / wall * 100.0).to_string(), &limit.to_string()]));
+                        // f() 模板不支持格式说明符（{0:.1} 不会被替换），百分比先格式化再插入
+                        let pct = format!("{:.1}", delta / wall * 100.0);
+                        let limit_str = format!("{:.1}", limit);
+                        self.write_log("host", &f("RunawayProcessKiller: CPU {0}% exceeds limit {1}%, killing child",
+                            &[&pct, &limit_str]));
                         self.force_kill();
                         self.runaway_last_sample = None;
                         return;
@@ -943,6 +946,7 @@ pub(crate) fn build_child_command(
     let out_mode = if out_enabled { Stdio::piped() } else { Stdio::null() };
     let err_mode = if err_enabled { Stdio::piped() } else { Stdio::null() };
     cmd.current_dir(working_dir)
+        .stdin(Stdio::null())
         .stdout(out_mode)
         .stderr(err_mode)
         .creation_flags(if hide_window { 0x08000000 } else { 0 });
@@ -1110,8 +1114,9 @@ pub(crate) fn run_hook(
     write_log_entry(&log_dir, "host", &f("Hook [{0}] executing: {1}", &[phase, command]), opts);
 
     let mut cmd = Command::new("cmd.exe");
-    // 与 Arguments = $"/d /c \"{command}\"" 逐字符一致
-    cmd.raw_arg("/d").raw_arg("/c").raw_arg(format!("\"{}\"", command));
+    // /s 强制"剥离首尾引号"规则: 不加 /s 时引号包裹的命令内重定向/管道会被吞掉
+    //（如 `echo x >> file` 静默失败），加了 /s 后重定向照常生效（内层引号语义保留）
+    cmd.raw_arg("/d").raw_arg("/s").raw_arg("/c").raw_arg(format!("\"{}\"", command));
     // stdin 显式置 null: 服务进程在 Ctrl+C 广播后标准句柄可能变为无效句柄，
     // 继承该句柄会让 CreateProcessW 报 ERROR_INVALID_HANDLE（poststop 钩子必现）
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).creation_flags(0x08000000);

@@ -1,17 +1,17 @@
 ﻿# Osmium 插件开发与使用指南
 
-Osmium 支持万物皆插件：官方的高级功能、第三方的扩展能力，都是一个独立的可执行程序（`.osx`），放到 `exts\` 目录里，由宿主按需拉起。插件的用法、协议和开发方式都在下面了。
+Osmium 支持万物皆插件：官方的高级功能、第三方的扩展能力，都是一个独立的可执行程序（`.osx`），放到 exe 所在目录下（平台安装用 `exts\`），由宿主按需拉起。插件的用法、协议和开发方式都在下面了。
 
 ## 插件是什么
 
-- 插件就是一个普通程序，把扩展名改成 `.osx` 就行（比如 `osmium-kit.exe` → `osmium-okits.osx`）
-- 插件放在宿主 exe 同级的 `exts\` 目录（平台安装为 `%ProgramFiles%\Osmium\exts\`）
-- 宿主启动时递归扫描 `exts\` 下所有 `.osx`，按请求里的 `kit` 字段分发调用
+- 插件就是一个普通程序，把扩展名改成 `.osx` 就行（比如 `osmium-kit.exe` → `osmium64-official-kits.osx`）
+- 插件放在宿主 exe 所在目录的任意位置——宿主递归发现所有 `.osx`（跳过 `.` 开头的隐藏目录），独立部署可以直接把插件放在 exe 旁；平台安装仍装 `%ProgramFiles%\Osmium\exts\`
+- 宿主启动时递归扫描 exe 目录下所有 `.osx`，按请求里的 `kit` 字段分发调用
 - **插件不常驻**：每次调用临时拉起，处理完一个请求就退出
 
 ### 文件名叫什么无所谓（改名不影响调用）
 
-宿主调用插件**不认文件名**，只认三样东西：`kit` 能力名、`.osx` 扩展名、`exts\` 目录。所以官方插件（`osmium-okits.osx`）改成任意名字（比如 `my-tools.osx`、`随便什么.osx`），只要满足上面三点，所有功能照常：
+宿主调用插件**不认文件名**，只认三样东西：`kit` 能力名、`.osx` 扩展名、位于 exe 目录下可被发现。所以官方插件（`osmium64-official-kits.osx`）改成任意名字（比如 `my-tools.osx`、`随便什么.osx`），只要满足上面三点，所有功能照常：
 
 - 宿主内置配置字段照常：`download_auth = "sspi"`、`download_unzip = true`、`shared_directory_mappers`、`failure_action = "reboot"` —— 它们调的是 kit 名（`sspi`/`unzip`/`netmap`/`reboot`），跟文件名无关
 - 配置里 `[[plugins]]` 声明的 `kit` 照常命中
@@ -21,7 +21,7 @@ Osmium 支持万物皆插件：官方的高级功能、第三方的扩展能力�
 
 ```
 run_plugin("sspi", ...)       # 宿主只关心 kit 名
-  → discover_plugins()        # 扫描 exts\*.osx —— 不看名字，全量收集
+  → discover_plugins()        # 扫描 exe 目录下 *.osx —— 不看名字，全量收集
   → 广播 {"kit":"sspi", ...}  # 请求里只有能力名，没有文件名
   → 插件自己认领              # 内部按 kit 字段分发，认得就干
   → 首个 ok 即成功
@@ -37,7 +37,7 @@ run_plugin("sspi", ...)       # 宿主只关心 kit 名
 唯一要注意的：
 
 1. 扩展名必须是 `.osx`（改成 `.exe` 之类 `discover_plugins` 就找不到了）
-2. 必须放在宿主 exe 同级的 `exts\` 目录
+2. 必须位于宿主 exe 目录下且可被发现（任意层级，`.` 开头的隐藏目录被跳过）
 3. 插件内部的 kit 分发逻辑不能改（比如把 `sspi` 分发改成了别的名字，配置里写 `sspi` 就命中不了了——这种情况才需要同步改配置）
 
 ### 检查插件是否可用
@@ -50,7 +50,7 @@ os --ext
 
 输出每个插件的状态：**绿点 ●** = 可用，**红点 ●** = 不可用（ACL 不可信 / 协议不响应 / 已损坏）。
 
-## 官方插件 osmium-okits.osx
+## 官方插件 osmium64-official-kits.osx
 
 官方插件随安装包分发（组件页"官方扩展包"默认不勾选，勾上才有），内置这些能力：
 
@@ -307,7 +307,7 @@ function fail(msg) {
 ### 接入步骤
 
 1. 把编译好的程序改名为 `xxx.osx`
-2. 放进宿主 exe 同级的 `exts\` 目录（或安装目录 `%ProgramFiles%\Osmium\exts\`）
+2. 放进宿主 exe 目录下的任意位置（独立部署：直接放 exe 旁；平台安装：`%ProgramFiles%\Osmium\exts\`）
 3. 目录和插件文件要满足信任要求（见下面"几个要注意的点"）
 4. 在服务配置里声明调用：
 
@@ -325,7 +325,7 @@ payload = { mode = "full" }
 - 同一 phase 按配置数组声明顺序逐个执行
 - 每个调用独立拉起插件进程，互不干扰、没有状态共享
 - 单个插件失败不影响其他插件（`fail_on_error` 只在 start 阶段能阻断）
-- 同一 kit 可以被多个插件声明，宿主按 `exts\` 发现顺序取第一个成功的
+- 同一 kit 可以被多个插件声明，宿主按发现顺序取第一个成功的
 
 ## 几个要注意的点
 
@@ -338,8 +338,8 @@ payload = { mode = "full" }
 
 **插件显示红点 / 日志报 "writable by unprivileged users"**：`exts\` 目录或插件文件被非管理员账户可写（比如解压到了用户目录）。把插件放到管理员安装的 `%ProgramFiles%\Osmium\exts\` 就行。
 
-**日志报 "plugin 'xxx' not found (exts\*.osx missing)"**：`exts\` 下没有 `.osx`，或者插件扩展名不是 `.osx`。
+**日志报 "plugin 'xxx' not found (exts\*.osx missing)"**：exe 目录下没有 `.osx`，或者插件扩展名不是 `.osx`。
 
-**插件改名后配置失效了吗**：不会。配置只认 `kit` 能力名，不认文件名；只要扩展名还是 `.osx` 且在 `exts\` 下就行。
+**插件改名后配置失效了吗**：不会。配置只认 `kit` 能力名，不认文件名；只要扩展名还是 `.osx` 且在 exe 目录下就行。
 
 **想让插件常驻运行**：插件协议是一次性调用（拉起 → 处理 → 退出）。要常驻服务就用 Osmium 宿主管目标进程，别写成插件。

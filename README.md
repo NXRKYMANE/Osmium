@@ -19,19 +19,19 @@ Register any executable or script as a Win32 system service. [中文文档](Docs
 
 ## Rust Implementation
 
-Osmium is written in modern Rust (edition 2024) and compiles into a standalone `os.exe` plus an official (yours truly) advanced plugin `osmium-okits.osx`:
+Osmium is written in modern Rust (edition 2024) and compiles into a standalone `osmium64.exe` (installed as `os.exe`) plus an official (yours truly) advanced plugin `osmium64-official-kits.osx`:
 
 | Item        | Detail                                                                         |
 | --- | --- |
 | Language    | Rust 2024                                                                      |
-| Artifacts   | `Publish\os.exe` `Publish\osmium-okits.osx`                                    |
-| Size        | `os.exe` ~3.6 MB, `osmium-okits.osx` ~1.9 MB (size-first compile, opt-level=z) |
-| UPX build   | `Publish\os-upx.exe` (~1.1 MB)                                                 |
+| Artifacts   | `Publish\osmium64.exe` `Publish\osmium64-official-kits.osx`                                    |
+| Size        | `osmium64.exe` ~3.6 MB, `osmium64-official-kits.osx` ~1.9 MB (size-first compile, opt-level=z) |
+| UPX build   | `Publish\osmium64-upx.exe` (~1.1 MB)                                                 |
 | Installer   | `osmium-win-x64-setup-v<VERSION>.exe` (non-UPX build)                          |
 | Build tools | Rust stable + MSVC                                                             |
 
-> Don't want the platform framework? Embedding into your own project? I'd recommend the UPX build (`os-upx.exe`) — tiny, extensible and very lightweight, and cold start is barely different from the original.
-> Missing a feature? The project is plugin-everything: write your own plugin in any language and drop it into `exts\` — see the [Extension Guide](Docs/EXTENSION_EN.md) for full plugin development and usage; a green dot on `os --extend` means your plugin is usable.
+> Don't want the platform framework? Embedding into your own project? I'd recommend the UPX build (`osmium64-upx.exe`) — tiny, extensible and very lightweight, and cold start is barely different from the original.
+> Missing a feature? The project is plugin-everything: write your own plugin in any language and place it under the executable (e.g. `exts\` on platform installs) — see the [Extension Guide](Docs/EXTENSION_EN.md) for full plugin development and usage; a green dot on `os --extend` means your plugin is usable.
 
 > Note: platform deployment needs the framework installed via the installer; all lifecycle, logging and service management are done by the core program os.exe. Without it, services cannot start — reinstalling the framework restores everything.
 > Relying on the framework keeps your own project and config simpler; if you're unsure or the project is important, use the embedded approach — plugins can be swapped freely and all operations and logs stay inside your project.
@@ -49,6 +49,8 @@ os --install <my-service> --pth C:\app\myapp.exe
 os --start     <my-service>
 os --stop      <my-service>
 os --restart   <my-service>
+os --refresh   <my-service>
+os --kill      <my-service>
 os --status    <my-service>
 os --uninstall <my-service>
 os --delete    <my-service>
@@ -134,7 +136,7 @@ service_executable_path = 'C:\app\myapp.exe'
 | `security_descriptor`       | string | none      | Service security descriptor (SDDL) applied to the service DACL at install — controls who can manage the service (WinSW `securityDescriptor`)                                                                                                                                                                                       |
 | `preshutdown`               | bool   | `false`   | Advertise `SERVICE_ACCEPT_PRESHUTDOWN` so the SCM grants extra time for graceful shutdown                                                                                                                                                                                                                                          |
 | `extensions`                | array  | none      | Extra lifecycle extension commands: `[{ phase = "start", command = "...", stdout_path?, stderr_path? }]` — `start` runs before launch, `start_after` after launch, `stop_before` before stop, `stop` after stop; failures are non-fatal. `stdout_path` / `stderr_path` redirect the hook output to standalone files                |
-| `plugins`                   | array  | none      | Lifecycle plugin calls (`exts\*.osx`): `[{ kit, phase, payload?, fail_on_error? }]` — see the [Extension Guide](Docs/EXTENSION_EN.md)                                                                                                                                                                                              |
+| `plugins`                   | array  | none      | Lifecycle plugin calls (`.osx` plugins next to the executable): `[{ kit, phase, payload?, fail_on_error? }]` — see the [Extension Guide](Docs/EXTENSION_EN.md)                                                                                                                                                                                              |
 
 ### Advanced — Resource Watchdog & Network Mapping
 
@@ -156,7 +158,7 @@ service_executable_path = 'C:\app\myapp.exe'
 | `download_to`            | string | none           | Download destination; relative paths resolve against the service directory                                                                                                                                                                                                                                                                                                  |
 | `download_sha256`        | string | none           | SHA-256 of the downloaded file (lowercase hex)                                                                                                                                                                                                                                                                                                                              |
 | `download_fail_on_error` | bool   | `true`         | Whether a failed download fails service startup                                                                                                                                                                                                                                                                                                                             |
-| `download_auth`          | string | none           | Download authentication: `basic` (user/password), or `sspi` (Windows integrated Negotiate/NTLM/Kerberos) — `sspi` is handled by the official `osmium-kit-sspi` plugin (shipped in `osmium-okits.osx`); without the plugin the download fails with a clear error                                                                                                             |
+| `download_auth`          | string | none           | Download authentication: `basic` (user/password), or `sspi` (Windows integrated Negotiate/NTLM/Kerberos) — `sspi` is handled by the official `osmium-kit-sspi` plugin (shipped in `osmium64-official-kits.osx`); without the plugin the download fails with a clear error                                                                                                             |
 | `download_username`      | string | none           | Username for `basic` authentication                                                                                                                                                                                                                                                                                                                                         |
 | `download_password`      | string | none           | Password for `basic` authentication                                                                                                                                                                                                                                                                                                                                         |
 | `download_proxy`         | string | none           | Proxy used for downloads (http or https)                                                                                                                                                                                                                                                                                                                                    |
@@ -409,19 +411,19 @@ The one-click build script produces 2 artifacts (executable + installer):
 
 **Pipeline**: build → unit tests → compile the installer with ISCC (Inno Setup 7).
 
-After the installer is built, the script asks whether to also produce an optional UPX-compressed build. Answering `y` rebuilds with `opt-level = "z"` (size-first) and compresses with UPX (`--ultra-brute --lzma`), outputting `Publish\os-upx.exe` (~1.1 MB, down from ~3.6 MB) — the normal exe and installer are left untouched.
+After the installer is built, the script asks whether to also produce an optional UPX-compressed build. Answering `y` rebuilds with `opt-level = "z"` (size-first) and compresses with UPX (`--ultra-brute --lzma`), outputting `Publish\osmium64-upx.exe` (~1.1 MB, down from ~3.6 MB) — the normal exe and installer are left untouched.
 
 The script reads the version from `Project\Cargo.toml` and automatically syncs it (plus the copyright year) into `installer.iss`. A failing test aborts the pipeline; use `.\BUILD.ps1 -SkipTests` to skip testing.
 
-**Code signing**: all artifacts (`os64.exe`, `osmium-okits.osx`, the installer, `os-upx.exe`) are Authenticode-signed (SHA256 + RFC 3161 timestamp) when a certificate is available. Certificate sources, in priority order: the `OSMIUM_CERT_PFX` environment variable (plus optional `OSMIUM_CERT_PASSWORD`), or the repo-local dev certificate `Misc\codesign.pfx` (self-signed, `Misc\codesign.pfx` is gitignored and never committed). Without a certificate the pipeline proceeds unsigned with a warning; use `.\BUILD.ps1 -SkipSign` to skip signing explicitly. The self-signed dev certificate produces valid signatures but is not trusted by other machines — for public releases that must clear SmartScreen, sign with a commercial certificate via `OSMIUM_CERT_PFX`.
+**Code signing**: all artifacts (`osmium64.exe`, `osmium64-official-kits.osx`, the installer, `osmium64-upx.exe`) are Authenticode-signed (SHA256 + RFC 3161 timestamp) when a certificate is available. Certificate sources, in priority order: the `OSMIUM_CERT_PFX` environment variable (plus optional `OSMIUM_CERT_PASSWORD`), or the repo-local dev certificate `Misc\codesign.pfx` (self-signed, `Misc\codesign.pfx` is gitignored and never committed). Without a certificate the pipeline proceeds unsigned with a warning; use `.\BUILD.ps1 -SkipSign` to skip signing explicitly. The self-signed dev certificate produces valid signatures but is not trusted by other machines — for public releases that must clear SmartScreen, sign with a commercial certificate via `OSMIUM_CERT_PFX`.
 
 ### Build Individually
 
 ```powershell
 Set-Location Project
 cargo build --release                     # → Project\target\release\osmium64.exe
-Copy-Item target\release\osmium64.exe ..\Publish\os64.exe
-# build the kits → Extension\osmium-okits.osx (see Extension\osmium-official-kits)
+Copy-Item target\release\osmium64.exe ..\Publish\osmium64.exe
+# build the kits → Extension\osmium64-official-kits.osx (see Extension\osmium-official-kits)
 ISCC installer.iss                        # → Publish\osmium-win-x64-setup-v<VERSION>.exe
 ```
 
@@ -440,7 +442,7 @@ The installer places `os.exe` in `%ProgramFiles%\Osmium\` and registers the Cont
 ### Installer Features
 
 - Installs `os.exe` to `%ProgramFiles%\Osmium\` and adds it to the system PATH
-- Component selection page: core (`os.exe`) is fixed; the official extension kit (`osmium-okits.osx` → `Extension\`) is **unchecked by default** — tick it if you need the plugin features (sspi download / unzip / share mapping / reboot), usage: [Extension Guide](Docs/EXTENSION_EN.md)
+- Component selection page: core (`os.exe`) is fixed; the official extension kit (`osmium64-official-kits.osx` → `Extension\`) is **unchecked by default** — tick it if you need the plugin features (sspi download / unzip / share mapping / reboot), usage: [Extension Guide](Docs/EXTENSION_EN.md)
 - Automatically registers the boot-time Service Updater (`--install-updater`)
 - Registers an uninstall entry in Windows Control Panel
 - Auto-detects old versions: silently upgrades on newer, prompts to reinstall on identical, warns on downgrade
@@ -473,7 +475,7 @@ Osmium/
 │       ├── service_config.rs  # TOML config model (serde)
 │       └── service_tests.rs   # Unit tests (139, incl. process-tree integration)
 ├── Extension/                 # Official kits (external plugin executables, shipped as .osx)
-│   └── osmium-official-kits/  # Single bin (built as osmium-okits.osx)
+│   └── osmium-official-kits/  # Single bin (built as osmium64-official-kits.osx)
 │       ├── Cargo.toml         # Kit config (same format as Project)
 │       ├── build.rs           # EXE version info / icon (Extension.ico)
 │       └── src/

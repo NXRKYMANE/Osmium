@@ -19,19 +19,19 @@
 
 ## Rust 实现
 
-Osmium 使用现代 Rust 2024 语言开发，编译为一个独立的 `os.exe` 和一个官方（我本人）提供的高级插件 `osmium-okits.osx`：
+Osmium 使用现代 Rust 2024 语言开发，编译为一个独立的 `osmium64.exe`（安装后为 `os.exe`）和一个官方（我本人）提供的高级插件 `osmium64-official-kits.osx`：
 
 | 项         | 说明                                                                          |
 | --- | --- |
 | 语言       | Rust 2024                                                                     |
-| 产物       | `Publish\os.exe` `Publish\osmium-okits.osx`                                   |
-| 大小       | `os.exe` 约 3.6 MB，`osmium-okits.osx` 约 1.9 MB（体积优先编译，opt-level=z） |
-| UPX 压缩   | `Publish\os-upx.exe`（约 1.1 MB）                                             |
+| 产物       | `Publish\osmium64.exe` `Publish\osmium64-official-kits.osx`                                   |
+| 大小       | `osmium64.exe` 约 3.6 MB，`osmium64-official-kits.osx` 约 1.9 MB（体积优先编译，opt-level=z） |
+| UPX 压缩   | `Publish\osmium64-upx.exe`（约 1.1 MB）                                             |
 | 分发安装包 | `osmium-win-x64-setup-v<版本>.exe`（使用非 UPX 版本）                         |
 | 工具链     | Rust stable + MSVC                                                            |
 
-> 不想用平台框架？想集成到自己的项目？我推荐优先使用 UPX 压缩版（`os-upx.exe`）——体积非常小、可扩展，非常轻量，而且冷启动与原版差异不大。
-> 没有你想要的功能？项目支持万物皆插件，用任意语言写出属于你自己的插件放入 `exts\` 即可接入——完整插件开发与使用指南见 [插件指南](EXTENSION_CN.md)，os.exe 运行亮绿灯即为可用插件。
+> 不想用平台框架？想集成到自己的项目？我推荐优先使用 UPX 压缩版（`osmium64-upx.exe`）——体积非常小、可扩展，非常轻量，而且冷启动与原版差异不大。
+> 没有你想要的功能？项目支持万物皆插件，用任意语言写出属于你自己的插件放入 exe 目录（平台安装放 `exts\`）即可接入——完整插件开发与使用指南见 [插件指南](EXTENSION_CN.md)，os.exe 运行亮绿灯即为可用插件。
 
 > 说明：平台部署需要使用安装包安装框架，所有的生命周期、日志记录和服务管理完全由框架核心程序 os.exe 完成，一旦缺失服务将无法启动，当然安装回来会恢复作业。
 > 依赖框架可以使您自己的项目和配置更加简单，如果不放心或者重要项目建议使用集成方案，集成方案可以随意替换插件，所有的操作和日志记录全部在项目内落实。
@@ -49,6 +49,8 @@ os --install <my-service> --pth C:\app\myapp.exe
 os --start     <my-service>
 os --stop      <my-service>
 os --restart   <my-service>
+os --refresh   <my-service>
+os --kill      <my-service>
 os --status    <my-service>
 os --uninstall <my-service>
 os --delete    <my-service>
@@ -134,7 +136,7 @@ service_executable_path = 'C:\app\myapp.exe'
 | `security_descriptor`       | string | 无        | 服务安全描述符（SDDL），安装时应用到服务 DACL，控制谁能管理该服务（对应 WinSW securityDescriptor）                                                                                                                                                                    |
 | `preshutdown`               | bool   | `false`   | 上报 `SERVICE_ACCEPT_PRESHUTDOWN`，系统关停时获得更长的优雅时间                                                                                                                                                                                                       |
 | `extensions`                | array  | 无        | 生命周期扩展命令列表：`[{ phase = "start", command = "...", stdout_path?, stderr_path? }]`——`start` 启动前、`start_after` 启动后、`stop_before` 停止前、`stop` 停止后执行，失败不阻断；`stdout_path` / `stderr_path` 把钩子输出重定向到独立文件                       |
-| `plugins`                   | array  | 无        | 生命周期插件调用（`exts\*.osx`）：`[{ kit, phase, payload?, fail_on_error? }]`——详见 [插件指南](EXTENSION_CN.md)                                                                                                                                                      |
+| `plugins`                   | array  | 无        | 生命周期插件调用（exe 目录下的 `.osx` 插件）：`[{ kit, phase, payload?, fail_on_error? }]`——详见 [插件指南](EXTENSION_CN.md)                                                                                                                                                      |
 
 ### 高级功能 — 资源监控与网络映射
 
@@ -156,7 +158,7 @@ service_executable_path = 'C:\app\myapp.exe'
 | `download_to`            | string | 无             | 下载目标路径；相对路径基于服务部署目录                                                                                                                                                                                                                                        |
 | `download_sha256`        | string | 无             | 下载文件 SHA-256（小写十六进制）                                                                                                                                                                                                                                              |
 | `download_fail_on_error` | bool   | `true`         | 下载失败是否导致服务启动失败                                                                                                                                                                                                                                                  |
-| `download_auth`          | string | 无             | 下载认证方式：`basic`（用户名/密码），或 `sspi`（Windows 集成认证 Negotiate/NTLM/Kerberos）——`sspi` 由官方 `osmium-kit-sspi` 插件处理（随 `osmium-okits.osx` 提供）；未装插件时下载会明确报错                                                                                 |
+| `download_auth`          | string | 无             | 下载认证方式：`basic`（用户名/密码），或 `sspi`（Windows 集成认证 Negotiate/NTLM/Kerberos）——`sspi` 由官方 `osmium-kit-sspi` 插件处理（随 `osmium64-official-kits.osx` 提供）；未装插件时下载会明确报错                                                                                 |
 | `download_username`      | string | 无             | `basic` 认证用户名                                                                                                                                                                                                                                                            |
 | `download_password`      | string | 无             | `basic` 认证密码                                                                                                                                                                                                                                                              |
 | `download_proxy`         | string | 无             | 下载使用的代理（http/https 均可）                                                                                                                                                                                                                                             |
@@ -409,19 +411,19 @@ Java 应用经 `java.exe` 启动，与其他可执行程序一样享受崩溃自
 
 **流水线**：构建 → 单元测试 → ISCC 编译安装包（Inno Setup 7）。
 
-安装包编译完成后，脚本会询问是否生成可选的 UPX 压缩版。选择 `y` 后以 `opt-level = "z"`（体积优先）重建并用 UPX（`--ultra-brute --lzma`）压缩，输出 `Publish\os-upx.exe`（约 1.1 MB，普通版约 3.6 MB）——不影响普通 exe 与安装包。
+安装包编译完成后，脚本会询问是否生成可选的 UPX 压缩版。选择 `y` 后以 `opt-level = "z"`（体积优先）重建并用 UPX（`--ultra-brute --lzma`）压缩，输出 `Publish\osmium64-upx.exe`（约 1.1 MB，普通版约 3.6 MB）——不影响普通 exe 与安装包。
 
 脚本从 `Project\Cargo.toml` 读取版本号，自动同步到 `installer.iss`（含版权年份）。测试失败会终止流水线；跳过测试用 `.\BUILD.ps1 -SkipTests`。
 
-**代码签名**：找到证书时，全部产物（`os64.exe`、`osmium-okits.osx`、安装包、`os-upx.exe`）都会做 Authenticode 签名（SHA256 + RFC 3161 时间戳）。证书来源按优先级：环境变量 `OSMIUM_CERT_PFX`（可配 `OSMIUM_CERT_PASSWORD`），或仓库内开发证书 `Misc\codesign.pfx`（自签名，已被 gitignore 不会提交）。没有证书时流水线照常运行仅告警；显式跳过签名用 `.\BUILD.ps1 -SkipSign`。自签名开发证书签名有效但不被其他机器信任——公开发行要消除 SmartScreen 警告，请用商业证书经 `OSMIUM_CERT_PFX` 签名。
+**代码签名**：找到证书时，全部产物（`osmium64.exe`、`osmium64-official-kits.osx`、安装包、`osmium64-upx.exe`）都会做 Authenticode 签名（SHA256 + RFC 3161 时间戳）。证书来源按优先级：环境变量 `OSMIUM_CERT_PFX`（可配 `OSMIUM_CERT_PASSWORD`），或仓库内开发证书 `Misc\codesign.pfx`（自签名，已被 gitignore 不会提交）。没有证书时流水线照常运行仅告警；显式跳过签名用 `.\BUILD.ps1 -SkipSign`。自签名开发证书签名有效但不被其他机器信任——公开发行要消除 SmartScreen 警告，请用商业证书经 `OSMIUM_CERT_PFX` 签名。
 
 ### 单独构建
 
 ```powershell
 Set-Location Project
 cargo build --release                     # → Project\target\release\osmium64.exe
-Copy-Item target\release\osmium64.exe ..\Publish\os64.exe
-# 构建插件 → Extension\osmium-okits.osx（见 Extension\osmium-official-kits）
+Copy-Item target\release\osmium64.exe ..\Publish\osmium64.exe
+# 构建插件 → Extension\osmium64-official-kits.osx（见 Extension\osmium-official-kits）
 ISCC installer.iss                        # → Publish\osmium-win-x64-setup-v<版本>.exe
 ```
 
@@ -440,7 +442,7 @@ ISCC installer.iss                        # → Publish\osmium-win-x64-setup-v<�
 ### 安装器特性
 
 - 将 `os.exe` 安装到 `%ProgramFiles%\Osmium\` 并加入系统 PATH
-- 选择组件页：core（`os.exe`）固定必选；官方扩展包（`osmium-okits.osx` → `Extension\`）**默认不勾选**，需要插件功能（sspi 下载 / 解压 / 共享映射 / 重启）时勾上，用法见 [插件指南](EXTENSION_CN.md)
+- 选择组件页：core（`os.exe`）固定必选；官方扩展包（`osmium64-official-kits.osx` → `Extension\`）**默认不勾选**，需要插件功能（sspi 下载 / 解压 / 共享映射 / 重启）时勾上，用法见 [插件指南](EXTENSION_CN.md)
 - 自动注册开机服务更新程序（`--install-updater`）
 - 注册控制面板卸载条目
 - 自动检测旧版本：高版本静默升级、同版本询问重装、低版本警告降级
@@ -473,7 +475,7 @@ Osmium/
 │       ├── service_config.rs  # TOML 配置模型（serde）
 │       └── service_tests.rs   # 单元测试（139 个，含进程树集成测试）
 ├── Extension/                 # 官方工具包（外部插件可执行程序，发布为 .osx）
-│   └── osmium-official-kits/  # 单一 bin（构建为 osmium-okits.osx）
+│   └── osmium-official-kits/  # 单一 bin（构建为 osmium64-official-kits.osx）
 │       ├── Cargo.toml         # 工具包配置（格式与 Project 一致）
 │       ├── build.rs           # EXE 版本信息 / 图标（Extension.ico）
 │       └── src/

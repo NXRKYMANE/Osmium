@@ -2750,6 +2750,3 @@ fn backup_logs_returns_none_without_logs_dir() {
     assert!(crate::service_core::backup_logs_dir(&dir, "logs_none").is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
-
-
-

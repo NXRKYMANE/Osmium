@@ -19,6 +19,37 @@
 - 重大修改和调优前记得备份一个,已经多次发生翻车事故造成项目从头来的情况
 # 项目记录
 
+## v26.7.2（2026-08-19）· 平台模式（svcs 共享宿主）全矩阵真机回归
+- 平台部署差异点全验证（共享宿主 Program Files\Osmium\os.exe + svcs 部署）：install → svcs\<name>\<name>.osiml 生成 + 目录 ACL 收紧（仅 SYSTEM/Admin）→ ImagePath 共享宿主 -internal --run 格式 → start（.osiml 加载）→ 日志落 svcs\<name>\logs → 优雅停止（Ctrl+C）→ uninstall 无残留
+- 运行字段抽查（平台路径，宿主逻辑与 inplace 同源）：env 注入（1 变量）、优先级 High、prestart 钩子（引号空格路径 + /s 修复后）、runaway_memory_limit_mb 触发（70MB>1MB 强杀）、runaway_pid_file 回写/停止删除、plugins ping 调用（Program Files 插件发现执行）、--list 列出平台服务、--extend 绿点
+- 更新路径：同源覆盖成功 + **日志保留**（更新前后 logs 文件数不变，backup/restore 生效）、异源拒绝（"already registered by a different service" 防劫持）
+- 更新程序：-internal --install-updater 注册（delayed auto + ImagePath）→ 手动 sc start 扫描（Scanning 1 service）→ 自动停止 → **失效服务清理**（osiml 缺失 → "Config file missing, removing stale service" → SCM 移除 + svcs 目录清除）；-internal --uninstall-updater 移除
+- 已知行为复现：restart delay 睡眠期间 --stop 不响应（SCM 超时强杀兜底，等 35s 后 SCM 已强制停止）
+- 146 全过、clippy 零警告；测试环境清理完毕（osP/osQ/更新程序已卸、临时目录已删）；hydride_svc64 保持 Running
+
+## v26.7.2（2026-08-19）· 最后 12 项字段补测 + 修复第 6 个 bug（allow_service_logon）
+- 修复 ⑥`allow_service_logon` 对 `.\user` 账户静默失败：grant_service_logon_right 用 LookupAccountNameW(".\osmtest") 解析 SID 返回 0（**LookupAccountNameW 不支持 `.\` 前缀**，cmd/net 语法），授权被跳过 → 服务启动 1069 登录失败；修复为剥离 `.\` 前缀再解析；真机验证：修复前 1069 → 修复后 START_PENDING（授权生效，跨过登录失败）
+- 补测（除 IIS/reboot 外全部独立部署真机）✅：log_auto_roll_at 定点滚动（未来时刻触发，{pattern}.{HHmmss}.log 归档 + 新文件）、log_roll_period_days 按天滚动（改 mtime 为 2 天前 → 下条日志触发归档）、log_mode roll-by-size 缺省 10MB（10.2MB .1 备份）、scm_sleep_time_ms=8000 生效（sc stop 后 10 秒才 Stopped，默认 <1 秒）、stop_parent_process_first 强杀路径（python SIG_IGN 忽略 Ctrl+C → 3.7 秒优雅超时 → force_kill 整树清除）、runaway_stop_parent_first=true 启动清理（带 WINSGF_SERVICE_ID 残留 cmd 树被清）、download_unzip 单条模式（下载 zip + 解压落地）、hide_window（GUI 程序窗口可见；CREATE_NO_WINDOW 仅影响控制台程序，代码分支明确）
+- 测试侧记录：notepad 在 Win11 是 AppX 别名（System32 无 notepad.exe）；secedit 不导出本地账户 SeServiceLogonRight（改用 sc start 错误码区分）；Python314 安装目录 Users 可写被 P0-1 正确拦截（复制到受保护目录绕过）；控制台窗口可见性受 job 会话限制不可靠自动化
+- 146 全过、clippy 零警告、release 构建通过；Program Files\Osmium\os.exe 更新为最新 release；hydride_svc64 恢复 Running
+
+## v26.7.2（2026-08-19）· 未验证字段补测 + 第 4/5 个 bug 修复 + interactive 提示
+- 修复 ④`auto_refresh` 热刷新重启失败：Ctrl+C 广播后宿主 stdin 句柄失效 → 子进程 spawn 报 os error 6（句柄无效）；build_child_command 显式 `stdin(Stdio::null())`（与 run_hook 同款修复）；真机验证：运行中改配置 → "Configuration file changed" → 优雅停止旧子进程 → 新配置子进程重启成功
+- 修复 ⑤runaway CPU 日志格式化：`f()` 模板不支持格式说明符（`{0:.1}` 不被替换，CPU 值原样漏出）；改为百分比/限制值先 `format!("{:.1}")` 再插值；真机验证 "CPU 125.7% exceeds limit 50.0%"
+- 可改进项：`interactive=true + 非 LocalSystem 账户` 时 CreateServiceW 报 0x80070057（参数错误），install 前主动校验并提示 "interactive=true requires the LocalSystem account"
+- 补测（全部独立部署真机）✅：start_arguments 覆盖 args、stop_executable+%PID%+WINSGF_CHILD_PID（stop.log 记录子进程 PID）、auto_refresh（修复后）、download_stage after_start/after_stop、up-to-date 跳过、sha 不匹配（重下→校验失败→丢弃→fail_on_error 阻断）、download_proxy（不可达 → Connection refused → 阻断）、runaway_cpu_limit（忙循环触发）、runaway_pid_file 启动清理（残留进程按 PID 终止）、日志（log_mode reset 清空/roll 生成 .old/none 关闭 + log_reset + log_out_filename/log_err_filename 自定义名 + log_out/err_enabled 丢弃）、平台部署 DPAPI 密码加密落盘（enc:OSMIUM1:，明文不落盘）、netmap 失败告警（非致命，服务照常启动）
+- 测试侧记录（非 bug）：304（If-Modified-Since）与 P1-4 设计矛盾——http+无 sha 被安全策略拦截，304 仅 https 可用（单测覆盖，真机跳过）；非 SYSTEM 账户（NetworkService）服务无法写收紧 ACL 的部署/日志目录 → 启动失败（权限设计，README 已提示）；TOML `[[数组表]]` 后顶层键失效再次踩坑（download_proxy 追加在 [[downloads]] 后无效）
+- 146 全过、clippy 零警告、release 构建通过；Program Files\Osmium\os.exe 更新为最新 release；hydride_svc64 恢复 Running
+
+## v26.7.2（2026-08-19）· 独立部署全字段真机回归 + 修复 3 个真 bug
+- 真机回归（5 个 inplace 服务 + 本地 HTTP 服务器 + 官方插件），覆盖全部配置字段/插件场景，发现并修复 3 个真 bug：
+  - ①`is_inplace_service` 硬编码 exe 文件名 `os.exe`——改名 exe（如 osCore.exe）的 inplace 服务注册后无法被管理命令识别（--start/--stop 报 Service not found）；改为按"ImagePath 文件名去扩展名 == 服务名"判定
+  - ②`run_hook` 的 cmd 构造 `cmd /d /c "<command>"` 缺 `/s`——引号包裹的命令内重定向被 cmd 吞掉（echo x >> file 静默失败，钩子输出丢失）；补 `/s` 强制剥引号规则
+  - ③`is_user_writable` 对不存在路径 fail-closed 误判"用户可写"——download_to 指向尚未下载的文件时安装被拒；改为不存在时按父目录 ACL 判定（新建文件继承父目录权限）
+- 验证结论（全部通过）：delayed_auto/依赖/账户/interactive(0x110)/SDDL/failure_actions 序列/runaway 内存触发强杀/kill 进程树/event_log/preshutdown/优先级/env 注入(2)/working_directory/钩子(PID 注入)/extensions 四阶段/pid 文件/优雅停止(WM_CLOSE)；日志全字段（split/pattern/大小滚动/zip 归档带日期格式/自定义目录）+ 日志完整性；插件四阶段 + fail_on_error 阻断 + 缺失/改名/挪位/删除发现；下载全字段（分块 3MB/sha 校验/up-to-date 跳过/basic 认证/unzip 解压/数组模式保持 exe/P1-4 http 无 sha 拒绝）
+- 测试侧发现（非 bug）：TOML `[[数组表]]` 之后的顶层键属于数组元素（osCore log 字段在 [[extensions]] 后、osRun runaway 在 [[failure_actions]] 后都因此失效）；`--stop` 在 restart delay 睡眠期间不响应 SCM 信号（SCM 超时强杀兜底，已知行为）
+- 环境残留注意：本机 Program Files\Osmium\os.exe 已更新为最新 release；hydride_svc64 恢复 Running
+
 ## v26.7.1（2026-08-18）· 新增 --kill 命令 + 修复共享宿主异常重启读错配置
 - `os --kill <name>`（简写 `--kil`，对应 WinSW dev kill）：管理员/开发者工具——按宿主注入的 `WINSGF_SERVICE_ID` 环境变量枚举全部进程定位某服务的子进程，强杀整棵进程树（先子树后自身）；预先启用 SeDebugPrivilege（SE_DEBUG_NAME 常量 + AdjustTokenPrivileges，管理员默认持有但禁用，否则无法终止 SYSTEM 级子进程）
 - 实现：`service_host::kill_service_processes`（Toolhelp 枚举 + process_env_var 匹配 + collect_descendants 子树）+ `all_process_ids`/`enable_debug_privilege` 工具；CLI 帮助/路由/别名/别名测试补 4 项

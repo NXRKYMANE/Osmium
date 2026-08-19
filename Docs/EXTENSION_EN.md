@@ -1,17 +1,17 @@
 ﻿# Osmium Plugin Development & Usage Guide
 
-Osmium is plugin-everything: official advanced features and third-party extensions are all standalone executables (`.osx`) placed in the `exts\` directory, launched by the host on demand. How plugins work, the protocol, and how to write one — it's all here.
+Osmium is plugin-everything: official advanced features and third-party extensions are all standalone executables (`.osx`) placed under the executable's directory (the platform installer uses `exts\`), launched by the host on demand. How plugins work, the protocol, and how to write one — it's all here.
 
 ## What a Plugin Is
 
-- A plugin is just an ordinary program with its extension renamed to `.osx` (e.g. `osmium-kit.exe` → `osmium-okits.osx`)
-- Plugins live in the `exts\` directory next to the host exe (platform install: `%ProgramFiles%\Osmium\exts\`)
-- At startup the host recursively scans every `.osx` under `exts\` and dispatches requests by the `kit` field
+- A plugin is just an ordinary program with its extension renamed to `.osx` (e.g. `osmium-kit.exe` → `osmium64-official-kits.osx`)
+- Plugins live anywhere under the host exe's directory — the host recursively discovers every `.osx` (skipping dot-hidden folders), so standalone deployments can put plugins directly next to the exe; the platform installer still ships the official kit to `%ProgramFiles%\Osmium\exts\`
+- At startup the host recursively scans every `.osx` under the executable's directory and dispatches requests by the `kit` field
 - **Plugins are not resident**: each call launches a fresh process, which handles one request and exits
 
 ### The File Name Doesn't Matter (Renaming Doesn't Break Calls)
 
-The host does **not** identify plugins by file name — it only cares about three things: the `kit` capability name, the `.osx` extension, and the `exts\` directory. So renaming the official plugin (`osmium-okits.osx`) to any other name (e.g. `my-tools.osx`, `whatever.osx`) keeps every feature working, as long as those three hold:
+The host does **not** identify plugins by file name — it only cares about three things: the `kit` capability name, the `.osx` extension, and discoverability under the executable's directory. So renaming the official plugin (`osmium64-official-kits.osx`) to any other name (e.g. `my-tools.osx`, `whatever.osx`) keeps every feature working, as long as those three hold:
 
 - Host built-in config fields keep working: `download_auth = "sspi"`, `download_unzip = true`, `shared_directory_mappers`, `failure_action = "reboot"` — they call the kit names (`sspi`/`unzip`/`netmap`/`reboot`), which have nothing to do with file names
 - A `kit` declared in a `[[plugins]]` block still matches
@@ -21,7 +21,7 @@ The call chain looks like this:
 
 ```
 run_plugin("sspi", ...)        # the host only cares about the kit name
-  → discover_plugins()         # scans exts\*.osx — no name matching, collects all
+  → discover_plugins()         # scans *.osx under the executable — no name matching, collects all
   → broadcast {"kit":"sspi"}   # the request carries the capability name, not a file name
   → the plugin claims it       # internal dispatch by the kit field — recognize and run
   → first ok wins
@@ -37,7 +37,7 @@ Because it resolves capabilities instead of files, you get:
 The only things to watch:
 
 1. The extension must stay `.osx` (renaming to `.exe` or similar means `discover_plugins` can't find it)
-2. It must sit in the `exts\` directory next to the host exe
+2. It must be discoverable under the host exe's directory (any depth; dot-hidden folders are skipped)
 3. The plugin's internal kit dispatch must not change (e.g. if you rename the `sspi` dispatch inside the plugin, a config writing `sspi` can't hit it anymore — only in that case do you need to update the config too)
 
 ### Checking Whether a Plugin Is Usable
@@ -50,7 +50,7 @@ os --ext
 
 Prints each plugin's status: **green dot ●** = usable, **red dot ●** = unusable (untrusted ACL / protocol not responding / broken).
 
-## Official Plugin osmium-okits.osx
+## Official Plugin osmium64-official-kits.osx
 
 The official plugin ships with the installer (component page "Official extension kit", unchecked by default — tick it to get it), with these built-in capabilities:
 
@@ -307,7 +307,7 @@ function fail(msg) {
 ### Getting Started
 
 1. Rename the compiled program to `xxx.osx`
-2. Drop it into the `exts\` directory next to the host exe (or the install dir `%ProgramFiles%\Osmium\exts\`)
+2. Drop it anywhere under the host exe's directory (standalone: next to the exe; platform install: `%ProgramFiles%\Osmium\exts\`)
 3. The directory and plugin file must satisfy the trust requirement (see "Things to Keep in Mind" below)
 4. Declare the call in the service config:
 
@@ -325,7 +325,7 @@ payload = { mode = "full" }
 - Same phase runs in declaration order of the config array
 - Each call launches a separate plugin process — no interference, no shared state
 - A single plugin failure does not affect the others (`fail_on_error` can only block in the start phase)
-- The same kit can be declared by multiple plugins; the host takes the first success in `exts\` discovery order
+- The same kit can be declared by multiple plugins; the host takes the first success in discovery order
 
 ## Things to Keep in Mind
 
@@ -338,8 +338,8 @@ payload = { mode = "full" }
 
 **Plugin shows a red dot / log says "writable by unprivileged users"**: the `exts\` directory or the plugin file is writable by a non-admin account (e.g. you extracted it to a user directory). Put the plugin into the admin-installed `%ProgramFiles%\Osmium\exts\` and you're done.
 
-**Log says "plugin 'xxx' not found (exts\*.osx missing)"**: there's no `.osx` under `exts\`, or the plugin extension isn't `.osx`.
+**Log says "plugin 'xxx' not found (exts\*.osx missing)"**: there's no `.osx` under the executable's directory, or the plugin extension isn't `.osx`.
 
-**Does renaming the plugin break my config?** No. The config only knows the `kit` capability name, not the file name; as long as the extension stays `.osx` and it sits under `exts\`, it works.
+**Does renaming the plugin break my config?** No. The config only knows the `kit` capability name, not the file name; as long as the extension stays `.osx` and it sits under the executable's directory, it works.
 
 **Want a resident plugin?** The plugin protocol is one-shot (launch → handle → exit). If you need a resident service, use the Osmium host to manage the target process — don't write it as a plugin.

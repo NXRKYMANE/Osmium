@@ -344,6 +344,20 @@ pub(crate) fn install_from_config_path(config_path_str: &str) {
     let failure_reset = if config.failure_reset_sec > 0 { config.failure_reset_sec } else { 86400 };
     let restart_delay = if config.restart_delay_ms > 0 { config.restart_delay_ms } else { 60000 };
 
+    // 交互式服务（interactive=true）仅允许 LocalSystem 账户（CreateServiceW 对
+    // 其他账户返回 ERROR_INVALID_PARAMETER 0x80070057，提前给出明确提示）
+    if config.interactive
+        && config.service_account.as_deref().is_some_and(|a| !a.trim().is_empty())
+    {
+        let account = config.service_account.as_deref().unwrap_or("");
+        if !account.eq_ignore_ascii_case("LocalSystem")
+            && !account.eq_ignore_ascii_case("NT AUTHORITY\\SYSTEM")
+        {
+            error(&f("Application error: {0}",
+                &["interactive=true requires the LocalSystem account. Remove service_account or set it to LocalSystem."]));
+        }
+    }
+
     match install_service_scm(&InstallServiceParams {
         service_name: &svc_name,
         display_name: &svc_display_name,
@@ -792,14 +806,21 @@ fn is_registered(svc_name: &str) -> bool {
     service_exists(svc_name) && (is_osmium_deployed(svc_name) || is_inplace_service(svc_name))
 }
 
-/// 判定已注册服务是否为 inplace 原地注册: ImagePath 是 os.exe 且不在 svcs 平台部署目录内
+/// 判定已注册服务是否为 inplace 原地注册: ImagePath 指向的 exe 文件名与服务名一致
+///（inplace 注册要求 service_name == exe 文件名），且不在 svcs 平台部署目录内
 fn is_inplace_service(svc_name: &str) -> bool {
     let Some(image) = get_service_image_path(svc_name) else { return false };
     let image = image.trim_matches('"');
-    if !Path::new(image).file_name().map(|n| n.eq_ignore_ascii_case("os.exe")).unwrap_or(false) {
+    // 平台部署的 ImagePath 整行以 "宿主 -internal --run <name>" 结尾，file_name 恒不匹配服务名
+    if !Path::new(image)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.trim_end_matches(".exe").eq_ignore_ascii_case(svc_name))
+        .unwrap_or(false)
+    {
         return false;
     }
-    // inplace 服务指向用户自己位置的 os.exe；svcs 目录内的是平台部署副本（名为 {svcName}.exe）
+    // inplace 服务指向用户自己位置的 exe；svcs 目录内的是平台部署副本（名为 {svcName}.exe）
     let canonical = std::path::absolute(image).unwrap_or_else(|_| PathBuf::from(image));
     let canonical_str = canonical.to_string_lossy().to_lowercase();
     let prefix = format!("{}\\", registry_dir().to_string_lossy()).to_lowercase();
@@ -944,8 +965,20 @@ pub(crate) fn secure_directory(path: &str) -> bool {
 }
 
 /// 对象（目录/文件）是否允许低权限主体改写: 用 PowerShell 输出 SDDL 解析所有者与 DACL；
-/// 解析失败/无法判定一律视为可写（fail-closed），拒绝在不可信位置注册 SYSTEM 服务（防 P0-1）
+/// 解析失败/无法判定一律视为可写（fail-closed），拒绝在不可信位置注册 SYSTEM 服务（防 P0-1）。
+/// 目标尚不存在时（如下载目标）按父目录判定——新建文件继承父目录 ACL，
+/// 父目录可写即等于目标可被预创建替换
 pub(crate) fn is_user_writable(path: &str) -> bool {
+    let p = Path::new(path);
+    if !p.exists() {
+        let parent = p.parent()
+            .map(|x| x.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string());
+        if parent == path {
+            return true; // 无父目录（根），无法判定按可写处理
+        }
+        return is_user_writable(&parent);
+    }
     let escaped = path.replace('\'', "''");
     let script = format!(
         "([IO.Directory]::GetAccessControl('{}')).GetSecurityDescriptorSddlForm(6)", // 6 = Access|Owner
@@ -1811,9 +1844,10 @@ fn grant_service_logon_right(account: &str) {
                                                              POLICY_VIEW_LOCAL_INFORMATION, SE_SERVICE_LOGON_NAME,
     };
 
-    // 解析账户名 → SID（".\user" 需先解析为完整名称，LookupAccountNameW 支持 ".\user"）
+    // 解析账户名 → SID（".\user" 是 cmd/net 语法，LookupAccountNameW 不支持，需剥离前缀）
     unsafe {
-        let name_wide = to_wide(account);
+        let name = account.strip_prefix(".\\").unwrap_or(account);
+        let name_wide = to_wide(name);
         let mut domain_len: u32 = 256;
         let mut sid_len: u32 = 0;
         let mut use_enum = SID_NAME_USE(0);
