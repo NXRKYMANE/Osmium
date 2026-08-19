@@ -1,5 +1,6 @@
 # Osmium — git attributes
-# 语言统计排除：.ps1（PowerShell 脚本）、.iss（Inno Setup 脚本）与 .cmd（批处理）不参与仓库语言统计
+# 语言统计排除：.ps1（PowerShell 脚本）、.iss（Inno Setup 脚本）、.cmd（批处理）与 .md（Markdown 文档）不参与仓库语言统计
 *.ps1 linguist-vendored=true
 *.iss linguist-vendored=true
 *.cmd linguist-vendored=true
+*.md linguist-vendored=true
