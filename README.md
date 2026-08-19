@@ -80,7 +80,7 @@ os --list
 
 > Every command has a short alias: `--ins` / `--uin` / `--str` / `--stp` / `--rst` / `--rfs` / `--kil` / `--sts` / `--del` / `--lst` / `--tst` / `--ext` (install / uninstall / start / stop / restart / refresh / kill / status / delete / list / test / extend).
 
-> The service name `Osmium Service Checker` is reserved; service names are validated: empty names, `.` / `..` (path traversal), path separators and control characters are rejected, length capped at 256.
+> The service name `Osmium Service Refresher` is reserved; service names are validated: empty names, `.` / `..` (path traversal), path separators and control characters are rejected, length capped at 256.
 
 ## Config Reference
 
@@ -388,18 +388,18 @@ With `deploy_inplace: true`, `--install` registers the current exe **in place**:
 - `service_name` must equal the actual exe file name (e.g. `os`; if you rename the exe, use its actual name), otherwise SCM cannot dispatch the service;
 - Designed for embedding Osmium into your own project; excluded from boot-time host upgrades and cleanup. Developers must manually upgrade `os.exe` from the [official Releases](https://github.com/NXRKYMANE/Osmium/releases).
 
-### Service Updater
+### Service Refresher
 
-The installer automatically registers a **Service Updater** (`Osmium Service Checker`) that performs boot-time maintenance and cleans up residue:
+The installer automatically registers a **Service Refresher** (`Osmium Service Refresher`) that performs boot-time maintenance and cleans up residue:
 
-1. **Registration (install time)** — The Inno Setup installer calls `os.exe -internal --install-updater`, registering itself with the `-internal --updater` parameter as a Windows service with "Automatic (Delayed Start)" so host services start before the maintenance scan.
-2. **Boot-time execution** — About 2 minutes after system startup, SCM launches the Service Updater. It scans `C:\ProgramData\Osmium\svcs\` and cleans up stale services and orphaned directories. Since all platform services share one host binary in the install directory, the host is upgraded by reinstalling the installer over the framework — there is no per-service binary replacement.
+1. **Registration (install time)** — The Inno Setup installer calls `os.exe -internal --install-refresher`, registering itself with the `-internal --refresher` parameter as a Windows service with "Automatic (Delayed Start)" so host services start before the maintenance scan.
+2. **Boot-time execution** — About 2 minutes after system startup, SCM launches the Service Refresher. It scans `C:\ProgramData\Osmium\svcs\` and cleans up stale services and orphaned directories. Since all platform services share one host binary in the install directory, the host is upgraded by reinstalling the installer over the framework — there is no per-service binary replacement.
 3. **Stale-service cleanup** — Removes services with a missing `.osiml`, nonexistent target, or unparsable config (plus their host directories), and orphaned directories (SCM record gone but the `svcs` folder remains).
-4. **Log cleanup** — Deletes logs older than 30 days in each service's log directory and the updater's own (`%ProgramData%\Osmium\updater\`), including `.err.log` split logs and `.N` rollover backups.
+4. **Log cleanup** — Deletes logs older than 30 days in each service's log directory and the refresher's own (`%ProgramData%\Osmium\refresher\`), including `.err.log` split logs and `.N` rollover backups.
 5. **Auto-stop** — The service stops itself after one full scan; it does not stay resident.
-6. **Removal (uninstall time)** — The Inno Setup uninstaller calls `os.exe -internal --uninstall-updater` to stop and remove the service.
+6. **Removal (uninstall time)** — The Inno Setup uninstaller calls `os.exe -internal --uninstall-refresher` to stop and remove the service.
 
-> The Service Updater runs at the next boot; the installer also restarts previously stopped services immediately after install.
+> The Service Refresher runs at the next boot; the installer also restarts previously stopped services immediately after install.
 
 ## Build
 
@@ -437,13 +437,13 @@ Pre-built installers are available on the [Releases](https://github.com/NXRKYMAN
 | --- | --- |
 | `osmium-win-x64-setup-v<VERSION>.exe` | Standard installer |
 
-The installer places `os.exe` in `%ProgramFiles%\Osmium\` and registers the Control Panel uninstall entry and the boot-time Service Updater.
+The installer places `os.exe` in `%ProgramFiles%\Osmium\` and registers the Control Panel uninstall entry and the boot-time Service Refresher.
 
 ### Installer Features
 
 - Installs `os.exe` to `%ProgramFiles%\Osmium\` and adds it to the system PATH
 - Component selection page: core (`os.exe`) is fixed; the official extension kit (`osmium64-official-kits.osx` → `Extension\`) is **unchecked by default** — tick it if you need the plugin features (sspi download / unzip / share mapping / reboot), usage: [Extension Guide](Docs/EXTENSION_EN.md)
-- Automatically registers the boot-time Service Updater (`--install-updater`)
+- Automatically registers the boot-time Service Refresher (`--install-refresher`)
 - Registers an uninstall entry in Windows Control Panel
 - Auto-detects old versions: silently upgrades on newer, prompts to reinstall on identical, warns on downgrade
 - Stops services that use `os.exe` before replacing it, then restarts them automatically after install — no reboot prompt
@@ -470,7 +470,7 @@ Osmium/
 │   └── src/                   # Rust sources
 │       ├── main.rs            # Entry: module wiring
 │       ├── service_cli.rs     # CLI: terminal command parsing / routing / help
-│       ├── service_core.rs    # Core: SCM API, deployment, Service Updater, download engine
+│       ├── service_core.rs    # Core: SCM API, deployment, Service Refresher, download engine
 │       ├── service_host.rs    # Service host: launches target process + plugin calls
 │       ├── service_config.rs  # TOML config model (serde)
 │       └── service_tests.rs   # Unit tests (139, incl. process-tree integration)

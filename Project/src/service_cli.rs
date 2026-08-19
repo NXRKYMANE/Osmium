@@ -1,4 +1,4 @@
-// ==================== CLI：终端命令接收 / 路由 / 帮助 ====================
+﻿// ==================== CLI：终端命令接收 / 路由 / 帮助 ====================
 // 只负责命令行解析与调用后端动作（service_core）；布局: 入口→帮助→辅助→路由→命令→底层辅助
 
 use std::path::PathBuf;
@@ -233,7 +233,7 @@ fn run_cli(args: &[String]) {
     }
 }
 
-/// -internal: 内部维护命令（服务更新程序注册/移除 / 共享宿主按名启动），与 -m 分开以免污染管理接口
+/// -internal: 内部维护命令（服务刷新程序注册/移除 / 共享宿主按名启动），与 -m 分开以免污染管理接口
 fn run_internal(args: &[String]) {
     if args.is_empty() {
         eprintln!("{}", red("Usage: -internal <command> [args...]"));
@@ -241,9 +241,9 @@ fn run_internal(args: &[String]) {
     }
     let cmd = args[0].to_lowercase().trim_start_matches('-').to_string();
     match cmd.as_str() {
-        "install-updater" => crate::service_core::install_svc_updater_command(),
-        "uninstall-updater" => crate::service_core::uninstall_svc_updater_command(),
-        "updater" => crate::service_core::run_svc_updater_service(),
+        "install-refresher" => crate::service_core::install_svc_refresher_command(),
+        "uninstall-refresher" => crate::service_core::uninstall_svc_refresher_command(),
+        "refresher" => crate::service_core::run_svc_refresher_service(),
         "run" => {
             // 共享宿主部署: ImagePath = "<宿主>" -internal --run <name>，按名加载 svcs\<name>\<name>.osiml
             if args.len() < 2 {

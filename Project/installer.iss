@@ -1,8 +1,8 @@
 ; Osmium (Rust) Inno Setup 安装脚本：双语 / /VERYSILENT 静默 / 版本比较
-; 服务更新程序注册与卸载 / PATH 注册 / 可选扩展组件
+; 服务刷新程序注册与卸载 / PATH 注册 / 可选扩展组件
 
 #define MyAppName "Osmium"
-#define MyAppVersion "26.8.0"
+#define MyAppVersion "26.8.1"
 #define MyAppPublisher "Copyright (C) 2026 NXRKYMANE SOFTWARE"
 #define MyAppURL "https://github.com/NXRKYMANE/Osmium"
 #define MyAppExeName "os.exe"
@@ -19,7 +19,7 @@ AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 ; 安装目录必须与 install_path() 一致（Program Files\Osmium\os.exe），
-; 否则 -internal --install-updater 的 require_install_path 校验会失败
+; 否则 -internal --install-refresher 的 require_install_path 校验会失败
 DefaultDirName={autopf}\Osmium
 DisableProgramGroupPage=yes
 PrivilegesRequired=admin
@@ -40,7 +40,7 @@ CloseApplications=yes
 RestartApplications=no
 UsePreviousLanguage=no
 ; 强制安装到 Program Files\Osmium（与 install_path() 契约一致），用户不可选目录，避免安装到
-; 其它位置导致 -internal --install-updater 的 require_install_path 校验失败
+; 其它位置导致 -internal --install-refresher 的 require_install_path 校验失败
 DisableDirPage=yes
 DirExistsWarning=no
 ; 显式安装总是弹语言选择框；静默/自动化安装须显式传 /LANG=（/LANG 优先级最高，传了就不弹框）
@@ -69,10 +69,10 @@ english.SameVersionPrompt=An identical version (v%1) is already installed. Reins
 chinesesimp.SameVersionPrompt=已安装相同版本的 Osmium (v%1)。是否重新安装？
 english.DowngradePrompt=A newer version (v%1) is already installed. Downgrade to v{#MyAppVersion}?
 chinesesimp.DowngradePrompt=已安装更新的版本 (v%1)。降级到 v{#MyAppVersion}？
-english.UpdaterRegisterFail=Failed to register service updater.%n%n%1%n%nAbort: exit setup  |  Retry: try again  |  Ignore: skip and continue
-chinesesimp.UpdaterRegisterFail=注册服务更新程序失败。%n%n%1%n%n「终止」退出安装  「重试」重新注册  「忽略」跳过并继续
-english.UpdaterRemoveFail=Failed to remove service updater.%n%n%1%n%nAbort: exit uninstall  |  Retry: try again  |  Ignore: skip and continue
-chinesesimp.UpdaterRemoveFail=移除服务更新程序失败。%n%n%1%n%n「终止」退出卸载  「重试」重新尝试  「忽略」跳过并继续
+english.RefresherRegisterFail=Failed to register service refresher.%n%n%1%n%nAbort: exit setup  |  Retry: try again  |  Ignore: skip and continue
+chinesesimp.RefresherRegisterFail=注册服务刷新程序失败。%n%n%1%n%n「终止」退出安装  「重试」重新注册  「忽略」跳过并继续
+english.RefresherRemoveFail=Failed to remove service refresher.%n%n%1%n%nAbort: exit uninstall  |  Retry: try again  |  Ignore: skip and continue
+chinesesimp.RefresherRemoveFail=移除服务刷新程序失败。%n%n%1%n%n「终止」退出卸载  「重试」重新尝试  「忽略」跳过并继续
 english.NoOutput=(no output captured; exit code %1)
 chinesesimp.NoOutput=（未捕获到输出；退出码 %1）
 english.InstallCancelled=Installation cancelled.
@@ -481,7 +481,7 @@ end;
 
 function InitializeSetup(): Boolean;
 begin
-  // 静默安装参数（/VERYSILENT /LANG=...）由 updater 直接传入：Inno 在 SYSTEM（Session 0）下
+  // 静默安装参数（/VERYSILENT /LANG=...）由 refresher 直接传入：Inno 在 SYSTEM（Session 0）下
   // 以临时服务模式安装，此处任何 cmd.exe 重入都会递归卡死，故直接继续
   Result := True;
 end;
@@ -513,7 +513,7 @@ begin
     end;
   end;
 
-  // 3. 停止所有引用 os.exe 的服务（共享宿主/更新程序运行时占用 os.exe，文件无法覆盖替换），
+  // 3. 停止所有引用 os.exe 的服务（共享宿主/刷新程序运行时占用 os.exe，文件无法覆盖替换），
   // 并把服务名记录到临时文件，安装完成后由 ssPostInstall 重新启动。
   // WMI StopService() 异步触发：所有服务并行停止（不等单个服务走完优雅流程），
   // 随后轮询等待全部进入 Stopped（总超时 3 分钟，覆盖 poststop 钩子/停止超时），失败容忍
@@ -528,12 +528,12 @@ begin
   AddLog('Cleanup done.');
 end;
 
-// ── 服务更新程序注册：文件复制与注册表写入完成后调用（ssPostInstall）──
+// ── 服务刷新程序注册：文件复制与注册表写入完成后调用（ssPostInstall）──
 procedure ConfigureService;
 begin
-  // 注册开机服务更新程序以在下次重启后升级服务宿主
-  AddLog('Registering boot-time service updater...');
-  if not RunOsmiumCommand('-internal --install-updater', CustomMessage('UpdaterRegisterFail')) then
+  // 注册开机服务刷新程序，下次开机执行失效服务/孤儿目录/过期日志清理
+  AddLog('Registering boot-time service refresher...');
+  if not RunOsmiumCommand('-internal --install-refresher', CustomMessage('RefresherRegisterFail')) then
     Abort;
   // 添加到系统 PATH（卸载/升级不删除，与 NSI 一致）
   AddToPath;
@@ -567,7 +567,7 @@ begin
     // 目录/文件须仅 SYSTEM/Administrators 可写，否则任意登录用户可替换插件获得 SYSTEM 提权（P0）
     SecureExtsDir;
     ConfigureService;
-    // 重新启动安装前被停止的服务（共享宿主/更新程序已由新版 os.exe 接管，无需重启系统）。
+    // 重新启动安装前被停止的服务（共享宿主/刷新程序已由新版 os.exe 接管，无需重启系统）。
     // WMI StartService() 异步触发即返回：安装器不被慢启动服务阻塞（宿主自身在 SCM 下完成
     // 下载/钩子等流程），失败容忍
     SvcList := ExpandConstant('{tmp}\osmium-svc-list.txt');
@@ -581,13 +581,13 @@ begin
     AddLog('Installation complete.');
 end;
 
-// ── 卸载：移除服务更新程序；失败弹「终止 / 重试 / 忽略」──
+// ── 卸载：移除服务刷新程序；失败弹「终止 / 重试 / 忽略」──
 function InitializeUninstall: Boolean;
 begin
   Result := True;
 
-  // 移除服务更新程序（失败弹窗；Abort → 终止卸载，Ignore → 继续）
-  if not RunOsmiumCommand('-internal --uninstall-updater', CustomMessage('UpdaterRemoveFail')) then
+  // 移除服务刷新程序（失败弹窗；Abort → 终止卸载，Ignore → 继续）
+  if not RunOsmiumCommand('-internal --uninstall-refresher', CustomMessage('RefresherRemoveFail')) then
   begin
     Result := False;
     Exit;

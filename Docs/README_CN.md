@@ -80,7 +80,7 @@ os --list
 
 > 所有命令均支持简化别名：`--ins` / `--uin` / `--str` / `--stp` / `--rst` / `--rfs` / `--kil` / `--sts` / `--del` / `--lst` / `--tst` / `--ext`（分别对应安装 / 卸载 / 启动 / 停止 / 重启 / 刷新 / 强杀 / 状态 / 删除 / 列表 / 测试 / 扩展）。
 
-> 服务名 `Osmium Service Checker` 为保留名；服务名需合法：拒绝空名、`.` / `..`（防路径穿越）、路径分隔符与控制字符，长度 ≤ 256。
+> 服务名 `Osmium Service Refresher` 为保留名；服务名需合法：拒绝空名、`.` / `..`（防路径穿越）、路径分隔符与控制字符，长度 ≤ 256。
 
 ## 配置参考
 
@@ -388,18 +388,18 @@ Java 应用经 `java.exe` 启动，与其他可执行程序一样享受崩溃自
 - `service_name` 必须等于实际 exe 文件名（如 `os`，exe 改名则以其实际文件名为准），否则 SCM 无法分派；
 - 适合嵌入自有项目独立使用；不参与开机宿主升级与清理，需开发者自行到[官网 Releases](https://github.com/NXRKYMANE/Osmium/releases) 下载新版 `os.exe` 手动升级。
 
-### 服务更新程序
+### 服务刷新程序
 
-安装包会自动注册 **服务更新程序**（`Osmium Service Checker`），开机后执行维护并清理残留：
+安装包会自动注册 **服务刷新程序**（`Osmium Service Refresher`），开机后执行维护并清理残留：
 
-1. **注册（安装时）** — Inno Setup 安装程序调用 `os.exe -internal --install-updater`，以 `-internal --updater` 参数注册为「自动（延迟启动）」服务，确保宿主服务先于维护扫描启动。
-2. **开机执行** — 系统启动约 2 分钟后扫描 `C:\ProgramData\Osmium\svcs\`，清理失效服务与孤儿目录。所有平台服务共用安装目录中的同一份宿主二进制，宿主升级由重装安装包覆盖完成，更新程序不再逐服务替换宿主副本。
+1. **注册（安装时）** — Inno Setup 安装程序调用 `os.exe -internal --install-refresher`，以 `-internal --refresher` 参数注册为「自动（延迟启动）」服务，确保宿主服务先于维护扫描启动。
+2. **开机执行** — 系统启动约 2 分钟后扫描 `C:\ProgramData\Osmium\svcs\`，清理失效服务与孤儿目录。所有平台服务共用安装目录中的同一份宿主二进制，宿主升级由重装安装包覆盖完成，刷新程序不再逐服务替换宿主副本。
 3. **清理失效服务** — 移除 osiml 缺失 / 目标不存在 / 配置解析失败的服务及其宿主目录，并清理 SCM 无记录但 `svcs` 仍存在的孤儿目录。
-4. **日志清理** — 删除各服务日志及更新程序自身日志（`%ProgramData%\Osmium\updater\`）中超过 30 天的文件（含 `.err.log` 分流与 `.N` 滚动备份）。
+4. **日志清理** — 删除各服务日志及刷新程序自身日志（`%ProgramData%\Osmium\refresher\`）中超过 30 天的文件（含 `.err.log` 分流与 `.N` 滚动备份）。
 5. **自动停止** — 一轮扫描后自动停止，不常驻后台。
-6. **移除（卸载时）** — Inno Setup 卸载程序调用 `os.exe -internal --uninstall-updater` 停止并移除该服务。
+6. **移除（卸载时）** — Inno Setup 卸载程序调用 `os.exe -internal --uninstall-refresher` 停止并移除该服务。
 
-> 更新程序在下次开机时运行；安装器会在安装完成后立即重启之前停止的服务。
+> 刷新程序在下次开机时运行；安装器会在安装完成后立即重启之前停止的服务。
 
 ## 构建
 
@@ -437,13 +437,13 @@ ISCC installer.iss                        # → Publish\osmium-win-x64-setup-v<�
 | --- | --- |
 | `osmium-win-x64-setup-v<版本>.exe` | 标准安装包 |
 
-安装包将 `os.exe` 安装到 `%ProgramFiles%\Osmium\`，注册控制面板卸载条目与开机服务更新程序。
+安装包将 `os.exe` 安装到 `%ProgramFiles%\Osmium\`，注册控制面板卸载条目与开机服务刷新程序。
 
 ### 安装器特性
 
 - 将 `os.exe` 安装到 `%ProgramFiles%\Osmium\` 并加入系统 PATH
 - 选择组件页：core（`os.exe`）固定必选；官方扩展包（`osmium64-official-kits.osx` → `Extension\`）**默认不勾选**，需要插件功能（sspi 下载 / 解压 / 共享映射 / 重启）时勾上，用法见 [插件指南](EXTENSION_CN.md)
-- 自动注册开机服务更新程序（`--install-updater`）
+- 自动注册开机服务刷新程序（`--install-refresher`）
 - 注册控制面板卸载条目
 - 自动检测旧版本：高版本静默升级、同版本询问重装、低版本警告降级
 - 替换 os.exe 前自动停止使用它的服务，安装完成后自动重启，无重启提示
@@ -470,7 +470,7 @@ Osmium/
 │   └── src/                   # Rust 源码
 │       ├── main.rs            # 入口：模块装配
 │       ├── service_cli.rs     # CLI：终端命令接收 / 路由 / 帮助
-│       ├── service_core.rs    # 核心：SCM API、部署、服务更新程序、下载引擎
+│       ├── service_core.rs    # 核心：SCM API、部署、服务刷新程序、下载引擎
 │       ├── service_host.rs    # 服务宿主：拉起目标进程 + 插件调用
 │       ├── service_config.rs  # TOML 配置模型（serde）
 │       └── service_tests.rs   # 单元测试（139 个，含进程树集成测试）

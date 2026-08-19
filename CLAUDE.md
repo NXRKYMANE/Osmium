@@ -19,6 +19,16 @@
 - 重大修改和调优前记得备份一个,已经多次发生翻车事故造成项目从头来的情况
 # 项目记录
 
+## v26.8.0（2026-08-19）· 刷新程序日志目录 refresh → refresher
+- 用户要求目录名与刷新程序一致：`ProgramData\Osmium\refresh` → `ProgramData\Osmium\refresher`（refresher_log_dir join/fallback + 2 README 同步）
+- 真机验证：注册 → 运行 → `ProgramData\Osmium\refresher\*.log`（[refresher] Scanning）→ 卸载移除；旧 refresh 残留目录已清理；146 全过、clippy 零警告
+
+## v26.8.0（2026-08-19）· 术语重命名 updater/更新程序 → refresher/刷新程序
+- 全项目术语统一：服务名 `Osmium Service Checker` → `Osmium Service Refresher`；内部命令 `-internal --install-updater/--uninstall-updater/--updater` → `--install-refresher/--uninstall-refresher/--refresher`；日志目录 `ProgramData\Osmium\updater` → `refresh`（日志通道 `[updater]` → `[refresher]`）；函数/常量/注释（updater→refresher、更新程序→刷新程序）
+- 范围：service_core（SVC_REFRESHER_*/refresher_log_dir/write_refresher_log/refresh_outdated_hosts/SCM_REFRESHER_MODE/is_refresher_reserved_name 保留名）、service_cli（-internal 路由）、installer.iss（RefresherRegisterFail/RemoveFail 消息 + 命令）、2 README、测试（保留名断言换新名）
+- 保留不动：install 覆盖更新的 "Service updated successfully"（SCM 更新语义，非 updater 机制）；AppUpdatesURL（Inno 内置属性）
+- 真机验证：注册 → 运行 → `ProgramData\Osmium\refresh\*.log`（[refresher] Scanning）→ 卸载移除；旧 updater/refresher 目录残留已清理；146 全过、clippy 零警告
+
 ## v26.7.2（2026-08-19）· 平台模式（svcs 共享宿主）全矩阵真机回归
 - 平台部署差异点全验证（共享宿主 Program Files\Osmium\os.exe + svcs 部署）：install → svcs\<name>\<name>.osiml 生成 + 目录 ACL 收紧（仅 SYSTEM/Admin）→ ImagePath 共享宿主 -internal --run 格式 → start（.osiml 加载）→ 日志落 svcs\<name>\logs → 优雅停止（Ctrl+C）→ uninstall 无残留
 - 运行字段抽查（平台路径，宿主逻辑与 inplace 同源）：env 注入（1 变量）、优先级 High、prestart 钩子（引号空格路径 + /s 修复后）、runaway_memory_limit_mb 触发（70MB>1MB 强杀）、runaway_pid_file 回写/停止删除、plugins ping 调用（Program Files 插件发现执行）、--list 列出平台服务、--extend 绿点

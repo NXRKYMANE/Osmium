@@ -20,7 +20,7 @@ use crate::service_config::{DownloadConfig, ServiceConfig, SharedMapperConfig};
 use crate::service_core::{DownloadAuth,
                           build_dependency_string, can_overwrite_source, compare_versions,
                           decrypt_sensitive, delete_dir_tree, delete_old_logs, deployed_config_path, download_core, dpapi_decrypt, dpapi_encrypt, get_file_version, get_own_path,
-                          green_dot, has_download, is_updater_reserved_name, is_user_writable, is_valid_service_name, load_config,
+                          green_dot, has_download, is_refresher_reserved_name, is_user_writable, is_valid_service_name, load_config,
                           parse_start_mode, red, red_dot,
                           safe_delete_dir, scm_sleep_time_ms, scm_status_params, scm_wait_hint_ms, sddl_dacl_grants_non_admin_write, sddl_owner_is_administrative, secure_directory,
                           security_descriptor_from_sddl,
@@ -117,7 +117,7 @@ fn cli_short_aliases_cover_test() {
     // 非命令参数不应误判为 CLI 命令
     assert!(!crate::service_cli::is_cli_command("-m"));
     assert!(!crate::service_cli::is_cli_command("--help"));
-    assert!(!crate::service_cli::is_cli_command("--updater"));
+    assert!(!crate::service_cli::is_cli_command("--refresher"));
     assert!(!crate::service_cli::is_cli_command("my-service"));
 }
 
@@ -240,13 +240,13 @@ fn is_valid_service_name_rejects_path_escape() {
 }
 
 #[test]
-fn is_updater_reserved_name_case_insensitive() {
-    assert!(is_updater_reserved_name("Osmium Service Checker"));
-    assert!(is_updater_reserved_name("osmium service checker")); // 大小写不敏感
-    assert!(is_updater_reserved_name("OSMIUM SERVICE CHECKER"));
-    assert!(!is_updater_reserved_name("checker"));
-    assert!(!is_updater_reserved_name("Osmium"));
-    assert!(!is_updater_reserved_name(""));
+fn is_refresher_reserved_name_case_insensitive() {
+    assert!(is_refresher_reserved_name("Osmium Service Refresher"));
+    assert!(is_refresher_reserved_name("osmium service refresher")); // 大小写不敏感
+    assert!(is_refresher_reserved_name("OSMIUM SERVICE REFRESHER"));
+    assert!(!is_refresher_reserved_name("checker"));
+    assert!(!is_refresher_reserved_name("Osmium"));
+    assert!(!is_refresher_reserved_name(""));
 }
 
 #[test]
@@ -2706,12 +2706,12 @@ fn panic_log_path_follows_install_location() {
 
 #[test]
 fn write_log_line_appends_dated_entry() {
-    // 更新程序日志底层: 写入 yyyy-MM-dd.log，条目含时间戳与通道名
+    // 刷新程序日志底层: 写入 yyyy-MM-dd.log，条目含时间戳与通道名
     let dir = unique_temp_dir("wlogline");
-    crate::service_core::write_log_line(&dir, "updater", "test-entry");
+    crate::service_core::write_log_line(&dir, "refresher", "test-entry");
     let today = chrono::Local::now().format("%Y-%m-%d");
     let content = std::fs::read_to_string(dir.join(format!("{today}.log"))).unwrap();
-    assert!(content.contains("[updater]"), "应含通道名: {content}");
+    assert!(content.contains("[refresher]"), "应含通道名: {content}");
     assert!(content.contains("test-entry"), "应含消息: {content}");
     assert!(content.contains(&today.to_string()), "应含日期: {content}");
     let _ = std::fs::remove_dir_all(&dir);

@@ -44,14 +44,14 @@ pub(crate) fn f(template: &str, args: &[&str]) -> String {
     s
 }
 
-/// 更新程序的启动类型 — 自动启动
-const SVC_UPDATER_START_MODE: SERVICE_START_TYPE = SERVICE_AUTO_START;
+/// 刷新程序的启动类型 — 自动启动
+const SVC_REFRESHER_START_MODE: SERVICE_START_TYPE = SERVICE_AUTO_START;
 
-/// 更新程序为一次性任务，无需故障恢复
-const SVC_UPDATER_FAILURE_RESET_SEC: u32 = 0;
+/// 刷新程序为一次性任务，无需故障恢复
+const SVC_REFRESHER_FAILURE_RESET_SEC: u32 = 0;
 
-/// 更新程序为一次性任务，无需重启延迟
-const SVC_UPDATER_RESTART_DELAY_MS: u32 = 0;
+/// 刷新程序为一次性任务，无需重启延迟
+const SVC_REFRESHER_RESTART_DELAY_MS: u32 = 0;
 
 /// 超过此天数的服务日志将在启动时被清理
 const LOG_RETENTION_DAYS: i64 = 30;
@@ -65,15 +65,15 @@ pub(crate) const SCM_OP_TIMEOUT_SECS: u64 = 30;
 /// 服务名校验失败的错误消息模板（多处共用，避免文案漂移）
 const INVALID_NAME_MSG: &str = "Invalid service name: '{0}'. Service names must be 1-256 chars, must not be '.' or '..', and must not contain '\\', '/' or control characters.";
 
-/// 内部服务更新程序保留名冲突的错误消息模板（多处共用）
-const RESERVED_NAME_MSG: &str = "Service name '{0}' is reserved for the internal Osmium Service Checker. Use a different service_name.";
+/// 内部服务刷新程序保留名冲突的错误消息模板（多处共用）
+const RESERVED_NAME_MSG: &str = "Service name '{0}' is reserved for the internal Osmium Service Refresher. Use a different service_name.";
 
 /// 服务名已被其他服务注册的错误消息模板（多处共用）
 const ALREADY_REGISTERED_MSG: &str = "Service name '{0}' is already registered by a different service. Use a different service_name or uninstall it first.";
 
-/// 服务名是否为更新程序保留名
-pub(crate) fn is_updater_reserved_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case("Osmium Service Checker")
+/// 服务名是否为刷新程序保留名
+pub(crate) fn is_refresher_reserved_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Osmium Service Refresher")
 }
 
 /// CLI 输出统一前缀（对齐 WinSW 的 "WinSW Service Management Interface" 输出风格）
@@ -93,8 +93,8 @@ pub(crate) fn run_service_host_with_name(name: &str) {
     scm_entry(false, Some(name.to_string()));
 }
 
-/// 服务更新程序服务入口（-internal --updater）
-pub(crate) fn run_svc_updater_service() {
+/// 服务刷新程序服务入口（-internal --refresher）
+pub(crate) fn run_svc_refresher_service() {
     scm_entry(true, None);
 }
 
@@ -104,7 +104,7 @@ pub(crate) fn write_quick_config(name: &str, exe_path: &str) -> String {
     if !is_valid_service_name(name) {
         error(&f(INVALID_NAME_MSG, &[name]));
     }
-    if is_updater_reserved_name(name) {
+    if is_refresher_reserved_name(name) {
         error(&f(RESERVED_NAME_MSG, &[name]));
     }
     let rooted = Path::new(exe_path).is_absolute() || exe_path.starts_with('\\');
@@ -162,9 +162,9 @@ pub(crate) fn install_from_config_path(config_path_str: &str) {
         return;
     }
 
-    // 保留名冲突: "Osmium Service Checker" 是内部开机更新程序的服务名，
-    // 若允许用户服务同名，install-updater 会误停/误卸用户的服务
-    if is_updater_reserved_name(&svc_name) {
+    // 保留名冲突: "Osmium Service Refresher" 是内部开机刷新程序的服务名，
+    // 若允许用户服务同名，install-refresher 会误停/误卸用户的服务
+    if is_refresher_reserved_name(&svc_name) {
         error(&f(RESERVED_NAME_MSG, &[&svc_name]));
         return;
     }
@@ -310,7 +310,7 @@ pub(crate) fn install_from_config_path(config_path_str: &str) {
         format!("\"{}\"", own_exe)
     } else {
         // 平台化部署: 先收紧 Osmium/svcs/服务叶目录 ACL（所有者 Administrators + 仅 SYSTEM/Admin 可写），
-        // 防普通用户预建目录/junction 诱导 SYSTEM 更新器误删服务；加固失败必须中止安装（防 P0-2）
+        // 防普通用户预建目录/junction 诱导 SYSTEM 刷新器误删服务；加固失败必须中止安装（防 P0-2）
         let osmium_dir = registry_dir().parent()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| registry_dir().to_string_lossy().to_string());
@@ -791,13 +791,13 @@ pub(crate) fn deployed_config_path(name: &str) -> PathBuf {
     registry_dir().join(name).join(format!("{}.osiml", name))
 }
 
-/// 服务更新程序日志目录 — 与 svcs 并列（ProgramData/Osmium/updater），
-/// 避免占用 svcs/updater 目录，防止与真实名为 updater 的服务冲突
-fn updater_log_dir() -> PathBuf {
+/// 服务刷新程序日志目录 — 与 svcs 并列（ProgramData/Osmium/refresher），
+/// 避免占用 svcs/refresh 目录，防止与真实名为 refresh 的服务冲突
+fn refresher_log_dir() -> PathBuf {
     registry_dir()
         .parent()
-        .map(|p| p.join("updater"))
-        .unwrap_or_else(|| PathBuf::from("C:\\ProgramData\\Osmium\\updater"))
+        .map(|p| p.join("refresher"))
+        .unwrap_or_else(|| PathBuf::from("C:\\ProgramData\\Osmium\\refresher"))
 }
 
 /// 是否 Osmium 管理的服务: 平台部署按 SCM ImagePath 是否位于 svcs 判定（而非仅目录存在，
@@ -855,7 +855,7 @@ fn get_service_image_path(service_name: &str) -> Option<String> {
 }
 
 /// 判定 SCM 服务是否 Osmium 平台部署（新格式 `-internal --run <name>` 或旧格式 ImagePath 位于 svcs 目录内）；
-/// 供更新器/--list 按目录名操作前校验，防止误操作外部服务或被同名目录诱导
+/// 供刷新器/--list 按目录名操作前校验，防止误操作外部服务或被同名目录诱导
 fn is_osmium_deployed(service_name: &str) -> bool {
     let Some(image) = get_service_image_path(service_name) else { return false };
     // 新格式: 共享宿主 + -internal --run <name>（按名判定，最准确）
@@ -1105,7 +1105,7 @@ pub(crate) fn safe_delete_dir(path: &Path) {
 }
 
 /// 递归删除目录树；安全要点: 用 DirEntry::file_type 判断（不跟随符号链接），Path::is_dir 会跟随
-/// junction/symlink，攻击者可放置指向任意目录的 junction 诱导 SYSTEM 更新器递归删除其目标（#4）
+/// junction/symlink，攻击者可放置指向任意目录的 junction 诱导 SYSTEM 刷新器递归删除其目标（#4）
 pub(crate) fn delete_dir_tree(path: &Path) -> bool {
     if !path.exists() {
         return true;
@@ -1138,7 +1138,7 @@ pub(crate) fn delete_dir_tree(path: &Path) -> bool {
     ok
 }
 
-// ==================== 服务更新程序 — 元数据 & 命令 ====================
+// ==================== 服务刷新程序 — 元数据 & 命令 ====================
 
 /// 返回 os.exe 的安装路径
 fn install_path() -> PathBuf {
@@ -1158,25 +1158,25 @@ fn require_install_path() {
     }
 }
 
-/// -internal --install-updater: 将 Osmium 自身注册为开机服务更新程序
-pub(crate) fn install_svc_updater_command() {
+/// -internal --install-refresher: 将 Osmium 自身注册为开机服务刷新程序
+pub(crate) fn install_svc_refresher_command() {
     require_install_path();
 
-    if service_exists("Osmium Service Checker") {
-        force_remove_service("Osmium Service Checker", false);
+    if service_exists("Osmium Service Refresher") {
+        force_remove_service("Osmium Service Refresher", false);
     }
 
     let own_exe = get_own_path();
-    let bin_path = format!("\"{}\" -internal --updater", own_exe);
+    let bin_path = format!("\"{}\" -internal --refresher", own_exe);
 
     match install_service_scm(&InstallServiceParams {
-        service_name: "Osmium Service Checker",
-        display_name: "Osmium Service Checker",
+        service_name: "Osmium Service Refresher",
+        display_name: "Osmium Service Refresher",
         description: "Boot-time maintenance service: removes stale Osmium services and orphaned directories, cleans up expired logs, and stops after running once.",
         executable_path: &bin_path,
-        start_mode: SVC_UPDATER_START_MODE,
-        failure_reset_sec: SVC_UPDATER_FAILURE_RESET_SEC,
-        restart_delay_ms: SVC_UPDATER_RESTART_DELAY_MS,
+        start_mode: SVC_REFRESHER_START_MODE,
+        failure_reset_sec: SVC_REFRESHER_FAILURE_RESET_SEC,
+        restart_delay_ms: SVC_REFRESHER_RESTART_DELAY_MS,
         dependencies: None,
         service_account: None,
         password: None,
@@ -1186,30 +1186,30 @@ pub(crate) fn install_svc_updater_command() {
         allow_service_logon: false,
         security_descriptor: None,
     }) {
-        Ok(()) => println!("{CLI_PREFIX}: Service updater registered (runs on boot)"),
-        Err(e) => error(&f("Service updater registration failed: {0}", &[&e])),
+        Ok(()) => println!("{CLI_PREFIX}: Service refresher registered (runs on boot)"),
+        Err(e) => error(&f("Service refresher registration failed: {0}", &[&e])),
     }
 }
 
-/// -internal --uninstall-updater: 移除服务更新程序
-pub(crate) fn uninstall_svc_updater_command() {
+/// -internal --uninstall-refresher: 移除服务刷新程序
+pub(crate) fn uninstall_svc_refresher_command() {
     require_install_path();
 
-    if !service_exists("Osmium Service Checker") {
-        println!("{CLI_PREFIX}: Service updater not found");
+    if !service_exists("Osmium Service Refresher") {
+        println!("{CLI_PREFIX}: Service refresher not found");
         return;
     }
     // 尽力停止后卸载（停止失败也继续卸载）
-    let _ = stop_service("Osmium Service Checker", Duration::from_secs(SCM_OP_TIMEOUT_SECS));
-    match uninstall_service_scm("Osmium Service Checker") {
-        Ok(()) => println!("{CLI_PREFIX}: Service updater removed"),
-        Err(e) => error(&f("Service updater removal failed: {0}", &[&e])),
+    let _ = stop_service("Osmium Service Refresher", Duration::from_secs(SCM_OP_TIMEOUT_SECS));
+    match uninstall_service_scm("Osmium Service Refresher") {
+        Ok(()) => println!("{CLI_PREFIX}: Service refresher removed"),
+        Err(e) => error(&f("Service refresher removal failed: {0}", &[&e])),
     }
 }
 
-// ==================== 服务更新程序 — 升级 & 清理 ====================
+// ==================== 服务刷新程序 — 开机维护 & 清理 ====================
 
-/// 删除各服务日志目录以及服务更新程序日志目录中超过 LOG_RETENTION_DAYS 天的日志文件；
+/// 删除各服务日志目录以及服务刷新程序日志目录中超过 LOG_RETENTION_DAYS 天的日志文件；
 /// 服务开启 log_zip 时先归档再删除（过期日志都有归档机会），未开启则直接删
 fn cleanup_old_logs() {
     let cutoff = chrono::Local::now().date_naive() - chrono::Duration::days(LOG_RETENTION_DAYS);
@@ -1222,10 +1222,10 @@ fn cleanup_old_logs() {
         }
     }
 
-    // 清理服务更新程序日志（自身无 log_zip 配置，不归档直接删）
-    let updater_log_dir = updater_log_dir();
-    if updater_log_dir.exists() {
-        deleted += delete_old_logs(&updater_log_dir, cutoff, false);
+    // 清理服务刷新程序日志（自身无 log_zip 配置，不归档直接删）
+    let refresher_log_dir = refresher_log_dir();
+    if refresher_log_dir.exists() {
+        deleted += delete_old_logs(&refresher_log_dir, cutoff, false);
     }
 
     // panic.log 位于 svcs 根目录（独立于各服务 logs 子目录，无日期前缀），按 mtime 纳入清理
@@ -1296,7 +1296,7 @@ pub(crate) fn delete_old_logs(log_dir: &Path, cutoff: chrono::NaiveDate, zip_arc
 /// 串行化日志文件写入，避免多线程 append 同一文件时 IO 冲突
 static LOG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
-/// 写入日志条目: <log_dir>/yyyy-MM-dd.log（服务宿主与更新程序共用）
+/// 写入日志条目: <log_dir>/yyyy-MM-dd.log（服务宿主与刷新程序共用）
 pub(crate) fn write_log_line(log_dir: &Path, channel: &str, message: &str) {
     let _ = std::fs::create_dir_all(log_dir);
     let today = chrono::Local::now().format("%Y-%m-%d");
@@ -1314,37 +1314,37 @@ pub(crate) fn write_log_line(log_dir: &Path, channel: &str, message: &str) {
         });
 }
 
-/// 写入服务更新程序日志: ProgramData/Osmium/updater/yyyy-MM-dd.log
-fn write_updater_log(channel: &str, message: &str) {
-    write_log_line(&updater_log_dir(), channel, message);
+/// 写入服务刷新程序日志: ProgramData/Osmium/refresher/yyyy-MM-dd.log
+fn write_refresher_log(channel: &str, message: &str) {
+    write_log_line(&refresher_log_dir(), channel, message);
 }
 
 /// 开机维护: 校验并清理失效服务 / 孤儿目录 / 过期日志；仅扫描 svcs 平台部署目录。
 /// 共享宿主复用安装目录同一份 exe，宿主升级由重装安装包覆盖；inplace 服务平台不兜底
-fn upgrade_outdated_hosts() {
+fn refresh_outdated_hosts() {
     let services = get_service_names();
     if services.is_empty() {
-        write_updater_log("updater", "No registered services found, skipping cleanup");
+        write_refresher_log("refresher", "No registered services found, skipping cleanup");
         cleanup_old_logs();
         return;
     }
 
     // 校验并清理失效服务 / 孤儿目录（共享宿主部署: 所有服务复用框架安装目录的同一份 exe，
-    // 宿主升级由重装安装包覆盖共享 exe 完成，更新器不再逐服务替换宿主副本）
+    // 宿主升级由重装安装包覆盖共享 exe 完成，刷新器不再逐服务替换宿主副本）
     for svc_name in &services {
-        // 更新程序自身不部署 svcs 目录，跳过保留名目录
-        if !svc_name.eq_ignore_ascii_case("Osmium Service Checker") {
+        // 刷新程序自身不部署 svcs 目录，跳过保留名目录
+        if !svc_name.eq_ignore_ascii_case("Osmium Service Refresher") {
             cleanup_invalid_service(svc_name);
         }
     }
 
     let services = get_service_names();
     if services.is_empty() {
-        write_updater_log("updater", "All services were stale, nothing to clean");
+        write_refresher_log("refresher", "All services were stale, nothing to clean");
         cleanup_old_logs();
         return;
     }
-    write_updater_log("updater", &f("Scanning {0} registered service(s)",
+    write_refresher_log("refresher", &f("Scanning {0} registered service(s)",
         &[&services.len().to_string()]));
 
     cleanup_old_logs();
@@ -1356,20 +1356,20 @@ fn cleanup_invalid_service(svc_name: &str) {
     let base = registry_dir().join(svc_name);
     // 卸载残留: 卸载流程中断可能只删了 SCM 记录而遗留目录
     if !service_exists(svc_name) {
-        write_updater_log("warn", &f("[{0}] Service not in SCM, removing orphaned directory", &[svc_name]));
+        write_refresher_log("warn", &f("[{0}] Service not in SCM, removing orphaned directory", &[svc_name]));
         safe_delete_dir(&base);
         return;
     }
     // 安全边界: 仅当目录对应 Osmium 部署的服务才可操作；普通用户可伪造与系统服务同名的空目录，
-    // 直接按目录名停止/卸载会诱导 SYSTEM 更新器删除无关服务
+    // 直接按目录名停止/卸载会诱导 SYSTEM 刷新器删除无关服务
     if !is_osmium_deployed(svc_name) {
-        write_updater_log("warn", &f("[{0}] Invalid config ({1}), removing stale service", &[svc_name, "not an Osmium-managed service"]));
+        write_refresher_log("warn", &f("[{0}] Invalid config ({1}), removing stale service", &[svc_name, "not an Osmium-managed service"]));
         return;
     }
     let config_path = deployed_config_path(svc_name);
 
     if !config_path.exists() {
-        write_updater_log("warn", &f("[{0}] Config file missing, removing stale service", &[svc_name]));
+        write_refresher_log("warn", &f("[{0}] Config file missing, removing stale service", &[svc_name]));
         remove_stale_service(svc_name);
         return;
     }
@@ -1387,13 +1387,13 @@ fn cleanup_invalid_service(svc_name: &str) {
     });
     match invalid_exe {
         Ok(Some(exe_path)) => {
-            write_updater_log("warn", &f("[{0}] Invalid executable path '{1}', removing stale service", &[svc_name, &exe_path]));
+            write_refresher_log("warn", &f("[{0}] Invalid executable path '{1}', removing stale service", &[svc_name, &exe_path]));
             remove_stale_service(svc_name);
         }
         Ok(None) => {}
         Err(payload) => {
             let detail = panic_msg(&*payload, "unknown error");
-            write_updater_log("warn", &f("[{0}] Invalid config ({1}), removing stale service", &[svc_name, &detail]));
+            write_refresher_log("warn", &f("[{0}] Invalid config ({1}), removing stale service", &[svc_name, &detail]));
             remove_stale_service(svc_name);
         }
     }
@@ -1442,7 +1442,7 @@ pub(crate) fn restore_logs_dir(base: &Path, backup: Option<PathBuf>) {
 /// 移除失效服务: 停止 → 卸载 SCM 服务 → 等待删除 → 删除宿主目录
 fn remove_stale_service(svc_name: &str) {
     force_remove_service(svc_name, true);
-    write_updater_log("updater", &f("[{0}] Stale service removed", &[svc_name]));
+    write_refresher_log("refresher", &f("[{0}] Stale service removed", &[svc_name]));
 }
 
 // ==================== 下载 & 文件校验 ====================
@@ -2118,10 +2118,10 @@ fn service_exists(service_name: &str) -> bool {
     get_status_raw(service_name).is_ok()
 }
 
-// ==================== 服务宿主/更新程序入口 (SCM) ====================
+// ==================== 服务宿主/刷新程序入口 (SCM) ====================
 
-/// 当前进程是否为更新程序模式（true=-internal --updater, false=宿主）
-static SCM_UPDATER_MODE: Mutex<Option<bool>> = Mutex::new(None);
+/// 当前进程是否为刷新程序模式（true=-internal --refresher, false=宿主）
+static SCM_REFRESHER_MODE: Mutex<Option<bool>> = Mutex::new(None);
 /// 共享宿主显式服务名（-internal --run <name> 传入；None 时取 exe 文件名）
 static SCM_EXPLICIT_NAME: Mutex<Option<String>> = Mutex::new(None);
 static STOP_FLAG: AtomicBool = AtomicBool::new(false);
@@ -2158,10 +2158,10 @@ pub(crate) fn scm_sleep_time_ms() -> u32 {
     SCM_SLEEP_TIME_MS.load(Ordering::SeqCst)
 }
 
-/// 当前 SCM 注册的服务名: 更新程序使用保留名，共享宿主按显式名，普通宿主取自身文件名
-fn scm_svc_name(updater: bool) -> String {
-    if updater {
-        "Osmium Service Checker".to_string()
+/// 当前 SCM 注册的服务名: 刷新程序使用保留名，共享宿主按显式名，普通宿主取自身文件名
+fn scm_svc_name(refresher: bool) -> String {
+    if refresher {
+        "Osmium Service Refresher".to_string()
     } else if let Some(name) = SCM_EXPLICIT_NAME.lock().unwrap().clone() {
         name
     } else {
@@ -2169,14 +2169,14 @@ fn scm_svc_name(updater: bool) -> String {
     }
 }
 
-fn scm_entry(updater_mode: bool, explicit_name: Option<String>) {
+fn scm_entry(refresher_mode: bool, explicit_name: Option<String>) {
     use windows::Win32::System::Services::{SERVICE_TABLE_ENTRYW,
                                            StartServiceCtrlDispatcherW,
     };
 
-    *SCM_UPDATER_MODE.lock().unwrap() = Some(updater_mode);
+    *SCM_REFRESHER_MODE.lock().unwrap() = Some(refresher_mode);
     *SCM_EXPLICIT_NAME.lock().unwrap() = explicit_name;
-    let svc_name = scm_svc_name(updater_mode);
+    let svc_name = scm_svc_name(refresher_mode);
 
     // 重置停止标志
     STOP_FLAG.store(false, Ordering::SeqCst);
@@ -2208,9 +2208,9 @@ fn scm_service_main() {
         SERVICE_STOP_PENDING,
     };
 
-    let updater = SCM_UPDATER_MODE.lock().unwrap().unwrap_or(false);
+    let refresher = SCM_REFRESHER_MODE.lock().unwrap().unwrap_or(false);
 
-    let svc_name = scm_svc_name(updater);
+    let svc_name = scm_svc_name(refresher);
     let svc_name_wide = to_wide(&svc_name);
 
     unsafe {
@@ -2254,9 +2254,9 @@ fn scm_service_main() {
         // 必须先申请额外启动时间（waitHint，可配 scm_wait_hint_ms），否则 SCM 会判定服务无响应并终止
         report_scm_status(status_handle, SERVICE_START_PENDING.0, 0, SCM_WAIT_HINT_MS.load(Ordering::SeqCst));
 
-        if updater {
+        if refresher {
             report_scm_status(status_handle, SERVICE_RUNNING.0, 0, 0);
-            upgrade_outdated_hosts();
+            refresh_outdated_hosts();
             report_scm_status(status_handle, SERVICE_STOPPED.0, 0, 0);
         } else {
             let mut host = crate::service_host::ServiceHost::new();
@@ -2363,9 +2363,9 @@ pub(crate) fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-// ==================== 文件版本工具（供测试与更新器使用） ====================
+// ==================== 文件版本工具（供测试与刷新器使用） ====================
 
-/// 读取文件版本（4 段）; 更新器逐服务替换已移除，现仅供单元测试验证版本读取
+/// 读取文件版本（4 段）; 刷新器逐服务替换已移除，现仅供单元测试验证版本读取
 #[cfg(test)]
 pub(crate) fn get_file_version(path: &str) -> Option<String> {
     use windows::Win32::Storage::FileSystem::{
