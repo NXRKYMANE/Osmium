@@ -1,5 +1,5 @@
 # CI: 构建 + 测试 + Clippy（Windows，workspace 全量）
-name: CI
+name: Test & Check
 
 on:
   push:

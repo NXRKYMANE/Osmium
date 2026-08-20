@@ -19,6 +19,13 @@
 - 重大修改和调优前记得备份一个,已经多次发生翻车事故造成项目从头来的情况
 # 项目记录
 
+## 仓库 CI（2026-08-20）· Release 资产同步国内镜像（Gitee / AtomGit-OpenGit）
+- 背景：代码/tag 已由两个镜像的仓库自动同步，但 Release 对象与附件不会随之复制，需 GitHub Actions 补齐
+- 新增 `.github/workflows/release-sync.yml`：触发 release published/edited/deleted + workflow_dispatch + 每日 4 点兜底全量；concurrency 防并发；两个 job 分别同步 Gitee 与 AtomGit
+- 新增 `scripts/sync-releases.ps1`（PS 5.1/pwsh 兼容，Syntax OK）：以 GitHub Release 为唯一事实源完全对齐——①镜像上 tag 已不在 GitHub 的 release 删除；②镜像缺的 release 等 tag 同步（最多等 5 分钟）后创建，已有则覆盖元数据（name/body/prerelease）；③资产先删（多余/同名不同 size/-Force）后传（缺失/不同），GitHub 无资产时清空镜像侧；GitHub 侧用 gh CLI（GH_TOKEN），镜像侧 REST——Gitee（access_token，附件 multipart 用 .NET HttpClient 手写，PS5.1 无 -Form）与 Gitea 风格（Authorization: token，octet-stream 上传）；脚本位于 `.github/scripts/sync-releases.ps1`（随 workflow 收拢在 .github 下）
+- 前置：仓库 Secrets 配置 `GITEE_TOKEN`（Gitee 私人令牌）、`ATOMGIT_TOKEN`（对应平台 PAT）；AtomGit 已并入 OpenGit（opengit.openatom.cn，Gitea 风格 API），域名/仓库名不同时改 workflow 参数
+- 注意：镜像附件大小上限约 100MB，本项目资产（≤4MB）无压力
+
 ## v26.8.1（2026-08-20）· EcoQoS 实现简化重构（单一 class 4）+ 双模式复验
 - 重构 set_eco_qos：删除 ProcessEcoQoS（class 11/12/19）与 PowerSetEffectiveOverlayMode 的多次尝试链（本机全返回 error 87/入口缺失），改为**单一标准调用 ProcessPowerThrottling（class=4，EXECUTION_SPEED）**；逻辑简化后行为不变（任务管理器"效率模式"同底层）
 - 真机双模式全链路复验（简化版）：

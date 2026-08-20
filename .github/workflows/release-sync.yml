@@ -1,0 +1,53 @@
+﻿# Release 资产同步到国内镜像（Gitee / AtomGit-OpenGit）:
+# 代码/tag 由各镜像的仓库自动同步, Release 对象与附件不会随之复制, 本工作流负责补齐——
+# 以 GitHub Release 为唯一事实源, 镜像侧完全对齐（新建/编辑/删除/资产覆盖）
+# 触发: release 发布/编辑/删除 + 手动 + 每日兜底全量（防事件漏触发）
+# 前置: 仓库 Secrets 需配置 GITEE_TOKEN（Gitee 私人令牌）与 ATOMGIT_TOKEN（对应平台 PAT）
+
+name: Sync Releases to Chinese Mirrors
+
+on:
+  release:
+    types: [published, edited, deleted]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"
+
+concurrency:
+  group: release-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync release assets to mirrors
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync to Gitee
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          .\.github\scripts\sync-releases.ps1 `
+            -RepoOwner NXRKYMANE -Repo Osmium `
+            -TargetOwner NXRKYMANE -TargetRepo Osmium `
+            -TargetApi "https://gitee.com/api/v5" -Style gitee `
+            -Token $env:TARGET_TOKEN
+
+      # AtomGit 为 GitHub 兼容 v5 API（Bearer 鉴权, Style=github）;
+      # 若你的实例域名/仓库名不同, 改 -TargetApi / -TargetRepo 即可
+      - name: Sync to AtomGit
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
+        run: |
+          .\.github\scripts\sync-releases.ps1 `
+            -RepoOwner NXRKYMANE -Repo Osmium `
+            -TargetOwner NXRKYMANEX -TargetRepo Osmium `
+            -TargetApi "https://atomgit.com/api/v5" -Style github `
+            -Token $env:TARGET_TOKEN

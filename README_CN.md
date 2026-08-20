@@ -4,10 +4,11 @@
   <img src="https://img.shields.io/github/followers/NXRKYMANE?style=social" />
   <img src="https://img.shields.io/github/forks/NXRKYMANE/Osmium" />
   <img src="https://img.shields.io/github/stars/NXRKYMANE/Osmium" />
-  <img src="https://img.shields.io/badge/-Rust-000000?style=flat&logo=rust&logoColor=white" />
-  <img src="https://img.shields.io/badge/Douyin-Ozones-000000?style=flat&logo=tiktok&logoColor=white" />
-  <img src="https://img.shields.io/badge/QQ-946777609-12B7F5?style=flat&logo=tencentqq&logoColor=white" />
-  <img src="https://komarev.com/ghpvc/?username=NXRKYMANE&repo=Osmium&label=Views&color=00BFFF&style=flat" />
+  <img src="https://img.shields.io/badge/-Rust-FFFFFF?style=flat&logo=rust&logoColor=black" />
+  <img src="https://img.shields.io/badge/Gitee-NXRKYMANE-FFFFFF?style=flat" />
+  <img src="https://img.shields.io/badge/AtomGit-NXRKYMANEX-FFFFFF?style=flat" />
+  <img src="https://img.shields.io/badge/Douyin-Ozones-FFFFFF?style=flat&logo=tiktok&logoColor=white" />
+  <img src="https://vbr.nathanchung.dev/badge?page_id=NXRKYMANE.Osmium&color=FFFFFF&leftColor=555555&label=Views" />
 </p>
 
 将任意可执行文件或脚本注册为 Win32 系统服务。 [SEE ENGLISH DOCS](README.md)
