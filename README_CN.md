@@ -1,4 +1,4 @@
-﻿# ✨ Osmium — Windows Service Generator Framework
+# ✨ Osmium — Windows Service Generator Framework
 
 <p align="center">
   <img src="https://img.shields.io/github/followers/NXRKYMANE?style=social" />
@@ -292,7 +292,7 @@ command = 'echo start >> C:\app\hook.log'
 # payload = { mode = "full" }
 # fail_on_error = false
 
-# 资源看门狗: 子进程内存超过 512 MB 自动终止（RunawayProcessKiller）
+# 资源监视器: 子进程内存超过 512 MB 自动终止（RunawayProcessKiller）
 runaway_memory_limit_mb = 512
 runaway_check_interval_secs = 30
 

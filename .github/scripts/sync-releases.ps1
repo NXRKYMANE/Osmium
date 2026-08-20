@@ -86,27 +86,60 @@ function Get-MirrorPage([string]$path, [int]$page) {
 function Invoke-MirrorForm([string]$method, [string]$path, $form) {
     if ($Style -eq "gitee") {
         if ($null -ne $form) {
-            # Gitee 写接口要求 JSON body（form-urlencoded 的 PATCH 会报 content-type 不支持）
-            return Invoke-RestMethod -Method $method -Uri "$TargetApi${path}?access_token=$Token" `
-                -ContentType "application/json" -Body ($form | ConvertTo-Json -Depth 10 -Compress) -UserAgent $BrowserUA
+            # Gitee 写接口要求 JSON body; 用 curl --data-binary 发临时文件（字节原样,
+            # 规避 PS 5.1 Latin-1 与旧版 pwsh byte[] 重编码导致 emoji 损坏/Gitee 400）
+            $uri = "$TargetApi${path}?access_token=$Token"
+            return Invoke-MirrorJsonCurl $method $uri $form
         }
         return Invoke-RestMethod -Method $method -Uri "$TargetApi${path}?access_token=$Token" -UserAgent $BrowserUA
     }
     $params = @{ Method = $method; Uri = "$TargetApi$path"; Headers = @{ Authorization = $AuthHeader } }
+    # AtomGit(GitHub 兼容) 的 PATCH 端点要求 PRIVATE-TOKEN 头（Bearer 会 401 token not found）
+    if ($Style -eq "github" -and $method -eq "PATCH") {
+        $params.Headers = @{ "PRIVATE-TOKEN" = $Token }
+    }
     $params.UserAgent = $BrowserUA
     if ($null -ne $form) {
-        $params.ContentType = "application/json"
-        $params.Body = ($form | ConvertTo-Json -Depth 10 -Compress)
+        # 写请求同样走 curl 二进制链路: 规避旧版 pwsh 的 byte[] 重编码导致 JSON 解析失败
+        return Invoke-MirrorJsonCurl $method "$TargetApi$path" $form $params.Headers
     }
     return Invoke-RestMethod @params
 }
 
-function Get-TargetReleaseList {
-    # 翻页拉全量（Gitee/Gitea 每页上限分别为 100/50, 统一按 50 翻页）
+# 把对象写入 UTF-8 临时 JSON 文件, curl --data-binary 原样上传（与资产上传同一套稳妥链路）;
+# 内联参数 + -o 落盘 + HTTP 码检查（PS 5.1 的 splatting/管道会破坏参数, 且 curl 无 -f 时 400 不报错）
+function Invoke-MirrorJsonCurl([string]$method, [string]$uri, $form, $headers) {
+    $jsonFile = Join-Path ([System.IO.Path]::GetTempPath()) ("mirror-json-" + [guid]::NewGuid().ToString("N") + ".json")
+    $respBody = Join-Path ([System.IO.Path]::GetTempPath()) ("mirror-json-resp-" + [guid]::NewGuid().ToString("N") + ".txt")
+    [System.IO.File]::WriteAllBytes($jsonFile, (utf8_json $form))
+    try {
+        if ($null -ne $headers -and $headers.Count -gt 0) {
+            $h = $headers.GetEnumerator() | Select-Object -First 1
+            $code = & curl.exe -sS -A $BrowserUA -m 120 --retry 3 --retry-delay 5 -X $method `
+                -H "Content-Type: application/json; charset=utf-8" -H "$($h.Key): $($h.Value)" `
+                --data-binary "@$jsonFile" $uri -o $respBody -w "%{http_code}" 2>$null
+        } else {
+            $code = & curl.exe -sS -A $BrowserUA -m 120 --retry 3 --retry-delay 5 -X $method `
+                -H "Content-Type: application/json; charset=utf-8" `
+                --data-binary "@$jsonFile" $uri -o $respBody -w "%{http_code}" 2>$null
+        }
+        if (-not "$code".StartsWith("2")) { throw "mirror JSON $method failed HTTP ${code}" }
+        if (Test-Path $respBody) { return Get-Content $respBody -Raw | ConvertFrom-Json }
+        return $null
+    } finally {
+        Remove-Item $jsonFile, $respBody -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# PS 5.1 下把对象转 UTF-8 JSON 字节（Invoke-RestMethod 字符串 Body 默认 Latin-1, 中文/emoji 会乱码）
+function utf8_json($obj) { [System.Text.Encoding]::UTF8.GetBytes(($obj | ConvertTo-Json -Depth 10 -Compress)) }
+
+# 通用翻页拉全量（Gitee/Gitea 每页上限分别为 100/50, 统一按 50 翻页）
+function Get-TargetAll([string]$path) {
     $all = @()
     $page = 1
     while ($true) {
-        $items = @(Get-MirrorPage "/repos/$TargetOwner/$TargetRepo/releases" $page)
+        $items = @(Get-MirrorPage $path $page)
         if (-not $items -or $items.Count -eq 0) { break }
         # 逐元素累加: 杜绝任何版本的数组嵌套（嵌套会让属性访问枚举出多个值）
         foreach ($item in $items) { $all += $item }
@@ -116,18 +149,9 @@ function Get-TargetReleaseList {
     return $all
 }
 
-function Get-TargetTags {
-    $all = @()
-    $page = 1
-    while ($true) {
-        $items = @(Get-MirrorPage "/repos/$TargetOwner/$TargetRepo/tags" $page)
-        if (-not $items -or $items.Count -eq 0) { break }
-        foreach ($item in $items) { $all += $item }
-        if ($items.Count -lt 50) { break }
-        $page++
-    }
-    return $all
-}
+function Get-TargetReleaseList { Get-TargetAll "/repos/$TargetOwner/$TargetRepo/releases" }
+
+function Get-TargetTags { Get-TargetAll "/repos/$TargetOwner/$TargetRepo/tags" }
 
 function Get-TargetDefaultBranch {
     # Gitee 创建 release 必须带 target_commitish（GitHub 兼容 API 不需要）
@@ -164,6 +188,25 @@ function Update-TargetRelease([int]$id, $release) {
         } | Out-Null
         return
     }
+    if ($Style -eq "github") {
+        # AtomGit: PATCH 必须用 form-urlencoded（JSON body 会被服务器按 Latin-1 误解码, em-dash/中文变乱码）;
+        # 字段从 UTF-8 文件读取, 内联参数 + -o 落盘（PS 5.1 的 splatting/管道会破坏 --data-urlencode 参数）
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("atomgit-patch-" + [guid]::NewGuid().ToString("N"))
+        $respBody = Join-Path ([System.IO.Path]::GetTempPath()) ("atomgit-patch-resp-" + [guid]::NewGuid().ToString("N") + ".json")
+        $utf8 = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText("$tmp.name.txt", $release.name, $utf8)
+        [System.IO.File]::WriteAllText("$tmp.body.txt", $release.body, $utf8)
+        & curl.exe -sS -A $BrowserUA -m 120 -X PATCH -H "PRIVATE-TOKEN: $Token" `
+            --data-urlencode "name@$tmp.name.txt" --data-urlencode "body@$tmp.body.txt" `
+            --data-urlencode "prerelease=$($release.isPrerelease)" `
+            "$TargetApi/repos/$TargetOwner/$TargetRepo/releases/$($release.tagName)" -o $respBody 2>$null
+        $code = $LASTEXITCODE
+        Remove-Item "$tmp.name.txt", "$tmp.body.txt", $respBody -Force -ErrorAction SilentlyContinue
+        if ($code -ne 0) {
+            Write-Warn "AtomGit metadata update failed for '$($release.tagName)' (curl exit $code)"
+        }
+        return
+    }
     Invoke-MirrorForm "PATCH" "/repos/$TargetOwner/$TargetRepo/releases/$id" @{
         name = $release.name; body = $release.body; prerelease = $release.isPrerelease; draft = $false
     } | Out-Null
@@ -179,15 +222,22 @@ function Wait-TargetTag([string]$tag) {
     return $false
 }
 
-function Remove-TargetAsset([int]$releaseId, [int]$assetId) {
+function Remove-TargetAsset($releaseId, [int]$assetId) {
     if ($Style -eq "gitee") {
         Invoke-MirrorForm "DELETE" "/repos/$TargetOwner/$TargetRepo/releases/$releaseId/attach_files/$assetId" $null | Out-Null
+        return
+    }
+    if ($Style -eq "github") {
+        # AtomGit: DELETE 附件需 PRIVATE-TOKEN 头（curl, PS 的 Invoke-RestMethod 兼容性问题）
+        & curl.exe -sS -A $BrowserUA -X DELETE -H "PRIVATE-TOKEN: $Token" `
+            "$TargetApi/repos/$TargetOwner/$TargetRepo/releases/$releaseId/attach_files/$assetId" 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { Write-Warn "AtomGit asset delete failed (curl exit $LASTEXITCODE)" }
         return
     }
     Invoke-MirrorForm "DELETE" "/repos/$TargetOwner/$TargetRepo/releases/$releaseId/assets/$assetId" $null | Out-Null
 }
 
-function Upload-TargetAsset([int]$releaseId, [string]$filePath, [string]$fileName) {
+function Upload-TargetAsset($releaseId, [string]$filePath, [string]$fileName) {
     if ($Style -eq "gitee") {
         # Gitee: multipart/form-data 上传（curl.exe, 带超时重试; PS 5.1 的 Invoke-RestMethod 无 -Form）
         $uri = "$TargetApi/repos/$TargetOwner/$TargetRepo/releases/$releaseId/attach_files?access_token=$Token"
@@ -196,6 +246,26 @@ function Upload-TargetAsset([int]$releaseId, [string]$filePath, [string]$fileNam
         if (-not "$code".StartsWith("2")) {
             $detail = if (Test-Path $respBody) { Get-Content $respBody -Raw } else { "" }
             throw "Gitee upload failed HTTP ${code}: $detail"
+        }
+        Remove-Item $respBody -Force -ErrorAction SilentlyContinue
+        return
+    }
+    if ($Style -eq "github") {
+        # AtomGit: 先取 OBS 预签名上传地址（PRIVATE-TOKEN 头）再 PUT 文件, 回调自动挂载资产
+        $respBody = Join-Path ([System.IO.Path]::GetTempPath()) ("atomgit-upload-" + [guid]::NewGuid().ToString("N") + ".json")
+        $url = "$TargetApi/repos/$TargetOwner/$TargetRepo/releases/$releaseId/upload_url?file_name=$([uri]::EscapeDataString($fileName))"
+        $respJson = & curl.exe -sS -A $BrowserUA -m 60 -H "PRIVATE-TOKEN: $Token" $url 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "AtomGit upload_url failed (curl exit $LASTEXITCODE)" }
+        $resp = $respJson | ConvertFrom-Json
+        $code = & curl.exe -sS -m 600 --retry 3 --retry-delay 5 -X PUT $resp.url `
+            -H "x-obs-meta-project-id: $($resp.headers.'x-obs-meta-project-id')" `
+            -H "x-obs-acl: $($resp.headers.'x-obs-acl')" `
+            -H "x-obs-callback: $($resp.headers.'x-obs-callback')" `
+            -H "Content-Type: $($resp.headers.'Content-Type')" `
+            --data-binary "@$filePath" -o $respBody -w "%{http_code}" 2>$null
+        if (-not "$code".StartsWith("2")) {
+            $detail = if (Test-Path $respBody) { Get-Content $respBody -Raw } else { "" }
+            throw "AtomGit upload failed HTTP ${code}: $detail"
         }
         Remove-Item $respBody -Force -ErrorAction SilentlyContinue
         return
@@ -216,8 +286,33 @@ function Sync-Assets($ghRelease, $mirrorRelease) {
     $tmpDir = Join-Path (Join-Path ([System.IO.Path]::GetTempPath()) "osmium-sync-cache") $ghRelease.tagName
     New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
     if ($Style -eq "github") {
-        # AtomGit 平台 API 限制: 仅支持创建 release（更新 400 / 删除 405 / 资产接口 404）, 资产无法同步
-        Write-Step "AtomGit: assets cannot be synced (platform API limitation); release was created with metadata by the main flow"
+        # AtomGit: 资产走 OBS 预签名上传（upload_url + PUT）；自动源码归档与手动附件按 type 区分
+        Download-GhAssets $ghRelease $tmpDir
+        $autoNames = @("$($ghRelease.tagName).zip", "$($ghRelease.tagName).tar.gz", "$($ghRelease.tagName).tar.bz2", "$($ghRelease.tagName).tar")
+        foreach ($ma in $mirrorAssets) {
+            if ($ma.type -eq "source" -or $autoNames -contains $ma.name) { continue }
+            $gh = $ghAssets | Where-Object { $_.name -eq $ma.name } | Select-Object -First 1
+            if (-not $gh) {
+                Write-Warn "asset '$($ma.name)' no longer exists upstream, deleting"
+                Remove-TargetAsset $mirrorRelease.tag_name $ma.id
+            } elseif ($Force) {
+                Write-Step "asset '$($ma.name)' Force, replacing"
+                Remove-TargetAsset $mirrorRelease.tag_name $ma.id
+            }
+        }
+        foreach ($ga in $ghAssets) {
+            $need = $Force
+            if (-not $need) {
+                $ma = $mirrorAssets | Where-Object { $_.name -eq $ga.name } | Select-Object -First 1
+                $need = (-not $ma)
+            }
+            if ($need) {
+                $local = Join-Path $tmpDir $ga.name
+                if (-not (Test-Path $local)) { throw "downloaded asset missing: $($ga.name)" }
+                Upload-TargetAsset $mirrorRelease.tag_name $local $ga.name
+                Write-Ok "asset '$($ga.name)' uploaded"
+            }
+        }
         return
     }
     # Gitee 平台限制: 自动生成的源码归档(<tag>.zip/.tar.gz)无 id 无法删除, 资产不一致时重建 release; gitea 走先删后传
@@ -226,8 +321,10 @@ function Sync-Assets($ghRelease, $mirrorRelease) {
         return
     }
     Download-GhAssets $ghRelease $tmpDir
-    # 先删: 镜像多余 / 同名不同大小 / Force
+    # 先删: 镜像多余 / 同名不同大小 / Force（自动源码归档 <tag>.zip/.tar.gz 跳过, 平台特性不可删）
+    $autoNames = @("$($ghRelease.tagName).zip", "$($ghRelease.tagName).tar.gz")
     foreach ($ma in $mirrorAssets) {
+        if ($autoNames -contains $ma.name) { continue }
         $gh = $ghAssets | Where-Object { $_.name -eq $ma.name } | Select-Object -First 1
         if (-not $gh) {
             Write-Warn "asset '$($ma.name)' no longer exists upstream, deleting"
@@ -304,6 +401,10 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { throw "需要 gh CLI�
 
 Write-Step "Fetching upstream releases from $RepoOwner/$Repo ..."
 $ghReleases = @(Get-GhReleases | Where-Object { -not $_.isDraft })
+if ($ghReleases.Count -eq 0) {
+    Write-Warn "no releases upstream, nothing to sync"
+    return
+}
 # gh list 按创建时间升序（旧→新）: 直接按此顺序创建即可,
 # 最新版本最后创建 → 镜像（created_at 倒序展示）最新版本排最前, 与 GitHub 展示顺序一致
 
@@ -348,8 +449,7 @@ foreach ($r in $ghReleases) {
     } else {
         Write-Step "updating mirror release metadata '$($r.tagName)'"
         if ($Style -eq "github") {
-            # AtomGit 不支持更新元数据（PATCH 400）, 创建时已带最新元数据, 跳过
-            Write-Step "AtomGit: metadata update skipped (platform API read-only)"
+            Update-TargetRelease 0 $r   # AtomGit release 对象无 id 字段, 内部按 tag 路径
         } else {
             Update-TargetRelease $mirror.id $r
         }

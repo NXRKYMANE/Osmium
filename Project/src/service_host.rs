@@ -2289,8 +2289,8 @@ pub(crate) fn process_env_var(pid: u32, name: &str) -> Option<String> {
         }
         // 环境块: NAME=VALUE\0...\0\0；按 \0 拆分 UTF-16 条目，变量名大小写不敏感匹配
         let mut item = Vec::new();
-        for chunk in buf.chunks_exact(2) {
-            let u = u16::from_le_bytes([chunk[0], chunk[1]]);
+        for chunk in buf.as_chunks::<2>().0 {
+            let u = u16::from_le_bytes(*chunk);
             if u == 0 {
                 let s = String::from_utf16_lossy(&item);
                 if let Some((key, value)) = s.split_once('=')

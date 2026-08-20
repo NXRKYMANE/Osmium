@@ -1,4 +1,4 @@
-﻿# ✨ Osmium — Windows Service Generator Framework
+# ✨ Osmium — Windows Service Generator Framework
 
 <p align="center">
   <img src="https://img.shields.io/github/followers/NXRKYMANE?style=social" />
@@ -139,7 +139,7 @@ service_executable_path = 'C:\app\myapp.exe'
 | `extensions`                | array  | none      | Extra lifecycle extension commands: `[{ phase = "start", command = "...", stdout_path?, stderr_path? }]` — `start` runs before launch, `start_after` after launch, `stop_before` before stop, `stop` after stop; failures are non-fatal. `stdout_path` / `stderr_path` redirect the hook output to standalone files                |
 | `plugins`                   | array  | none      | Lifecycle plugin calls (`.osx` plugins next to the executable): `[{ kit, phase, payload?, fail_on_error? }]` — see the [Extension Guide](Docs/EXTENSION_EN.md)                                                                                                                                                                                              |
 
-### Advanced — Resource Watchdog & Network Mapping
+### Advanced — Resource Monitor & Network Mapping
 
 | Field                         | Type   | Default | Description                                                                                                                                                                                                                                                                                        |
 | --- | --- | --- | --- |
@@ -292,7 +292,7 @@ command = 'echo start >> C:\app\hook.log'
 # payload = { mode = "full" }
 # fail_on_error = false
 
-# Resource watchdog: kill the child when memory exceeds 512 MB (RunawayProcessKiller)
+# Resource monitor: kill the child when memory exceeds 512 MB (RunawayProcessKiller)
 runaway_memory_limit_mb = 512
 runaway_check_interval_secs = 30
 

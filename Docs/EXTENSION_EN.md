@@ -1,4 +1,4 @@
-﻿# Osmium Plugin Development & Usage Guide
+# Osmium Plugin Development & Usage Guide
 
 Osmium is plugin-everything: official advanced features and third-party extensions are all standalone executables (`.osx`) placed under the executable's directory (the platform installer uses `exts\`), launched by the host on demand. How plugins work, the protocol, and how to write one — it's all here.
 
