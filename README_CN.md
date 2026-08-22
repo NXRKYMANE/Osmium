@@ -624,45 +624,6 @@ fn fail(msg: &str) -> ! {
 }
 ```
 
-### C++ 示例（nlohmann/json）
-
-需要单头库 [nlohmann/json](https://github.com/nlohmann/json)，VS 或 MinGW 编译都行。
-
-```cpp
-#include <iostream>
-#include <string>
-#include <nlohmann/json.hpp>
-
-using json = nlohmann::json;
-
-int fail(const std::string& msg) {
-    std::cerr << "osmium-kit error: " << msg << std::endl;         // stderr: 给人看的
-    std::cout << "{\"ok\":false,\"error\":\"" << msg << "\"}" << std::endl; // stdout: 协议响应
-    return 1;
-}
-
-int main() {
-    // 读完整 stdin（宿主只喂 1MB 以内，不放心可以自己截断）
-    std::string input((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
-    if (input.empty()) {
-        return 0; // 无调用方（双击）: 静默退出
-    }
-    json req;
-    try {
-        req = json::parse(input);
-    } catch (...) {
-        return fail("invalid request");
-    }
-    std::string kit = req.value("kit", "");
-    if (kit == "backup") {
-        // 执行业务
-        std::cout << R"({"ok":true})" << std::endl;
-        return 0;
-    }
-    return fail("unknown kit: " + kit);
-}
-```
-
 ### C 示例（标准库，无第三方依赖）
 
 纯 C11 标准库实现，手写极简 `kit` 字段提取（不解析完整 JSON）；生产环境建议换 cJSON / jansson。
@@ -716,6 +677,46 @@ int main(void) {
 }
 ```
 
+### C++ 示例（nlohmann/json）
+
+需要单头库 [nlohmann/json](https://github.com/nlohmann/json)，VS 或 MinGW 编译都行。
+
+```cpp
+#include <iostream>
+#include <string>
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
+
+int fail(const std::string& msg) {
+    std::cerr << "osmium-kit error: " << msg << std::endl;         // stderr: 给人看的
+    std::cout << "{\"ok\":false,\"error\":\"" << msg << "\"}" << std::endl; // stdout: 协议响应
+    return 1;
+}
+
+int main() {
+    // 读完整 stdin（宿主只喂 1MB 以内，不放心可以自己截断）
+    std::string input((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
+    if (input.empty()) {
+        return 0; // 无调用方（双击）: 静默退出
+    }
+    json req;
+    try {
+        req = json::parse(input);
+    } catch (...) {
+        return fail("invalid request");
+    }
+    std::string kit = req.value("kit", "");
+    if (kit == "backup") {
+        // 执行业务
+        std::cout << R"({"ok":true})" << std::endl;
+        return 0;
+    }
+    return fail("unknown kit: " + kit);
+}
+```
+
+
 ### C# 示例（.NET 标准库 System.Text.Json）
 
 .NET（Framework / Core / 5+）都内置 JSON 解析，不需要任何第三方包。
@@ -756,42 +757,6 @@ class Plugin
 }
 ```
 
-
-### Python 示例
-
-标准库就够，不需要任何第三方包。
-
-```python
-import json
-import sys
-
-
-def fail(msg):
-    print(f"osmium-kit error: {msg}", file=sys.stderr)      # stderr: 给人看的
-    print(json.dumps({"ok": False, "error": msg}))          # stdout: 协议响应
-    sys.exit(1)
-
-
-def main():
-    # 限制输入大小: 只读前 1MB
-    data = sys.stdin.buffer.read(1024 * 1024)
-    if not data.strip():
-        sys.exit(0)  # 无调用方（双击）: 静默退出
-    try:
-        req = json.loads(data)
-    except ValueError as e:
-        fail(f"invalid request: {e}")
-    kit = req.get("kit", "")
-    if kit == "backup":
-        # 执行业务
-        print(json.dumps({"ok": True}))
-    else:
-        fail(f"unknown kit: {kit}")
-
-
-if __name__ == "__main__":
-    main()
-```
 
 ### Java 示例（无第三方依赖）
 
@@ -839,6 +804,43 @@ public class Plugin {
     }
 }
 ```
+
+### Python 示例
+
+标准库就够，不需要任何第三方包。
+
+```python
+import json
+import sys
+
+
+def fail(msg):
+    print(f"osmium-kit error: {msg}", file=sys.stderr)      # stderr: 给人看的
+    print(json.dumps({"ok": False, "error": msg}))          # stdout: 协议响应
+    sys.exit(1)
+
+
+def main():
+    # 限制输入大小: 只读前 1MB
+    data = sys.stdin.buffer.read(1024 * 1024)
+    if not data.strip():
+        sys.exit(0)  # 无调用方（双击）: 静默退出
+    try:
+        req = json.loads(data)
+    except ValueError as e:
+        fail(f"invalid request: {e}")
+    kit = req.get("kit", "")
+    if kit == "backup":
+        # 执行业务
+        print(json.dumps({"ok": True}))
+    else:
+        fail(f"unknown kit: {kit}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
 
 ### Node.js 示例
 
@@ -905,9 +907,9 @@ payload = { mode = "full" }
 
 ## 几个要注意的点
 
-- **ACL 信任校验**：信任锚点是宿主 exe 自身位置——exe 装在受保护位置（如 `%ProgramFiles%\Osmium\`）时，插件目录和文件必须放在仅 SYSTEM / Administrators 可写的地方（防止有人偷偷换掉 `.osx` 提权成 SYSTEM），不符合的插件会被拒绝执行、标红；**inplace 集成部署**（exe 放在你自己的项目目录）时插件与 exe 同级，攻击面跟宿主一致，自动放行（能替换插件的攻击者同样能替换 exe，不额外增加风险）
+- **ACL 信任校验**：信任锚点是宿主 exe 自身位置——exe 装在受保护位置（如 `%ProgramFiles%\Osmium\`）时，插件目录和文件必须放在仅 SYSTEM / Administrators 可写的地方（防止插件文件被未授权用户替换后以 SYSTEM 权限运行），不符合的插件会被拒绝执行、标红；**inplace 集成部署**（exe 放在你自己的项目目录）时插件与 exe 同级，风险面跟宿主一致，自动放行（能替换插件的未授权用户同样能替换 exe，不额外增加风险）
 - **执行隔离**：插件是独立进程，5 秒超时强杀，崩了不影响宿主
-- **输入限制**：stdin 1MB 上限；官方 unzip 插件还有总解压 8GiB 上限（zip bomb 兜底）
+- **输入限制**：stdin 1MB 上限；官方 unzip 插件还有总解压 8GiB 上限（防异常压缩包）
 - **凭据安全**：插件请求里的密码由宿主从配置解密后传入，日志只记去敏后的 URL
 
 ## 常见问题

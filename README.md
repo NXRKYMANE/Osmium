@@ -624,45 +624,6 @@ fn fail(msg: &str) -> ! {
 }
 ```
 
-### C++ Example (nlohmann/json)
-
-Needs the single-header library [nlohmann/json](https://github.com/nlohmann/json); compiles with VS or MinGW.
-
-```cpp
-#include <iostream>
-#include <string>
-#include <nlohmann/json.hpp>
-
-using json = nlohmann::json;
-
-int fail(const std::string& msg) {
-    std::cerr << "osmium-kit error: " << msg << std::endl;         // stderr: for humans
-    std::cout << "{\"ok\":false,\"error\":\"" << msg << "\"}" << std::endl; // stdout: protocol response
-    return 1;
-}
-
-int main() {
-    // read all of stdin (the host only feeds up to 1MB; truncate yourself if you want to be safe)
-    std::string input((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
-    if (input.empty()) {
-        return 0; // no caller (double-click): exit silently
-    }
-    json req;
-    try {
-        req = json::parse(input);
-    } catch (...) {
-        return fail("invalid request");
-    }
-    std::string kit = req.value("kit", "");
-    if (kit == "backup") {
-        // do the business
-        std::cout << R"({"ok":true})" << std::endl;
-        return 0;
-    }
-    return fail("unknown kit: " + kit);
-}
-```
-
 ### C Example (standard library only)
 
 Pure C11 with the standard library — a minimal hand-rolled `kit` extraction (no full JSON parsing); for production consider cJSON / jansson.
@@ -716,6 +677,46 @@ int main(void) {
 }
 ```
 
+### C++ Example (nlohmann/json)
+
+Needs the single-header library [nlohmann/json](https://github.com/nlohmann/json); compiles with VS or MinGW.
+
+```cpp
+#include <iostream>
+#include <string>
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
+
+int fail(const std::string& msg) {
+    std::cerr << "osmium-kit error: " << msg << std::endl;         // stderr: for humans
+    std::cout << "{\"ok\":false,\"error\":\"" << msg << "\"}" << std::endl; // stdout: protocol response
+    return 1;
+}
+
+int main() {
+    // read all of stdin (the host only feeds up to 1MB; truncate yourself if you want to be safe)
+    std::string input((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
+    if (input.empty()) {
+        return 0; // no caller (double-click): exit silently
+    }
+    json req;
+    try {
+        req = json::parse(input);
+    } catch (...) {
+        return fail("invalid request");
+    }
+    std::string kit = req.value("kit", "");
+    if (kit == "backup") {
+        // do the business
+        std::cout << R"({"ok":true})" << std::endl;
+        return 0;
+    }
+    return fail("unknown kit: " + kit);
+}
+```
+
+
 ### C# Example (System.Text.Json)
 
 JSON parsing is built into .NET (Framework / Core / 5+), no third-party packages needed.
@@ -756,42 +757,6 @@ class Plugin
 }
 ```
 
-
-### Python Example
-
-The standard library is enough — no third-party packages.
-
-```python
-import json
-import sys
-
-
-def fail(msg):
-    print(f"osmium-kit error: {msg}", file=sys.stderr)      # stderr: for humans
-    print(json.dumps({"ok": False, "error": msg}))          # stdout: protocol response
-    sys.exit(1)
-
-
-def main():
-    # cap input size: read only the first 1MB
-    data = sys.stdin.buffer.read(1024 * 1024)
-    if not data.strip():
-        sys.exit(0)  # no caller (double-click): exit silently
-    try:
-        req = json.loads(data)
-    except ValueError as e:
-        fail(f"invalid request: {e}")
-    kit = req.get("kit", "")
-    if kit == "backup":
-        # do the business
-        print(json.dumps({"ok": True}))
-    else:
-        fail(f"unknown kit: {kit}")
-
-
-if __name__ == "__main__":
-    main()
-```
 
 ### Java Example (no third-party dependencies)
 
@@ -839,6 +804,43 @@ public class Plugin {
     }
 }
 ```
+
+### Python Example
+
+The standard library is enough — no third-party packages.
+
+```python
+import json
+import sys
+
+
+def fail(msg):
+    print(f"osmium-kit error: {msg}", file=sys.stderr)      # stderr: for humans
+    print(json.dumps({"ok": False, "error": msg}))          # stdout: protocol response
+    sys.exit(1)
+
+
+def main():
+    # cap input size: read only the first 1MB
+    data = sys.stdin.buffer.read(1024 * 1024)
+    if not data.strip():
+        sys.exit(0)  # no caller (double-click): exit silently
+    try:
+        req = json.loads(data)
+    except ValueError as e:
+        fail(f"invalid request: {e}")
+    kit = req.get("kit", "")
+    if kit == "backup":
+        # do the business
+        print(json.dumps({"ok": True}))
+    else:
+        fail(f"unknown kit: {kit}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
 
 ### Node.js Example
 
@@ -905,9 +907,9 @@ payload = { mode = "full" }
 
 ## Things to Keep in Mind
 
-- **ACL trust check**: the trust anchor is the host exe's own location — when the exe lives in a protected location (e.g. `%ProgramFiles%\Osmium\`), the plugin directory and file must sit somewhere only SYSTEM / Administrators can write (so nobody can swap a `.osx` to escalate to SYSTEM); untrusted plugins are refused and marked red. **Inplace embedded deployment** (exe inside your own project directory) is trusted automatically: the plugin sits next to the exe, sharing the same attack surface — an attacker who could replace the plugin could equally replace the exe, so no extra risk is added
-- **Execution isolation**: plugins are separate processes, force-killed after 5 seconds; a crash does not affect the host
-- **Input limits**: stdin capped at 1MB; the official unzip plugin also has a total 8GiB extraction cap (zip-bomb protection)
+- **ACL trust check**: the trust anchor is the host exe's own location — when the exe lives in a protected location (e.g. `%ProgramFiles%\Osmium\`), the plugin directory and file must sit somewhere only SYSTEM / Administrators can write (so nobody can swap a `.osx` to run with SYSTEM privileges); untrusted plugins are refused and marked red. **Inplace embedded deployment** (exe inside your own project directory) is trusted automatically: the plugin sits next to the exe, sharing the same risk surface — an unauthorized user who could replace the plugin could equally replace the exe, so no extra risk is added
+- **Execution isolation**: plugins are separate processes, terminated after a 5-second timeout; a crash does not affect the host
+- **Input limits**: stdin capped at 1MB; the official unzip plugin also has a total 8GiB extraction cap (protection against abnormal archives)
 - **Credential safety**: passwords in plugin requests are decrypted by the host from the config before being passed in; logs only record redacted URLs
 
 ## FAQ
