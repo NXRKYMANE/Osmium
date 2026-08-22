@@ -19,6 +19,48 @@
 - 重大修改和调优前记得备份一个,已经多次发生翻车事故造成项目从头来的情况
 # 项目记录
 
+## v26.10.0（2026-08-22）· 真机双模式回归（新增字段 + 插件）+ 修复 3 个 bug + 代码审查清理
+- 真机回归（平台 + inplace 独立模式各一轮），覆盖新增字段与插件全链路，发现并修复 3 个真 bug：
+  - ①`service_process_pids`（--status Child PIDs）未启用 SeDebugPrivilege——管理员默认持有但禁用，读 SYSTEM 级子进程环境失败 → LocalSystem 服务的 PIDs 恒为空；补 enable_debug_privilege（真机验证 5456, 31004, 31272 正常显示）
+  - ②`--reload` inplace 分支未剥离 ImagePath 引号——os error 123（路径含引号非法）；补 trim_matches('"')（真机验证 Reload flag detected）
+  - ③`schedule_due` 只认 `%H:%M:%S`——README 示例 `daily_at = "03:00"`（HH:mm）解析失败永不触发；补 parse_daily_time 双格式回退（真机 schedules hook 触发）
+- 真机验证结论（平台：svcs 部署 + 共享宿主；独立：受保护目录 + deploy_inplace）：
+  - 健康检查 404 → 连续失败 2/2 → force_kill → 崩溃恢复流程（动作序列 + crash 插件调用）✓ 双模式一致；默认 failure_actions 3 次后 none 停止 ✓
+  - schedules hook 每 10s 写文件 ✓；--reload 标记热刷新 ✓；--status 增强（Start type/Run as/Failure actions/Child PIDs）✓；--export/--import 往返 ✓
+  - 事件日志结构化 ID：1000 start/1001 stop/1002 crash 真机可见 ✓（消息体空属正常——来源未注册消息 DLL）
+  - Job Object 兜底：taskkill /F 强杀宿主 → 子进程树被系统级终止（KILL_ON_JOB_CLOSE）无孤儿 ✓（inplace 验证）
+  - crash 插件（notify 到不可达 URL）失败仅告警不阻断恢复 ✓；--extend 绿点（带版本插件名）✓；inplace 安装被 P0-1 正确拦截（Temp 可写目录）
+- 代码审查清理：7 处超 2 行注释折叠为 2 行（plugin_path_trusted/run_plugin/plugin_usable/kill_service_processes/load_deployed_config/write_metrics/run_plugin_calls）；kits 提取 parse_host_port 合并 smtp/syslog 两处重复的 host:port 解析；check_schedules 消除整表 clone（改字段级小克隆）；JobObject 常量 import 收拢；schedule_due 提取纯函数供单测
+- 安装包插件去版本后缀：installer.iss 的 Source 带版本（`osmium64-official-kits-v{#MyAppVersion}.osx`）、DestName 固定 `osmium64-official-kits.osx`（宿主只认 .osx + kit 名不认文件名）；组件描述同步；README 产物表说明构建带版本、安装去版本
+- 测试补齐：+2（schedule_due 间隔/每日/防重复/非法时刻、download 重试首次失败二次成功）共 156 全过；kits 30/2 全过；clippy 零警告
+- 测试环境清理：osZ 双模式卸载、python http.server 已停、exts 恢复只留 v26.9.0、hydride_svc64 Running、刷新程序 Stopped
+
+## v26.10.0（2026-08-22）· 功能增强批次：Job Object / HTTP 健康检查 / 下载重试 / 定时调度 / --status 增强 / --reload / --export-import / 事件日志结构化 / 插件签名校验 / gMSA 提示 / smtp+syslog 告警 kit
+- Job Object 托管子进程（`job_object` 默认 true）：KILL_ON_JOB_CLOSE——宿主异常退出（含崩溃）时系统级终止整棵子进程树防孤儿；JobObject RAII（CreateJobObjectW + JOBOBJECT_EXTENDED_LIMIT_INFORMATION + AssignProcessToJobObject，赋值失败仅告警）；正常停止仍走优雅关闭
+- HTTP 健康检查（`health_check_url` + interval 30s/timeout 5s/failures 3/expected 200）：tick 轮询 GET，连续失败达到阈值 force_kill 子进程 → 走既有崩溃恢复流程（动作序列 + crash 插件）；复用 ureq config_builder 构造
+- 下载重试（`download_retries` 默认 2 + `download_retry_backoff_ms` 默认 2000）：run_download_entry 内指数退避（2s/4s/8s），重试间清理 sha 校验失败的残留目标；304/sspi 路径不受影响
+- 定时调度（`schedules` 数组：every_secs/daily_at 二选一 + action restart/reload/hook）：tick 检查到点触发——restart 优雅停止后重启（不计故障）、reload 走 try_restart_child、hook 复用 run_hook；daily_at 用 NaiveDate 防同日重复
+- CLI：`--status` 增强（启动类型/延迟标志/运行账户/故障恢复动作序列/重置周期 = QueryServiceConfigW + QueryServiceConfig2W 双缓冲，+ 目标子进程 PID 列表经 service_process_pids）；`--reload`/`--rld`（写 `<配置名>.reload` 标记，宿主 tick 检测后重载重启，不依赖 auto_refresh，平台/inplace 路径分别解析）；`--export`/`--exp`（导出 svcs 配置）+ `--import`/`--imp`（= install，恢复部署）
+- 事件日志结构化：report_event_log 加事件 ID + 级别（EVENTLOG_ERROR_TYPE）——1000 启动/1001 停止/1002 崩溃/1003 下载失败/1004 配置错误；write_event 在 5 个生命周期点调用
+- 插件签名校验（`require_signed_plugins` 默认 false）：verify_file_signature 用 WinVerifyTrust（WINTRUST_ACTION_GENERIC_VERIFY_V2 + WINTRUST_FILE_INFO），run_plugin/plugin_usable 在 ACL 信任检查后加签名检查；全局开关经 service_core 原子（set_require_signed_plugins）
+- gMSA 提示：service_account 以 $ 结尾（DOMAIN\svc$）安装时打印提示（域控制器解析、不可配密码）
+- crash 插件自动注入上下文：run_plugin_calls 在 crash 阶段注入 service_name/exit_code/failures（用户 payload 同名字段优先），告警插件可直接读取
+- kits 新增 smtp kit（最小 SMTP 客户端：EHLO/AUTH PLAIN/MAIL/RCPT/DATA/QUIT，host:port 解析 + IPv6 透传，无 crate 依赖）与 syslog kit（UDP RFC 5424，PRI=facility*8+severity，GetSystemTime UTC 时间戳免 chrono）；notify/smtp/syslog 缺省文本用注入的崩溃上下文组装（alert_text）
+- 测试：主项目 +4（新字段解析/Job 创建+分配子进程/签名校验拒绝/进程枚举空）154 全过；kits +4（smtp 完整会话/smtp 550 报错/syslog 帧格式/非法端口）30/2 全过；clippy 零警告
+- 2 README 同步：命令表（--reload/--export/--import/--status 增强）、配置表（job_object/process_affinity/io_priority/health_check_*/download_retries/schedules/require_signed_plugins/事件 ID）、插件 kit 表 + 告警示例、完整示例、目录树去 Docs；Docs 引用全部改锚点
+- 未做：多子进程（重构宿主核心风险高）、配置签名（ACL+DPAPI 已覆盖威胁模型）——留待后续评估
+
+## v26.10.0（2026-08-22）· 配置预检 / 批量命令 / 日志脱敏与指标导出 / 进程亲合与 IO 优先级 / once 模式 / 下载重定向加固 / virtual 账户授权 / notify 插件
+- 版本升至 26.10.0（kits 2.0.0）；插件文件名带版本：`osmium64-official-kits-v<VERSION>.osx`（BUILD.ps1 复制/签名、installer.iss 组件描述与 Source 同步）
+- 配置新字段：`log_redact`（脱敏列表，宿主/钩子/子进程日志写入前把匹配子串替换为 `***`，防密码/令牌泄漏日志；LogOptions 新增 redact 贯通）、`metrics_file`（指标导出文件，相对部署目录；每 30s 追加一行 JSON——时间/子进程 PID/平均 CPU%/工作集 MB/重启次数/运行时长，子进程退出时补写 final 行含退出码；路径为符号链接时跳过）、`process_affinity`（CPU 亲合 "0,1,2" 核心列表，越界忽略、掩码空不设置，按系统核心数钳制）、`io_priority`（idle/low/normal/high，ThreadIoPriority Win8+）、`service_start_mode` 新增 `once`（子进程退出即停止服务，不重启不故障恢复）、`plugins` phase 新增 `crash`
+- CLI 新命令：`--check`/`--chk`（配置预检不安装——catch_unwind 捕获解析 panic/服务名/保留名/路径存在性/可写性/下载目标，[OK]/[FAIL] 逐项输出，失败退出码 1）；`--start-all`/`--stra`、`--stop-all`/`--stpa`、`--restart-all`/`--rsta`（批量操作全部已注册服务，逐个执行汇总失败列表，有失败退出码 1；别名由 --sta/--sto/--rsa 更名而来，与 --str/--stp 区分更清晰）
+- 安全加固：下载重定向手动跟随（ureq max_redirects=0）——最多 10 次、拒绝 https→http 降级（凭据外泄防护）、无 Location 头报错、RFC 3986 相对/绝对解析（resolve_redirect_url）；配置大小上限 1MB（防超大 .osiml 解析 DoS）；is_reparse_path 对日志/pid/下载/指标目标为符号链接/挂载点时跳过（写穿防护）
+- virtual 账户（NT SERVICE\<name>）自动授权：SeServiceLogonRight 自动开启 + grant_virtual_account_access 授权遍历部署链（Osmium/svcs 仅 X 权限不可读他人 osiml、自身部署目录 M；inplace 时目标为 exe 所在目录）
+- scm_stop_requested：故障恢复 delay 分段等待期间轮询 SCM 停止信号，管理员可随时停止服务
+- kits 新增 notify kit：POST JSON（{text}）到配置 URL，超时可选；错误消息 URL userinfo 去敏（redact_webhook_url）
+- 测试：主项目 +3（脱敏写日志/重定向解析/预检报告）150 全过；kits +3（notify POST/HTTP 500 报错/凭据去敏）26/2 全过；修复 notify 两个测试的 10053 竞态（服务器写响应后延迟关闭，防 RST 被误报 IO 错误）；clippy 零警告
+- 注意：README 新字段文档（log_redact/metrics_file/process_affinity/io_priority/once/--check/批量命令/notify 插件）待补
+
 ## 仓库 CI（2026-08-20）· Release 资产同步国内镜像（Gitee / AtomGit-OpenGit）
 - 背景：代码/tag 已由两个镜像的仓库自动同步，但 Release 对象与附件不会随之复制，需 GitHub Actions 补齐
 - 新增 `.github/workflows/release-sync.yml`：触发 release published/edited/deleted + workflow_dispatch + 每日 4 点兜底全量；concurrency 防并发；两个 job 分别同步 Gitee 与 AtomGit

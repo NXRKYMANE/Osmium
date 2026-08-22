@@ -1,4 +1,4 @@
-﻿use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::service_core::f;
 use windows::core::{BOOL, PCWSTR};
 
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Console::{
     AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
 };
@@ -19,7 +19,13 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::EventLog::{
-    DeregisterEventSource, EVENTLOG_INFORMATION_TYPE, RegisterEventSourceW, ReportEventW,
+    DeregisterEventSource, EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE,
+    RegisterEventSourceW, REPORT_EVENT_TYPE, ReportEventW,
+};
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectExtendedLimitInformation, JOB_OBJECT_LIMIT, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    SetInformationJobObject,
 };
 use windows::Win32::System::Threading::{
     ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, GetProcessTimes, HIGH_PRIORITY_CLASS,
@@ -41,6 +47,53 @@ const HOOK_PRESTART_TIMEOUT_MS: u64 = 60_000;
 const HOOK_POSTSTOP_TIMEOUT_MS: u64 = 30_000;
 /// 下载超时（秒），覆盖整个下载过程
 const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
+
+// ==================== Job 对象（子进程树生命周期保证） ====================
+
+/// Job 对象句柄（RAII）: KILL_ON_JOB_CLOSE 保证宿主进程退出时（含异常崩溃）系统级终止全部
+/// 子进程树（防孤儿进程）；宿主正常停止流程仍走优雅停止，Job 仅作最终兜底
+pub(crate) struct JobObject(HANDLE);
+
+impl JobObject {
+    /// 创建带 KILL_ON_JOB_CLOSE 的 Job 对象；失败返回 None（调用方仅告警，不阻断启动）
+    pub(crate) fn create() -> Option<Self> {
+        unsafe {
+            let handle = CreateJobObjectW(None, PCWSTR::null()).ok()?;
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = Default::default();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT::default() | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let size = size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+            let ok = SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                size,
+            )
+            .is_ok();
+            if ok {
+                Some(JobObject(handle))
+            } else {
+                let _ = CloseHandle(handle);
+                None
+            }
+        }
+    }
+
+    /// 把目标进程放入 Job；失败仅返回错误文案（进程已在其他 Job 等场景，不影响运行）
+    pub(crate) fn assign(&self, process_handle: HANDLE) -> Result<(), String> {
+        unsafe {
+            AssignProcessToJobObject(self.0, process_handle)
+                .map_err(|e| format!("AssignProcessToJobObject failed: {e}"))
+        }
+    }
+}
+
+impl Drop for JobObject {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
 
 /// 效率模式（EcoQoS）档位: None 不干预 | Always 常开 | Auto 空闲进/繁忙退
 #[derive(PartialEq, Clone, Copy)]
@@ -87,6 +140,42 @@ pub struct ServiceHost {
     stop_cmd: Option<(String, String)>,
     /// 目标进程优先级（可选）
     process_priority: Option<String>,
+    /// 目标进程 CPU 亲和性（可选，如 "0,1,2"；按系统核心数钳制）
+    process_affinity: Option<String>,
+    /// 目标进程 IO 优先级（可选: idle | low | normal | high）
+    io_priority: Option<String>,
+    /// 是否将子进程放入 Job Object（KILL_ON_JOB_CLOSE 防孤儿进程树），默认 true
+    job_object: bool,
+    /// 子进程 Job 对象（宿主生命周期持有，进程退出时系统级终止子进程树）
+    job: Option<JobObject>,
+    /// HTTP 健康检查 URL（None 不启用）
+    health_check_url: Option<String>,
+    /// 健康检查轮询间隔（秒）
+    health_check_interval: i64,
+    /// 健康检查请求超时（秒）
+    health_check_timeout: u64,
+    /// 连续失败阈值（视为崩溃触发恢复流程）
+    health_check_failures: i64,
+    /// 期望的 HTTP 状态码
+    health_check_expected: u16,
+    /// 当前连续失败次数
+    health_failures: i64,
+    /// 上次健康检查时刻
+    health_last_check: Option<Instant>,
+    /// 定时调度列表（every_secs/daily_at + restart/reload/hook）
+    schedules: Vec<crate::service_config::ScheduleConfig>,
+    /// 各调度上次触发时刻（every_secs 用）
+    schedule_last: Vec<Option<Instant>>,
+    /// 各调度上次触发的日期（daily_at 用，防同日重复触发）
+    schedule_daily_last: Vec<Option<chrono::NaiveDate>>,
+    /// once 模式: 子进程退出后直接停止服务（不重启、不故障恢复）
+    once_mode: bool,
+    /// 指标导出文件（绝对路径，None 不导出）
+    metrics_file: Option<String>,
+    /// 上次指标写入时刻（周期 30s）
+    metrics_last_write: Option<Instant>,
+    /// 子进程启动时刻（指标 uptime 用）
+    child_started_at: Option<Instant>,
     /// 是否同时写 Windows 事件日志
     event_log: bool,
     /// 生命周期扩展命令列表（phase=start/start_after/stop_before/stop）
@@ -113,6 +202,8 @@ pub struct ServiceHost {
     runaway_stop_timeout_ms: u64,
     /// 启动清理时先终止父进程再杀子树
     runaway_stop_parent_first: bool,
+    /// 生命周期插件调用列表（phase=start_before/start_after/stop_before/stop_after/crash）
+    plugins: Option<Vec<crate::service_config::PluginCallConfig>>,
     /// 上次 RunawayProcessKiller 采样（PID, 内核+用户 CPU 时间, 采样时刻）
     runaway_last_sample: Option<(u32, u64, Instant)>,
     /// 上次 RunawayProcessKiller 检查时刻
@@ -183,6 +274,8 @@ pub(crate) struct LogOptions {
     pub(crate) roll_period_days: i64,
     /// zip 归档文件名日期格式（chrono），空 = 保持 {file}.zip（对应 WinSW zipDateFormat）
     pub(crate) zip_date_format: String,
+    /// 日志脱敏字面串列表: 写入前把这些子串替换为 ***（防密码/令牌泄漏日志）
+    pub(crate) redact: Vec<String>,
 }
 
 impl ServiceHost {
@@ -193,13 +286,32 @@ impl ServiceHost {
             child: None,
             log_dir: String::new(),
             log_enabled: true,
-            log_opts: LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 5, zip_backup: false, pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new() },
+            log_opts: LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 5, zip_backup: false, pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() },
             kill_process_tree: true,
             poststop_command: None,
             stop_cmd: None,
             process_priority: None,
+            process_affinity: None,
+            io_priority: None,
+            job_object: true,
+            job: None,
+            health_check_url: None,
+            health_check_interval: 30,
+            health_check_timeout: 5,
+            health_check_failures: 3,
+            health_check_expected: 200,
+            health_failures: 0,
+            health_last_check: None,
+            schedules: Vec::new(),
+            schedule_last: Vec::new(),
+            schedule_daily_last: Vec::new(),
+            once_mode: false,
+            metrics_file: None,
+            metrics_last_write: None,
+            child_started_at: None,
             event_log: false,
             extensions: None,
+            plugins: None,
             hide_window: true,
             stop_parent_process_first: false,
             stop_timeout_secs: GRACEFUL_TIMEOUT_SECS,
@@ -266,8 +378,10 @@ impl ServiceHost {
 
     /// 以显式配置路径启动宿主（SCM 模式用 exe 旁配置；-m --test 用命令行指定配置，部署目录=配置目录）
     pub(crate) fn on_start_from(&mut self, config_path: &Path) -> bool {
+        // 服务配置缺失/解析失败 → 启动失败事件（错误级别）
         if !config_path.exists() {
             self.write_log("host", &f("Service config file not found: {0}", &[&config_path.display().to_string()]));
+            self.write_event(1004, &f("Osmium config file not found: {0}", &[&config_path.display().to_string()]));
             return false;
         }
 
@@ -276,7 +390,9 @@ impl ServiceHost {
         let config = match std::panic::catch_unwind(|| crate::service_core::load_config(config_path)) {
             Ok(c) => c,
             Err(p) => {
-                self.write_log("host", &crate::service_core::panic_msg(&*p, "Unknown error"));
+                let msg = crate::service_core::panic_msg(&*p, "Unknown error");
+                self.write_log("host", &msg);
+                self.write_event(1004, &f("Osmium config parse failed: {0}", &[&msg]));
                 return false;
             }
         };
@@ -316,7 +432,7 @@ impl ServiceHost {
         }
 
         self.write_log("host", &f("Service starting, config: {0}", &[&config_path.display().to_string()]));
-
+        self.write_event(1000, "Osmium service started");
         // 启动前钩子（可选，失败不阻断）；日志禁用时传入空目录使其静默
         let hook_log_dir = self.hook_log_dir();
         run_hook(config.prestart_command.as_deref(), "prestart", HOOK_PRESTART_TIMEOUT_MS, hook_log_dir, None, &self.log_opts, None, None);
@@ -375,6 +491,10 @@ impl ServiceHost {
                 let raw = config.log_zip_date_format.as_deref().unwrap_or_default();
                 if log_pattern_safe(raw) { raw.trim().to_string() } else { String::new() }
             },
+            // 日志脱敏字面串列表（非空条目才保留，避免空串全替换）
+            redact: config.log_redact.as_deref()
+                .map(|list| list.iter().filter(|s| !s.trim().is_empty()).cloned().collect())
+                .unwrap_or_default(),
         };
         // 文件名模式非法（含路径分隔符等）时回退默认日期格式，防路径穿越
         if !log_pattern_safe(&self.log_opts.pattern) {
@@ -393,8 +513,35 @@ impl ServiceHost {
             _ => None,
         };
         self.process_priority = config.process_priority.clone();
+        self.process_affinity = config.process_affinity.clone();
+        self.io_priority = config.io_priority.clone();
+        self.job_object = config.job_object;
+        // 健康检查参数（无效值回退默认）
+        self.health_check_url = config.health_check_url.as_deref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        self.health_check_interval = if config.health_check_interval_secs > 0 { config.health_check_interval_secs } else { 30 };
+        self.health_check_timeout = if config.health_check_timeout_secs > 0 { config.health_check_timeout_secs as u64 } else { 5 };
+        self.health_check_failures = if config.health_check_failures > 0 { config.health_check_failures } else { 3 };
+        self.health_check_expected = if config.health_check_expected_status > 0 { config.health_check_expected_status as u16 } else { 200 };
+        self.health_failures = 0;
+        self.health_last_check = None;
+        // 定时调度列表（拷贝 + 同步触发状态数组长度）
+        self.schedules = config.schedules.clone().unwrap_or_default();
+        self.schedule_last = vec![None; self.schedules.len()];
+        self.schedule_daily_last = vec![None; self.schedules.len()];
+        // once 模式: service_start_mode=once → 子进程退出即停止服务（不重启/不故障恢复）
+        self.once_mode = config.service_start_mode.as_deref()
+            .map(|m| m.eq_ignore_ascii_case("once")).unwrap_or(false);
+        // 指标导出文件（相对路径基于部署目录）
+        self.metrics_file = config.metrics_file.as_deref()
+            .map(|p| resolve_deploy_path(p, &self.deploy_dir))
+            .filter(|p| !p.is_empty());
         self.event_log = config.event_log;
         self.extensions = config.extensions.clone();
+        self.plugins = config.plugins.clone();
+        // 插件签名强制（require_signed_plugins）: 全局开关，run_plugin/plugin_usable 执行前校验
+        crate::service_core::set_require_signed_plugins(config.require_signed_plugins);
         self.hide_window = config.hide_window;
         self.stop_parent_process_first = config.stop_parent_process_first;
         self.stop_timeout_secs = if config.stop_timeout_secs > 0 { config.stop_timeout_secs as u64 } else { GRACEFUL_TIMEOUT_SECS };
@@ -475,6 +622,10 @@ impl ServiceHost {
                     self.check_runaway();
                     self.check_child_eco_qos();
                     self.check_host_eco_qos();
+                    self.write_metrics(None);
+                    self.check_health();
+                    self.check_schedules();
+                    self.check_reload_flag();
                     // 配置热刷新（autoRefresh）: 配置文件变化时重载并重启子进程
                     if self.auto_refresh {
                         self.check_config_refresh();
@@ -487,6 +638,17 @@ impl ServiceHost {
         };
         self.last_child_exit_code = code;
         self.write_log("host", &f("Child process exited with code {0}", &[&code.to_string()]));
+        // 子进程退出时补写最终指标行（记录最终 CPU/内存与退出码, 保证 metrics 序列完整）
+        if self.metrics_file.is_some() {
+            self.write_metrics(Some(code));
+        }
+
+        // once 模式: 子进程退出即停止服务（不重启、不故障恢复，任务型服务语义）
+        if self.once_mode {
+            self.write_log("host", "Once mode: child exited, stopping service");
+            self.stop_host("Once mode: child exited, stopping service", "Service stopping", Some("Service stopped"));
+            return false;
+        }
 
         // 防重入: 停止流程中子进程被终止也会触发本路径（对应 Interlocked.CompareExchange）
         if self.stopping.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
@@ -512,8 +674,24 @@ impl ServiceHost {
         };
         self.write_log("host", &f("Child process exited abnormally (code {0}), failure #{1}, applying action: {2} (delay {3}s)",
             &[&code.to_string(), &self.consecutive_failures.to_string(), &action.action, &action.delay_secs.to_string()]));
+        self.write_event(1002, &f("Osmium child process crashed (exit code {0})", &[&code.to_string()]));
+        // crash 阶段插件调用（如 notify 通知）：失败仅告警不阻断恢复流程
+        if let Err(e) = self.run_plugin_calls(self.plugins.as_deref(), "crash") {
+            self.write_log("host", &f("Crash plugin call failed: {0}", &[&e]));
+        }
+        // 恢复延迟分段等待: 期间轮询 SCM 停止/关机信号，管理员可随时中断恢复流程
+        //（WinSW 行为对齐: 恢复 delay 中必须能停止服务，不能阻塞 SCM 停止）
         if action.delay_secs > 0 {
-            thread::sleep(Duration::from_secs(action.delay_secs));
+            let deadline = Instant::now() + Duration::from_secs(action.delay_secs);
+            while Instant::now() < deadline {
+                if crate::service_core::scm_stop_requested() {
+                    self.write_log("host", "Stop requested during recovery delay, aborting recovery");
+                    self.stop_host("Stop requested during recovery delay, stopping service",
+                        "Service stopping", Some("Service stopped"));
+                    return false;
+                }
+                thread::sleep(Duration::from_millis(500));
+            }
         }
         match action.action.to_lowercase().as_str() {
             "restart" => match self.try_restart_child() {
@@ -551,6 +729,7 @@ impl ServiceHost {
         }
         self.write_log("host", signal_msg);
         self.write_log("host", stopping_msg);
+        self.write_event(1001, "Osmium service stopping");
         // 停止阶段资源操作需要配置，宿主不常驻整份配置 → 停止流程开始前重读一次
         let config = self.current_config();
         // prestop 钩子 + 生命周期插件 phase=stop_before（主进程停止前，失败不阻断）
@@ -584,9 +763,8 @@ impl ServiceHost {
         self.load_deployed_config().ok().map(|c| self.expand_config(&c))
     }
 
-    /// 读取部署配置（异常重启/停止阶段资源操作需要配置，宿主不常驻整份配置）:
-    /// 优先用启动时记录的配置路径（共享宿主 = svcs\<name>\<name>.osiml），
-    /// 普通宿主回退 exe 旁配置；失败返回 panic 详情
+    /// 读取部署配置（异常重启/停止阶段资源操作需要配置）: 优先用启动时记录的配置路径
+    /// （共享宿主 = svcs\<name>\<name>.osiml），普通宿主回退 exe 旁配置；失败返回 panic 详情
     fn load_deployed_config(&self) -> Result<crate::service_config::ServiceConfig, String> {
         let config_path = self.config_path.clone()
             .unwrap_or_else(|| config_path_next_to(Path::new(&crate::service_core::get_own_path())));
@@ -637,6 +815,176 @@ impl ServiceHost {
                 self.runaway_last_sample = Some((pid, cpu, now));
             }
         }
+    }
+
+    /// HTTP 健康检查: 周期 GET 健康检查 URL，连续失败达到阈值视为崩溃——
+    /// 强制终止子进程（非零退出码走既有崩溃恢复流程: 动作序列 + crash 插件）
+    fn check_health(&mut self) {
+        let Some(url) = self.health_check_url.clone() else { return };
+        if self.child.as_ref().is_none() {
+            return;
+        }
+        let interval = Duration::from_secs(self.health_check_interval.max(1) as u64);
+        if self.health_last_check.is_some_and(|t| t.elapsed() < interval) {
+            return;
+        }
+        self.health_last_check = Some(Instant::now());
+        let healthy = match ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(self.health_check_timeout.max(1))))
+                .build(),
+        )
+        .get(&url)
+        .call()
+        {
+            Ok(resp) => resp.status().as_u16() == self.health_check_expected,
+            Err(_) => false,
+        };
+        if healthy {
+            if self.health_failures > 0 {
+                self.write_log("host", &f("Health check recovered (failures reset, URL: {0})", &[&url]));
+                self.health_failures = 0;
+            }
+            return;
+        }
+        self.health_failures += 1;
+        self.write_log("host", &f("Health check failed ({0}/{1}): {2}", &[&self.health_failures.to_string(), &self.health_check_failures.to_string(), &url]));
+        if self.health_failures >= self.health_check_failures {
+            self.write_log("host", &f("Health check exceeded failure threshold, terminating child (URL: {0})", &[&url]));
+            self.health_failures = 0;
+            self.force_kill();
+        }
+    }
+
+    /// 定时调度: every_secs（固定间隔）/ daily_at（每日定点）触发 restart/reload/hook 动作
+    fn check_schedules(&mut self) {
+        if self.schedules.is_empty() {
+            return;
+        }
+        let now = chrono::Local::now();
+        for i in 0..self.schedules.len() {
+            // 提前提取触发字段（小克隆），避免与后续 self 修改产生借用冲突
+            let (every, daily, action, command) = {
+                let s = &self.schedules[i];
+                (s.every_secs, s.daily_at.clone(), s.action.clone(), s.command.clone())
+            };
+            let schedule = crate::service_config::ScheduleConfig { every_secs: every, daily_at: daily, action, command };
+            if !schedule_due(&schedule, self.schedule_last[i], self.schedule_daily_last[i], now) {
+                continue;
+            }
+            self.write_log("host", &f("Schedule[{0}] triggered: {1}", &[&(i + 1).to_string(), &schedule.action]));
+            match schedule.action.to_lowercase().as_str() {
+                "hook" => {
+                    if let Some(cmd) = schedule.command.as_deref() {
+                        run_hook(Some(cmd), "schedule", HOOK_PRESTART_TIMEOUT_MS,
+                            self.hook_log_dir(), None, &self.log_opts, None, None);
+                    }
+                }
+                // reload: 重新加载部署配置并重启子进程（失败保持旧配置运行，与 auto_refresh 一致）
+                "reload" => {
+                    if let Err(e) = self.try_restart_child() {
+                        self.write_log("host", &f("Schedule reload failed, keeping old config: {0}", &[&e]));
+                    }
+                }
+                // restart（默认）: 优雅停止当前子进程后按部署配置重启（不计入故障计数）
+                _ => {
+                    self.stop_child_process();
+                    if let Err(e) = self.try_restart_child() {
+                        self.write_log("host", &f("Schedule restart failed: {0}", &[&e]));
+                    }
+                }
+            }
+            self.schedule_last[i] = Some(Instant::now());
+            self.schedule_daily_last[i] = Some(now.date_naive());
+        }
+    }
+
+    /// reload 标记检测（--reload 命令触发的热刷新通道，不依赖 auto_refresh 配置）:
+    /// 部署目录存在 <配置名>.reload 文件 → 重载配置并重启子进程（失败保持旧配置）
+    fn check_reload_flag(&mut self) {
+        let Some(config_path) = self.config_path.clone() else { return };
+        let flag = config_path.with_extension("reload");
+        if !flag.exists() {
+            return;
+        }
+        let _ = std::fs::remove_file(&flag);
+        self.write_log("host", "Reload flag detected, reloading config");
+        if let Err(e) = self.try_restart_child() {
+            self.write_log("host", &f("Reload failed, keeping old config: {0}", &[&e]));
+        }
+    }
+}
+
+/// 解析每日定点时刻: 兼容 "HH:mm:ss" 与 "HH:mm"（README 示例格式）；非法返回 None
+fn parse_daily_time(raw: &str) -> Option<chrono::NaiveTime> {
+    chrono::NaiveTime::parse_from_str(raw.trim(), "%H:%M:%S").ok()
+        .or_else(|| chrono::NaiveTime::parse_from_str(raw.trim(), "%H:%M").ok())
+}
+
+/// 定时到点判断（纯函数，供单测）: every_secs 距上次触发 >= 间隔；daily_at 今日已到点且未触发过。
+/// 两者都未配置或非法时刻返回 false
+pub(crate) fn schedule_due(
+    schedule: &crate::service_config::ScheduleConfig,
+    last: Option<Instant>,
+    last_date: Option<chrono::NaiveDate>,
+    now: chrono::DateTime<chrono::Local>,
+) -> bool {
+    if let Some(secs) = schedule.every_secs.filter(|v| *v > 0) {
+        return last.is_none_or(|t| t.elapsed() >= Duration::from_secs(secs as u64));
+    }
+    if let Some(at) = schedule.daily_at.as_deref().filter(|s| !s.trim().is_empty())
+        && let Some(t) = parse_daily_time(at)
+    {
+        let done_today = last_date.is_some_and(|d| d == now.date_naive());
+        return now.time() >= t && !done_today;
+    }
+    false
+}
+
+impl ServiceHost {
+    /// 指标导出: metrics_file 配置时每 30s 追加一行 JSON（时间/PID/CPU%/内存/重启次数/时长），
+    /// 子进程退出时补写 final 行（含退出码）；路径为符号链接时跳过
+    fn write_metrics(&mut self, final_exit: Option<i32>) {
+        let Some(path) = self.metrics_file.clone() else { return };
+        let Some(pid) = self.child.as_ref().map(|c| c.id()) else { return };
+        let now = Instant::now();
+        if final_exit.is_none()
+            && self.metrics_last_write.is_some_and(|t| t.elapsed() < Duration::from_secs(30))
+        {
+            return;
+        }
+        self.metrics_last_write = Some(now);
+        if is_reparse_path(Path::new(&path)) { return; }
+        let uptime = self.child_started_at.map(|t| now.duration_since(t).as_secs()).unwrap_or(0);
+        let line = match final_exit {
+            // 子进程已退出: 周期采样值无意义, 仅记录运行时长与退出码
+            Some(code) => serde_json::json!({
+                "ts": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                "pid": pid,
+                "event": "exit",
+                "exit_code": code,
+                "restarts": self.consecutive_failures,
+                "uptime_secs": uptime,
+            }),
+            None => {
+                let cpu_pct = if uptime > 5 {
+                    process_cpu_100ns(pid).map(|c| c as f64 / 10_000_000.0 / uptime as f64 * 100.0).unwrap_or(0.0)
+                } else { 0.0 };
+                serde_json::json!({
+                    "ts": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                    "pid": pid,
+                    "cpu_pct": format!("{:.1}", cpu_pct),
+                    "mem_mb": process_working_set_mb(pid).unwrap_or(0),
+                    "restarts": self.consecutive_failures,
+                    "uptime_secs": uptime,
+                })
+            }
+        };
+        let _ = std::fs::OpenOptions::new().create(true).append(true).open(&path)
+            .map(|mut f| {
+                use std::io::Write;
+                let _ = f.write_all(format!("{line}\r\n").as_bytes());
+            });
     }
 
     /// 子进程 auto 效率模式切换（独立采样，不受 runaway 配置影响）
@@ -772,6 +1120,8 @@ impl ServiceHost {
     /// 启动成功后回写子进程 PID 到 pid 文件（下次启动据此清理残留）
     fn write_runaway_pid(&self, pid: u32) {
         let Some(path) = &self.runaway_pid_file else { return };
+        // symlink 防护: pid 文件为符号链接时跳过（防写穿到任意文件）
+        if is_reparse_path(Path::new(path)) { return; }
         let _ = std::fs::write(path, pid.to_string());
     }
 
@@ -838,8 +1188,35 @@ impl ServiceHost {
             Err(e) => return Err(e.to_string()),
         };
         let pid = child.id();
+        // 子进程放入 Job Object（KILL_ON_JOB_CLOSE）: 宿主进程异常退出时系统级终止整棵子进程树
+        if self.job_object {
+            if self.job.is_none() {
+                self.job = JobObject::create();
+                if self.job.is_none() {
+                    self.write_log("host", "Failed to create Job Object (KILL_ON_JOB_CLOSE disabled)");
+                }
+            }
+            if let Some(job) = &self.job {
+                unsafe {
+                    match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION, false, pid) {
+                        Ok(h) => {
+                            if let Err(e) = job.assign(h) {
+                                self.write_log("host", &f("Job Object assign failed (non-fatal): {0}", &[&e]));
+                            }
+                            let _ = CloseHandle(h);
+                        }
+                        Err(e) => self.write_log("host", &f("OpenProcess for Job Object failed: {0}", &[&e.to_string()])),
+                    }
+                }
+            }
+        }
         // 设置目标进程优先级（可选）
         set_process_priority(pid, self.process_priority.as_deref());
+        // 设置目标进程 CPU 亲和性（可选，核心编号列表；钳制到系统核心数）
+        set_process_affinity(pid, self.process_affinity.as_deref());
+        // 设置目标进程 IO 优先级（可选）
+        set_io_priority(pid, self.io_priority.as_deref());
+        self.child_started_at = Some(Instant::now());
         // RunawayProcessKiller 启动清理: 回写当前子进程 PID，供下次启动清理残留
         self.write_runaway_pid(pid);
         // 消费子进程 stdout/stderr，避免管道缓冲区写满阻塞子进程；日志禁用时传空目录使其静默
@@ -1051,15 +1428,22 @@ impl ServiceHost {
         }
     }
 
-    /// 执行指定阶段的全部生命周期插件调用（exe 同级 .osx，kit 分发 + payload 透传）;
-    /// phase 兼容规则同 extensions；fail_on_error=true 时返回 Err（start 阶段阻断启动），
-    /// 否则失败仅告警不阻断
+    /// 执行指定阶段的全部生命周期插件调用（kit 分发 + payload 透传）；crash 阶段自动注入
+    /// service_name/exit_code/failures 供告警插件使用；fail_on_error=true 时 start 阶段阻断启动
     fn run_plugin_calls(&self, plugins: Option<&[crate::service_config::PluginCallConfig]>, phase: &str) -> Result<(), String> {
         let Some(plugins) = plugins else { return Ok(()) };
         for p in plugins.iter().filter(|p| ext_phase_matches(&p.phase, phase)) {
             self.write_log("host", &f("Running plugin [{0}]: {1}", &[phase, &p.kit]));
             // 非对象 payload（Null/标量）规范化为空对象，保证 kit 字段可注入请求 JSON
-            let payload = if p.payload.is_object() { p.payload.clone() } else { serde_json::json!({}) };
+            let mut payload = if p.payload.is_object() { p.payload.clone() } else { serde_json::json!({}) };
+            // crash 阶段注入崩溃上下文（用户 payload 同名字段保持优先，覆盖需在 payload 中显式声明）
+            if phase == "crash"
+                && let Some(obj) = payload.as_object_mut()
+            {
+                obj.entry("service_name").or_insert_with(|| serde_json::Value::String(self.svc_identity()));
+                obj.entry("exit_code").or_insert_with(|| serde_json::Value::from(self.last_child_exit_code));
+                obj.entry("failures").or_insert_with(|| serde_json::Value::from(self.consecutive_failures));
+            }
             match run_plugin(&p.kit, &payload) {
                 Ok(()) => self.write_log("host", &f("Plugin completed: {0}", &[&p.kit])),
                 Err(e) => {
@@ -1073,6 +1457,14 @@ impl ServiceHost {
         Ok(())
     }
 
+    /// 宿主身份（crash 插件注入用）: 平台部署为 svcs 目录名（配置文件名），inplace 为 exe 文件名
+    fn svc_identity(&self) -> String {
+        self.config_path.as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default()
+    }
+
     // ==================== 日志输出 ====================
 
     /// 写入宿主日志条目: 受 log_enabled 控制；stderr 分流与大小滚动由 log_opts 决定；
@@ -1080,12 +1472,25 @@ impl ServiceHost {
     pub fn write_log(&self, channel: &str, message: &str) {
         // 事件日志先写：event_log=true 时即使 log_enabled=false 也记录事件（两个开关语义独立）
         if self.event_log && channel == "host" {
-            report_event_log(message);
+            report_event_log(message, 0, EVENTLOG_INFORMATION_TYPE);
         }
         if !self.log_enabled {
             return;
         }
         write_log_entry(&self.log_dir, channel, message, &self.log_opts);
+    }
+
+    /// 关键生命周期事件写 Windows 事件日志（结构化事件 ID + 级别）:
+    /// 1000 服务启动 / 1001 服务停止 / 1002 子进程崩溃 / 1003 下载失败 / 1004 配置错误
+    fn write_event(&self, event_id: u32, message: &str) {
+        if !self.event_log {
+            return;
+        }
+        let level: REPORT_EVENT_TYPE = match event_id {
+            1002..=1004 => EVENTLOG_ERROR_TYPE,
+            _ => EVENTLOG_INFORMATION_TYPE,
+        };
+        report_event_log(message, event_id, level);
     }
 }
 
@@ -1508,7 +1913,7 @@ fn entry_sha_ok(entry: &crate::service_config::DownloadConfig, target: &str) -> 
 
 /// 执行单条下载条目（等价 PrepareDownload 核心）:
 /// insecure 检查 → 已就绪跳过 → 下载（含 304/If-Modified-Since）→ sha 校验 → zip 解压（插件）
-fn run_download_entry(
+pub(crate) fn run_download_entry(
     config: &crate::service_config::ServiceConfig,
     entry: &crate::service_config::DownloadConfig,
     deploy_dir: &str,
@@ -1535,17 +1940,40 @@ fn run_download_entry(
         write_log_entry(log_dir, "host", "Download target SHA-256 mismatch, re-downloading", opts);
         let _ = std::fs::remove_file(&target);
     }
-    if !try_download_entry(config, entry, url, &target, log_dir, opts) {
-        let fail_on_error = entry.fail_on_error.unwrap_or(config.download_fail_on_error);
-        if fail_on_error {
-            return Err(f("Download failed: {0} (target: {1}). Check the URL, network connectivity, and authentication settings.", &[url, &target]));
+    // 下载失败重试（指数退避）: 重试次数与退避基数可配置，重试间清理校验失败的残留目标
+    let retries = config.download_retries.max(0) as u32;
+    let backoff_ms = if config.download_retry_backoff_ms > 0 { config.download_retry_backoff_ms as u64 } else { 2000 };
+    let mut downloaded = false;
+    for attempt in 0..=retries {
+        if try_download_entry(config, entry, url, &target, log_dir, opts) {
+            downloaded = true;
+            break;
         }
-        write_log_entry(log_dir, "host", &f("Download failed but fail_on_error=false: continuing (target may be missing): {0} (target: {1})", &[url, &target]), opts);
+        if attempt < retries {
+            // 失败可能留下校验失败的缓存，先删除再重试
+            if Path::new(&target).exists() && !entry_sha_ok(entry, &target) {
+                let _ = std::fs::remove_file(&target);
+            }
+            let delay = backoff_ms * 2u64.pow(attempt);
+            write_log_entry(log_dir, "host",
+                &f("Download failed, retrying in {0} ms (attempt {1}/{2})",
+                    &[&delay.to_string(), &(attempt + 1).to_string(), &retries.to_string()]), opts);
+            thread::sleep(Duration::from_millis(delay));
+        }
+    }
+    if !downloaded {
+        let fail_on_error = entry.fail_on_error.unwrap_or(config.download_fail_on_error);
+        // URL 去敏后进错误消息/日志（防内嵌凭据经 userinfo 泄漏）
+        let redacted = redact_url(url);
+        if fail_on_error {
+            return Err(f("Download failed: {0} (target: {1}). Check the URL, network connectivity, and authentication settings.", &[&redacted, &target]));
+        }
+        write_log_entry(log_dir, "host", &f("Download failed but fail_on_error=false: continuing (target may be missing): {0} (target: {1})", &[&redacted, &target]), opts);
         // fail_on_error=false 允许"目标缺失时继续（由启动阶段的文件存在性检查报错）"，
         // 但绝不允许执行校验失败/不可信的目标
         let target_ok = !Path::new(&target).exists() || entry_sha_ok(entry, &target);
         if !target_ok {
-            return Err(f("Download failed: {0} (target: {1})", &[url, &target]));
+            return Err(f("Download failed: {0} (target: {1})", &[&redacted, &target]));
         }
     }
     // zip 解压（可选，经 osmium-kit-unzip 插件）: 下载文件为 .zip 且 unzip=true 时解压到目标目录
@@ -1695,6 +2123,12 @@ fn try_download_entry(
             return Err(DownloadFail::ShaMismatch);
         }
 
+        // symlink 防护: 目标为符号链接时拒绝覆盖（防写穿到任意文件）
+        if is_reparse_path(Path::new(target)) {
+            write_log_entry(log_dir, "host", &f("Download target is a symlink, refusing to overwrite: {0}", &[target]), opts);
+            let _ = std::fs::remove_file(&tmp);
+            return Err(DownloadFail::Other("download target is a symlink".into()));
+        }
         let _ = std::fs::remove_file(target); // File.Move 覆盖语义
         std::fs::rename(&tmp, target).map_err(|e| DownloadFail::Other(e.to_string()))?;
         write_log_entry(log_dir, "host", &f("Download complete: {0}", &[target]), opts);
@@ -1774,12 +2208,8 @@ fn plugin_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// 插件文件是否可信: 信任锚点 = 宿主 exe 自身位置——
-/// 宿主位于用户可写目录（inplace 集成部署 / 开发者目录）时，插件与 exe 同级或在其子目录，
-/// 攻击面与宿主一致（能替换插件的攻击者同样能替换 exe），不额外增加风险，直接放行；
-/// 宿主位于受保护位置（如 Program Files）时，严格要求插件所在目录及插件文件
-/// 仅 SYSTEM/Administrators 可写（对齐 secure_directory 语义，防任意登录用户
-/// 替换插件获得 SYSTEM 提权，P0）。校验失败返回错误原因，调用方拒绝执行该插件
+/// 插件信任锚点 = 宿主 exe 位置: 宿主在可写目录（inplace/开发目录）时插件随 exe 放行（攻击面一致）；
+/// 宿主在受保护位置（Program Files）时要求插件目录/文件仅 SYSTEM/Admin 可写（P0 防提权）
 fn plugin_path_trusted(path: &Path) -> Result<(), String> {
     let host_dir = Path::new(&crate::service_core::get_own_path())
         .parent()
@@ -1829,17 +2259,60 @@ fn scan_plugin_dir(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// 插件可用性: 协议探测——喂 {"kit":"ping"} 并验证响应 ok=true；
-/// ACL 不可信（任意用户可写）或协议不响应均视为不可用（P0 防提权）
+/// ACL 不可信或 require_signed_plugins 开启时未签名 → 不可用（P0 防提权）
 pub(crate) fn plugin_usable(path: &Path) -> bool {
     // 信任校验: 插件目录/文件被非管理员可写 → 不可用（防恶意插件替换提权）
     if plugin_path_trusted(path).is_err() {
         return false;
     }
+    // 签名校验: require_signed_plugins 开启时要求有效 Authenticode 签名
+    if crate::service_core::require_signed_plugins()
+        && !verify_file_signature(&path.to_string_lossy())
+    {
+        return false;
+    }
     invoke_plugin(path, "ping", &serde_json::json!({})).is_ok()
 }
 
-/// 运行插件: 遍历 exe 同级发现的全部 .osx，喂 stdin JSON（kit 字段分发），首个 ok=true 即成功；
-/// 全部失败返回最后一个错误；ACL 不可信的插件（任意用户可写）跳过执行并告警（P0 防提权）
+/// Authenticode 签名校验（WinVerifyTrust）: 校验通过返回 true；
+/// 未签名/签名无效/API 失败返回 false（require_signed_plugins 配置用）
+pub(crate) fn verify_file_signature(path: &str) -> bool {
+    use windows::Win32::Security::WinTrust::{
+        WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
+        WINTRUST_DATA_PROVIDER_FLAGS, WINTRUST_DATA_UICONTEXT, WINTRUST_FILE_INFO,
+        WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
+    };
+    unsafe {
+        let wide = crate::service_core::to_wide(path);
+        let mut file_info = WINTRUST_FILE_INFO {
+            cbStruct: size_of::<WINTRUST_FILE_INFO>() as u32,
+            pcwszFilePath: PCWSTR::from_raw(wide.as_ptr()),
+            hFile: HANDLE::default(),
+            pgKnownSubject: std::ptr::null_mut(),
+        };
+        let mut data = WINTRUST_DATA {
+            cbStruct: size_of::<WINTRUST_DATA>() as u32,
+            pPolicyCallbackData: std::ptr::null_mut(),
+            pSIPClientData: std::ptr::null_mut(),
+            dwUIChoice: WTD_UI_NONE,
+            fdwRevocationChecks: WTD_REVOKE_NONE,
+            dwUnionChoice: WTD_CHOICE_FILE,
+            Anonymous: WINTRUST_DATA_0 { pFile: &mut file_info },
+            dwStateAction: WTD_STATEACTION_VERIFY,
+            hWVTStateData: HANDLE::default(),
+            pwszURLReference: windows::core::PWSTR::null(),
+            dwProvFlags: WINTRUST_DATA_PROVIDER_FLAGS(0),
+            dwUIContext: WINTRUST_DATA_UICONTEXT(0),
+            pSignatureSettings: std::ptr::null_mut(),
+        };
+        let mut guid = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+        let status = WinVerifyTrust(HWND::default(), &mut guid, &mut data as *mut _ as *mut core::ffi::c_void);
+        status == 0
+    }
+}
+
+/// 运行插件: 遍历 exe 同级发现的全部 .osx（kit 分发），首个 ok=true 即成功；
+/// ACL 不可信/未签名（require_signed_plugins）的插件跳过；全部失败返回最后一个错误
 pub(crate) fn run_plugin(kit: &str, payload: &serde_json::Value) -> Result<(), String> {
     let plugins = discover_plugins();
     if plugins.is_empty() {
@@ -1850,6 +2323,13 @@ pub(crate) fn run_plugin(kit: &str, payload: &serde_json::Value) -> Result<(), S
         // 信任校验: 插件目录/文件被非管理员可写 → 拒绝执行（防恶意插件替换提权）
         if let Err(reason) = plugin_path_trusted(plugin) {
             last_err = f("plugin '{0}' skipped: {1}", &[&plugin.display().to_string(), &reason]);
+            continue;
+        }
+        // 签名校验: require_signed_plugins 开启时要求有效 Authenticode 签名
+        if crate::service_core::require_signed_plugins()
+            && !verify_file_signature(&plugin.to_string_lossy())
+        {
+            last_err = f("plugin '{0}' skipped: not signed or signature invalid", &[&plugin.display().to_string()]);
             continue;
         }
         match invoke_plugin(plugin, kit, payload) {
@@ -2098,8 +2578,26 @@ pub(crate) fn write_log_entry(log_dir: &str, channel: &str, message: &str, opts:
     } else {
         escape_invisible(message)
     };
+    // 日志脱敏: 配置的 log_redact 字面串全部替换为 ***（防密码/令牌经日志泄漏）
+    let text = if opts.redact.is_empty() {
+        text
+    } else {
+        let mut t = text;
+        for pattern in &opts.redact {
+            if !pattern.is_empty() {
+                t = t.replace(pattern.as_str(), "***");
+            }
+        }
+        t
+    };
     let entry = format!("[{}] [{}] {}\r\n", now.format("%Y-%m-%d %H:%M:%S"), channel, text);
     let _guard = LOG_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // symlink 防护（锁内检查+写入原子化, 防 TOCTOU）: 日志文件为符号链接时跳过本次写入
+    // 并在 stderr 告警（服务模式下可被 SCM/调试器捕获, 不静默丢日志）
+    if is_reparse_path(&log_file) {
+        eprintln!("[osmium] log file is a symlink, refusing to write: {}", log_file.display());
+        return;
+    }
     // 定点滚动/按天滚动/大小滚动与写入串行化: 避免并发 rename 撞上正在追加的句柄
     //（对应 WinSW #894/#1016/#1088 日志滚动崩溃/静默失败类问题）
     auto_roll_logs(log_dir, opts, &now);
@@ -2497,20 +2995,30 @@ fn enable_debug_privilege() {
     }
 }
 
-/// 管理员/开发者工具（对应 WinSW dev kill）: 按 WINSGF_SERVICE_ID 定位并强制终止
-/// 某服务的目标子进程（整棵进程树）。返回终止的进程数；服务未运行返回 0。
-/// 需管理员权限，必要时启用 SeDebugPrivilege 以终止 SYSTEM 级进程
-pub(crate) fn kill_service_processes(service_id: &str) -> Result<u32, String> {
+/// 按 WINSGF_SERVICE_ID 枚举某服务的全部目标进程 PID（宿主为子进程注入该变量；
+/// 供 --kill 定位与 --status 显示子进程列表）。读取 SYSTEM 级进程环境需 SeDebugPrivilege，
+/// 管理员默认持有但禁用——先启用再枚举
+pub(crate) fn service_process_pids(service_id: &str) -> Vec<u32> {
     enable_debug_privilege();
-    let mut killed = 0u32;
-    let mut errors = Vec::new();
+    let mut pids = Vec::new();
     for pid in all_process_ids() {
         let matched = process_env_var(pid, "WINSGF_SERVICE_ID")
             .map(|v| v.eq_ignore_ascii_case(service_id))
             .unwrap_or(false);
-        if !matched {
-            continue;
+        if matched {
+            pids.push(pid);
         }
+    }
+    pids
+}
+
+/// 管理员/开发者工具（对应 WinSW dev kill）: 按 WINSGF_SERVICE_ID 定位并强制终止某服务
+/// 的目标子进程树；返回终止数；需管理员权限（必要时启用 SeDebugPrivilege）
+pub(crate) fn kill_service_processes(service_id: &str) -> Result<u32, String> {
+    enable_debug_privilege();
+    let mut killed = 0u32;
+    let mut errors = Vec::new();
+    for pid in service_process_pids(service_id) {
         unsafe {
             // 先杀子树再杀自身（与 runaway_cleanup_pid_file 顺序一致）
             for desc in collect_descendants(pid) {
@@ -2585,6 +3093,49 @@ pub(crate) fn set_process_priority(pid: u32, priority: Option<&str>) {
     }
 }
 
+/// 设置目标进程 CPU 亲和性（核心编号列表 "0,1,2"；越界核心忽略，掩码为空不设置）
+pub(crate) fn set_process_affinity(pid: u32, affinity: Option<&str>) {
+    let Some(spec) = affinity else { return };
+    let cores: Vec<u32> = spec.split(',').filter_map(|c| c.trim().parse().ok()).collect();
+    if cores.is_empty() { return; }
+    let sys_cores = thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1).max(1);
+    let mut mask: usize = 0;
+    for c in cores {
+        if c < sys_cores { mask |= 1usize << c; }
+    }
+    if mask == 0 { return; }
+    unsafe {
+        use windows::Win32::System::Threading::SetProcessAffinityMask;
+        if let Ok(h) = OpenProcess(PROCESS_SET_INFORMATION, false, pid) {
+            let _ = SetProcessAffinityMask(h, mask);
+            let _ = CloseHandle(h);
+        }
+    }
+}
+
+/// 设置目标进程主线程 IO 优先级（ThreadIoPriority 信息类，Windows 8+）:
+/// idle=IO_PRIORITY_VERYLOW / low=LOW / high=HIGH（normal 保持默认）
+pub(crate) fn set_io_priority(pid: u32, priority: Option<&str>) {
+    let hint: i32 = match priority.map(|s| s.to_lowercase()).as_deref() {
+        Some("idle") => 0,
+        Some("low") => 1,
+        Some("high") => 3,
+        _ => return,
+    };
+    unsafe {
+        use windows::Win32::System::Threading::{OpenThread, SetThreadInformation, THREAD_INFORMATION_CLASS, THREAD_SET_INFORMATION};
+        if let Ok(h) = OpenThread(THREAD_SET_INFORMATION, false, pid) {
+            let _ = SetThreadInformation(h, THREAD_INFORMATION_CLASS(0x10), &hint as *const _ as *const _, size_of::<i32>() as u32);
+            let _ = CloseHandle(h);
+        }
+    }
+}
+
+/// 检查路径是否为符号链接/挂载点（reparse point）: 用于日志/pid/下载目标的写穿防护
+pub(crate) fn is_reparse_path(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false)
+}
+
 /// 展开环境变量引用 %NAME%（未定义展开为空串），%BASE% 特指部署目录（按字符迭代，兼容中文）
 pub(crate) fn expand_env_value(value: &str, base: &str) -> String {
     let chars: Vec<char> = value.chars().collect();
@@ -2620,14 +3171,15 @@ pub(crate) fn expand_env_value(value: &str, base: &str) -> String {
     out
 }
 
-/// 写 Windows 事件日志（信息级别，来源名 Osmium）
-fn report_event_log(message: &str) {
+/// 写 Windows 事件日志（来源名 Osmium，结构化事件 ID + 级别）:
+/// 1000 服务启动 / 1001 服务停止 / 1002 子进程崩溃 / 1003 下载失败 / 1004 配置错误
+fn report_event_log(message: &str, event_id: u32, level: REPORT_EVENT_TYPE) {
     unsafe {
         let source = crate::service_core::to_wide("Osmium");
         if let Ok(h) = RegisterEventSourceW(PCWSTR::null(), PCWSTR::from_raw(source.as_ptr())) {
             let wide = crate::service_core::to_wide(message);
             let strings = [PCWSTR::from_raw(wide.as_ptr())];
-            let _ = ReportEventW(h, EVENTLOG_INFORMATION_TYPE, 0, 0, None, 0,
+            let _ = ReportEventW(h, level, 0, event_id, None, 0,
                 Some(&strings), None);
             let _ = DeregisterEventSource(h);
         }

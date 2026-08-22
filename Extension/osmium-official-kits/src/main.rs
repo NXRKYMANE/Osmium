@@ -8,14 +8,15 @@ mod kits_tests;
 use serde::{Deserialize, Serialize};
 
 use kits_core::{MapperSpec,
-                map_shared_directories, reboot_system, sspi_download_to_file, unmap_shared_directories,
+                map_shared_directories, notify_webhook, reboot_system, send_email_smtp, send_syslog_udp,
+                sspi_download_to_file, unmap_shared_directories,
                 unzip_to_dir,
 };
 
-/// 插件请求: 按 kit 字段分发到 SSPI / netmap / unzip / reboot 功能
+/// 插件请求: 按 kit 字段分发到 SSPI / netmap / unzip / reboot / notify / smtp / syslog 功能
 #[derive(Deserialize)]
 struct Request {
-    /// 功能标识: sspi | netmap | unzip | reboot
+    /// 功能标识: sspi | netmap | unzip | reboot | notify | smtp | syslog
     kit: String,
     /// sspi: 下载源 URL
     url: Option<String>,
@@ -27,7 +28,7 @@ struct Request {
     password: Option<String>,
     /// sspi: 可选代理（http/https）
     proxy: Option<String>,
-    /// sspi: 下载超时（秒），缺省 300
+    /// sspi/notify: 超时（秒）
     timeout_secs: Option<u64>,
     /// netmap: "map"（连接）| "unmap"（断开）
     action: Option<String>,
@@ -37,6 +38,30 @@ struct Request {
     src: Option<String>,
     /// unzip: 解压目标目录
     dest: Option<String>,
+    /// notify/smtp/syslog: 通知文本（notify 为 POST JSON 的 text 字段）；缺省用注入的崩溃上下文组装
+    text: Option<String>,
+    /// crash 阶段宿主自动注入: 服务名
+    service_name: Option<String>,
+    /// crash 阶段宿主自动注入: 子进程退出码
+    exit_code: Option<i32>,
+    /// crash 阶段宿主自动注入: 连续故障次数
+    failures: Option<i64>,
+    /// smtp: 服务器地址（host:port，缺省端口 25）
+    host: Option<String>,
+    /// smtp: 发件人（From 头）
+    from: Option<String>,
+    /// smtp: 收件人列表（逗号分隔）
+    to_addr: Option<String>,
+    /// smtp: 邮件主题
+    subject: Option<String>,
+    /// syslog: 服务器地址（host:port，缺省 514）
+    syslog_host: Option<String>,
+    /// syslog: facility 号（0-23，默认 3 daemon）
+    facility: Option<u8>,
+    /// syslog: severity 号（0-7，默认 5 notice）
+    severity: Option<u8>,
+    /// syslog: 程序名 TAG
+    tag: Option<String>,
 }
 
 /// 插件响应; 其余输出一律走 stderr（避免污染协议）
@@ -71,6 +96,9 @@ fn main() {
         "netmap" => dispatch_netmap(&req),
         "unzip" => dispatch_unzip(&req),
         "reboot" => dispatch_reboot(),
+        "notify" => dispatch_notify(&req),
+        "smtp" => dispatch_smtp(&req),
+        "syslog" => dispatch_syslog(&req),
         other => fail(&format!("unknown kit: {other}")),
     }
 }
@@ -131,6 +159,64 @@ fn dispatch_unzip(req: &Request) {
 fn dispatch_reboot() {
     match reboot_system() {
         Ok(()) => ok(), // 成功即重启，此分支不可达（保底输出）
+        Err(e) => fail(&e),
+    }
+}
+
+/// Webhook 通知: 向 url POST {"text": text}（服务事件推送，2xx 视为成功）
+fn dispatch_notify(req: &Request) {
+    let Some(url) = req.url.as_deref() else { fail("notify: missing 'url'") };
+    match notify_webhook(url, &alert_text(req), req.timeout_secs.unwrap_or(30)) {
+        Ok(()) => ok(),
+        Err(e) => fail(&e),
+    }
+}
+
+/// 告警文本: 显式 text 优先；缺省用宿主 crash 阶段注入的上下文组装（[服务名] crashed, exit code X, failure #N）
+fn alert_text(req: &Request) -> String {
+    if let Some(t) = req.text.as_deref()
+        && !t.trim().is_empty()
+    {
+        return t.to_string();
+    }
+    let name = req.service_name.as_deref().unwrap_or("service");
+    let code = req.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "?".into());
+    let failures = req.failures.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+    format!("[{name}] crashed (exit code {code}, failure #{failures})")
+}
+
+/// SMTP 邮件告警: 发一封带认证（可选）的邮件（AUTH PLAIN，仅单封，用于服务事件通知）
+fn dispatch_smtp(req: &Request) {
+    let Some(host) = req.host.as_deref() else { fail("smtp: missing 'host'") };
+    let Some(from) = req.from.as_deref() else { fail("smtp: missing 'from'") };
+    let Some(to_addr) = req.to_addr.as_deref() else { fail("smtp: missing 'to'") };
+    match send_email_smtp(
+        host,
+        from,
+        to_addr,
+        req.subject.as_deref().unwrap_or("Osmium service notification"),
+        &alert_text(req),
+        req.username.as_deref(),
+        req.password.as_deref(),
+        req.timeout_secs.unwrap_or(30),
+    ) {
+        Ok(()) => ok(),
+        Err(e) => fail(&e),
+    }
+}
+
+/// Syslog 告警: UDP 发送 RFC 5424 消息（facility/severity 可配）
+fn dispatch_syslog(req: &Request) {
+    let Some(host) = req.syslog_host.as_deref() else { fail("syslog: missing 'host'") };
+    match send_syslog_udp(
+        host,
+        &alert_text(req),
+        req.facility.unwrap_or(3),   // 默认 daemon
+        req.severity.unwrap_or(5),   // 默认 notice
+        req.tag.as_deref().unwrap_or("Osmium"),
+        req.timeout_secs.unwrap_or(5),
+    ) {
+        Ok(()) => ok(),
         Err(e) => fail(&e),
     }
 }

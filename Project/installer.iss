@@ -2,7 +2,7 @@
 ; 服务刷新程序注册与卸载 / PATH 注册 / 可选扩展组件
 
 #define MyAppName "Osmium"
-#define MyAppVersion "26.9.0"
+#define MyAppVersion "26.10.0"
 #define MyAppPublisher "Copyright (C) 2026 NXRKYMANE SOFTWARE"
 #define MyAppURL "https://github.com/NXRKYMANE/Osmium"
 #define MyAppExeName "os.exe"
@@ -91,8 +91,9 @@ Name: "{app}\exts"
 Source: "..\Publish\osmium64.exe"; DestDir: "{app}"; DestName: "os.exe"; Flags: ignoreversion; Components: core; AfterInstall: LogFile('{app}\os.exe')
 Source: "..\Misc\Setup.ico"; DestDir: "{app}\icons"; DestName: "osiml.ico"; Flags: ignoreversion; Components: core; AfterInstall: LogFile('{app}\icons\osiml.ico')
 Source: "..\Misc\Extension.ico"; DestDir: "{app}\icons"; DestName: "osx.ico"; Flags: ignoreversion; Components: core; AfterInstall: LogFile('{app}\icons\osx.ico')
-; 官方扩展组件（默认不勾选）: 安装到 exts 目录，宿主 os.exe 运行时按需调用
-Source: "..\Publish\exts\osmium64-official-kits.osx"; DestDir: "{app}\exts"; Flags: ignoreversion; Components: osx; AfterInstall: LogFile('{app}\exts\osmium64-official-kits.osx')
+; 官方扩展组件（默认不勾选）: 安装到 exts 目录并去掉版本后缀（安装后固定 osmium64-official-kits.osx，
+; 宿主只认 .osx + kit 名不认文件名；升级时同源覆盖，旧版本残留由 [UninstallDelete] 清理）
+Source: "..\Publish\exts\osmium64-official-kits-v{#MyAppVersion}.osx"; DestDir: "{app}\exts"; DestName: "osmium64-official-kits.osx"; Flags: ignoreversion; Components: osx; AfterInstall: LogFile('{app}\exts\osmium64-official-kits.osx')
 
 ; 卸载: 清空安装目录所有残留（旧版遗留图标/别名等一并删除），保留目录本身
 [UninstallDelete]

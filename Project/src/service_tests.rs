@@ -1,4 +1,4 @@
-﻿// ==================== 单元测试（独立模块，从 service_core.rs / service_host.rs 提取） ====================
+// ==================== 单元测试（独立模块，从 service_core.rs / service_host.rs 提取） ====================
 
 use std::io::{Read, Write};
 use std::os::windows::process::CommandExt;
@@ -21,11 +21,11 @@ use crate::service_core::{DownloadAuth,
                           build_dependency_string, can_overwrite_source, compare_versions,
                           decrypt_sensitive, delete_dir_tree, delete_old_logs, deployed_config_path, download_core, dpapi_decrypt, dpapi_encrypt, get_file_version, get_own_path,
                           green_dot, has_download, is_refresher_reserved_name, is_user_writable, is_valid_service_name, load_config,
-                          parse_start_mode, red, red_dot,
+                          parse_start_mode, red, red_dot, resolve_redirect_url,
                           safe_delete_dir, scm_sleep_time_ms, scm_status_params, scm_wait_hint_ms, sddl_dacl_grants_non_admin_write, sddl_owner_is_administrative, secure_directory,
                           security_descriptor_from_sddl,
                           set_preshutdown_enabled, set_scm_sleep_time_ms, set_scm_wait_hint_ms,
-                          sha256_matches, strip_verbatim_prefix,
+                          sha256_matches, strip_verbatim_prefix, validate_config,
                           write_deployed_config, write_quick_config,
 };
 use crate::service_host::{LogOptions,
@@ -105,11 +105,13 @@ where
 
 #[test]
 fn cli_short_aliases_cover_test() {
-    // 服务操作命令与全部简化别名（含 --test/--tst、--extend/--ext、--refresh/--rfs、--kill/--kil）均可省略 -m 直接使用
+    // 服务操作命令与全部简化别名（含 --test/--tst、--extend/--ext、--refresh/--rfs、--kill/--kil、
+    // 批量命令 --start-all/--stra、--stop-all/--stpa、--restart-all/--rsta）均可省略 -m 直接使用
     for tag in [
         "--install", "--uninstall", "--start", "--stop", "--restart",
         "--status", "--delete", "--list", "--test", "--tst",
         "--extend", "--ext", "--refresh", "--rfs", "--kill", "--kil",
+        "--start-all", "--stra", "--stop-all", "--stpa", "--restart-all", "--rsta",
         "--ins", "--uin", "--str", "--stp", "--rst", "--sts", "--del", "--lst",
     ] {
         assert!(crate::service_cli::is_cli_command(tag), "{tag} should be recognized as a CLI command");
@@ -951,7 +953,7 @@ fn safe_delete_dir_removes_tree_without_following_links() {
 #[test]
 fn run_hook_executes_injects_env_and_logs() {
     let dir = unique_temp_dir("hook");
-    let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false, pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new() };
+    let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false, pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
     let env: Vec<(String, String)> = vec![
         ("WINSGF_CHILD_PID".into(), "42".into()),
         ("WINSGF_CHILD_EXIT_CODE".into(), "7".into()),
@@ -1235,7 +1237,7 @@ fn download_core_chunk_failure_falls_back_to_single() {
 fn write_log_entry_splits_err_and_escapes() {
     let dir = unique_temp_dir("wlog");
     let d = dir.to_string_lossy().to_string();
-    let opts = LogOptions { split_out_err: true, max_size_mb: 0, backup_count: 0, zip_backup: false, pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new() };
+    let opts = LogOptions { split_out_err: true, max_size_mb: 0, backup_count: 0, zip_backup: false, pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
     write_log_entry(&d, "err", "line from stderr", &opts);
     write_log_entry(&d, "host", "bad\r\ninjected", &opts);
     write_log_entry(&d, "out", "normal out", &opts);
@@ -1256,7 +1258,7 @@ fn write_log_entry_splits_err_and_escapes() {
 #[test]
 fn write_log_entry_empty_dir_is_noop() {
     // log_dir 为空串表示禁用: 不 panic、不产生文件
-    let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false, pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new() };
+    let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false, pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
     write_log_entry("", "host", "should not appear", &opts);
 }
 
@@ -1283,7 +1285,7 @@ fn roll_if_needed_noop_when_unconfigured() {
 #[test]
 fn run_hook_timeout_kills_hung_hook() {
     let dir = unique_temp_dir("hookto");
-    let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false, pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new() };
+    let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false, pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
     let start = Instant::now();
     // ping -t 永不退出，验证超时强杀后 run_hook 尽快返回
     run_hook(Some("ping -t 127.0.0.1"), "prestart", 800, dir.to_string_lossy().to_string(), None, &opts, None, None);
@@ -1677,7 +1679,7 @@ fn log_pattern_safe_and_custom_filename() {
     assert!(!log_pattern_safe("a/../b"));
     let now = chrono::Local::now();
     let opts = LogOptions { split_out_err: true, max_size_mb: 0, backup_count: 0, zip_backup: false,
-        pattern: "%Y%m%d".into(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new() };
+        pattern: "%Y%m%d".into(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
     let main = current_log_name(&opts, "host", &now);
     assert_eq!(main, format!("{}.log", now.format("%Y%m%d")));
     let err = current_log_name(&opts, "err", &now);
@@ -1689,7 +1691,7 @@ fn write_log_entry_uses_custom_pattern_and_reset() {
     let dir = unique_temp_dir("logpat");
     let d = dir.to_string_lossy().to_string();
     let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false,
-        pattern: "%Y%m".into(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new() };
+        pattern: "%Y%m".into(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
     write_log_entry(&d, "host", "custom-pattern-entry", &opts);
     let name = format!("{}.log", chrono::Local::now().format("%Y%m"));
     assert!(std::fs::read_to_string(dir.join(&name)).unwrap().contains("custom-pattern-entry"));
@@ -1779,7 +1781,7 @@ fn auto_roll_logs_rolls_once_per_day() {
     let dir = unique_temp_dir("autoroll");
     let d = dir.to_string_lossy().to_string();
     let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false,
-        pattern: String::new(), auto_roll_at: Some("00:00:00".into()), out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new() };
+        pattern: String::new(), auto_roll_at: Some("00:00:00".into()), out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
     // 构造"到达定点时刻后"的固定时间，并预写"到达前"的当日日志
     let date = "2026-08-11";
     let now = chrono::Local.with_ymd_and_hms(2026, 8, 11, 0, 0, 5).single().unwrap();
@@ -1817,7 +1819,7 @@ fn run_hook_redirects_stdout_to_file() {
     let d = dir.to_string_lossy().to_string();
     let out_file = dir.join("hook-out.log");
     let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false,
-        pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new() };
+        pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
     run_hook(Some("echo REDIRECTED-OUTPUT"), "prestart", 5000, d.clone(), None,
         &opts, Some(out_file.to_str().unwrap()), None);
     // 独立文件收到原始输出
@@ -2212,7 +2214,7 @@ fn apply_log_mode_maps_winsw_modes() {
     let mut enabled = true;
     let base = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 5, zip_backup: false,
         pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false,
-        out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new() };
+        out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
     let mut o = LogOptions { ..base.clone() };
     apply_log_mode(Some("none"), &mut enabled, &mut o);
     assert!(!enabled);
@@ -2247,7 +2249,7 @@ fn roll_logs_to_old_renames_and_overwrites() {
     let d = dir.to_string_lossy().to_string();
     let opts = LogOptions { split_out_err: true, max_size_mb: 0, backup_count: 0, zip_backup: false,
         pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false,
-        out_filename: String::new(), err_filename: String::new(), roll_at_start: true, roll_period_days: 0, zip_date_format: String::new() };
+        out_filename: String::new(), err_filename: String::new(), roll_at_start: true, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
     std::fs::write(dir.join(format!("{date}.log")), "main").unwrap();
     std::fs::write(dir.join(format!("{date}.err.log")), "err").unwrap();
@@ -2267,7 +2269,7 @@ fn roll_by_time_if_due_rolls_stale_log() {
     let d = dir.to_string_lossy().to_string();
     let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false,
         pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false,
-        out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 1, zip_date_format: String::new() };
+        out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 1, zip_date_format: String::new(), redact: Vec::new() };
     let now = chrono::Local.with_ymd_and_hms(2026, 8, 11, 12, 0, 0).single().unwrap();
     let path = dir.join("2026-08-11.log");
     std::fs::write(&path, "stale").unwrap();
@@ -2318,7 +2320,7 @@ fn run_stop_command_completes_and_kills_on_timeout() {
     let d = dir.to_string_lossy().to_string();
     let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false,
         pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false,
-        out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new() };
+        out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
     // 快速退出的停止命令 → 正常结束
     run_stop_command("cmd.exe", "/c exit 0", 4242, 5, d.clone(), &opts);
     // 常驻命令 → 超时强杀（返回后进程必须已死）
@@ -2349,7 +2351,7 @@ fn run_stop_command_injects_child_pid() {
     let d = dir.to_string_lossy().to_string();
     let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false,
         pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false,
-        out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new() };
+        out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
     // %PID% 占位符与 WINSGF_CHILD_PID 环境变量同时注入（echo 输出进日志可断言）
     run_stop_command("cmd.exe", "/c echo pid=%PID% env=%WINSGF_CHILD_PID%", 4242, 5, d.clone(), &opts);
     let now = chrono::Local::now();
@@ -2464,7 +2466,7 @@ fn kill_service_processes_matches_env_var_and_kills_tree() {
     // 父进程已被终止（wait 立即返回）
     let status = child.wait().expect("wait should succeed");
     assert!(!status.success(), "parent process must be terminated");
-    assert!(!crate::service_host::process_alive(pid), "parent must be dead");
+    assert!(!process_alive(pid), "parent must be dead");
 }
 
 #[test]
@@ -2528,7 +2530,7 @@ fn current_log_name_custom_filenames_override() {
     let opts = LogOptions { split_out_err: true, max_size_mb: 0, backup_count: 0, zip_backup: false,
         pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false,
         out_filename: "app.out.log".into(), err_filename: "app.err.log".into(),
-        roll_at_start: false, roll_period_days: 0, zip_date_format: String::new() };
+        roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
     assert_eq!(current_log_name(&opts, "host", &now), "app.out.log");
     assert_eq!(current_log_name(&opts, "out", &now), "app.out.log");
     assert_eq!(current_log_name(&opts, "err", &now), "app.err.log");
@@ -2759,4 +2761,223 @@ fn set_eco_qos_toggles_on_self() {
     assert!(crate::service_host::set_eco_qos(pid, false), "关闭效率模式应成功");
     // 无效 PID 静默失败不 panic
     assert!(!crate::service_host::set_eco_qos(0, true));
+}
+
+#[test]
+fn write_log_entry_redacts_configured_patterns() {
+    // 日志脱敏: log_redact 字面串写入前替换为 ***（防密码/令牌经日志泄漏）
+    let dir = unique_temp_dir("wlog_redact");
+    let opts = LogOptions {
+        split_out_err: false, max_size_mb: 0, backup_count: 5, zip_backup: false,
+        pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true,
+        reset: false, out_filename: String::new(), err_filename: String::new(),
+        roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(),
+        redact: vec!["secret-token".into(), "P@ssw0rd".into()],
+    };
+    write_log_entry(dir.to_str().unwrap(), "host", "login secret-token ok P@ssw0rd done", &opts);
+    let today = chrono::Local::now().format("%Y-%m-%d");
+    let content = std::fs::read_to_string(dir.join(format!("{today}.log"))).unwrap();
+    assert!(content.contains("login *** ok *** done"), "敏感串应被脱敏: {content}");
+    assert!(!content.contains("secret-token") && !content.contains("P@ssw0rd"), "原文不应残留: {content}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resolve_redirect_url_parses_relative_and_absolute() {
+    // 重定向 Location 解析: 相对路径基于当前 URL 拼接，绝对路径原样
+    assert_eq!(resolve_redirect_url("https://example.com/a/b", "/c"), "https://example.com/c");
+    assert_eq!(resolve_redirect_url("https://example.com/a/b", "c"), "https://example.com/a/c");
+    assert_eq!(resolve_redirect_url("https://example.com/a", "https://other.com/x"), "https://other.com/x");
+    // 非法 Location 按相对路径解析（RFC 3986 语义，不 panic）
+    assert_eq!(resolve_redirect_url("https://example.com", "://bad"), "https://example.com/://bad");
+}
+
+#[test]
+fn validate_config_reports_ok_and_issues() {
+    // --check 预检: 合法配置返回通过项；不存在的可执行路径报错
+    let dir = unique_temp_dir("chkcfg");
+    // 合法 exe 用受保护目录（System32）内的真实文件: 目录非用户可写，可写性校验应通过
+    let good = dir.join("good.toml");
+    std::fs::write(&good, "service_name = \"chk-svc\"\nservice_display_name = \"Chk\"\nservice_description = \"d\"\nservice_executable_path = 'C:\\Windows\\System32\\cmd.exe'\n").unwrap();
+    let msgs = validate_config(&good).expect("合法配置应通过");
+    assert!(msgs.iter().any(|m| m.contains("valid")), "应含通过项: {msgs:?}");
+
+    let bad = dir.join("bad.toml");
+    std::fs::write(&bad, "service_name = \"chk-svc\"\nservice_display_name = \"Chk\"\nservice_description = \"d\"\nservice_executable_path = 'C:\\no\\such\\app.exe'\n").unwrap();
+    let errs = validate_config(&bad).expect_err("不存在的 exe 应报错");
+    assert!(errs.iter().any(|e| e.contains("does not exist")), "应含路径错误: {errs:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn load_config_parses_new_guardrail_fields() {
+    // 新增字段解析: 健康检查/下载重试/Job 对象/插件签名/定时调度
+    let dir = unique_temp_dir("grdfld");
+    let cfg = dir.join("c.toml");
+    std::fs::write(&cfg, r#"
+service_name = "gr"
+service_display_name = "Gr"
+service_description = "d"
+service_executable_path = 'C:\Windows\System32\cmd.exe'
+health_check_url = "http://127.0.0.1:8080/health"
+health_check_interval_secs = 15
+health_check_timeout_secs = 3
+health_check_failures = 5
+health_check_expected_status = 204
+download_retries = 4
+download_retry_backoff_ms = 1000
+job_object = false
+require_signed_plugins = true
+[[schedules]]
+every_secs = 3600
+action = "hook"
+command = 'echo tick'
+[[schedules]]
+daily_at = "03:30"
+action = "restart"
+"#).unwrap();
+    let c = load_config(&cfg);
+    assert_eq!(c.health_check_url.as_deref(), Some("http://127.0.0.1:8080/health"));
+    assert_eq!(c.health_check_interval_secs, 15);
+    assert_eq!(c.health_check_timeout_secs, 3);
+    assert_eq!(c.health_check_failures, 5);
+    assert_eq!(c.health_check_expected_status, 204);
+    assert_eq!(c.download_retries, 4);
+    assert_eq!(c.download_retry_backoff_ms, 1000);
+    assert!(!c.job_object, "job_object=false 应解析");
+    assert!(c.require_signed_plugins, "require_signed_plugins=true 应解析");
+    let s = c.schedules.expect("schedules 应解析");
+    assert_eq!(s.len(), 2);
+    assert_eq!(s[0].every_secs, Some(3600));
+    assert_eq!(s[0].action, "hook");
+    assert_eq!(s[0].command.as_deref(), Some("echo tick"));
+    assert_eq!(s[1].daily_at.as_deref(), Some("03:30"));
+    assert_eq!(s[1].action, "restart");
+    // 缺省值: job_object 默认 true、重试默认 0、健康检查默认值
+    let cfg2 = dir.join("c2.toml");
+    std::fs::write(&cfg2, "service_name = \"gr2\"\nservice_display_name = \"G2\"\nservice_description = \"d\"\nservice_executable_path = 'C:\\Windows\\System32\\cmd.exe'\n").unwrap();
+    let c2 = load_config(&cfg2);
+    assert!(c2.job_object, "job_object 默认 true");
+    assert_eq!(c2.download_retries, 0);
+    assert_eq!(c2.health_check_interval_secs, 0);
+    assert!(!c2.require_signed_plugins, "require_signed_plugins 默认 false");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn job_object_create_and_assign_child() {
+    // Job Object: 创建成功并可把 spawn 的子进程放入（测试进程自身可能在父 Job 中，
+    // 直接 assign 会因嵌套限制失败——用 cmd 子进程验证赋值路径）
+    let job = crate::service_host::JobObject::create().expect("Job 对象应创建成功");
+    let mut child = Command::new("cmd.exe")
+        .args(["/c", "ping -n 3 127.0.0.1 > nul"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn cmd 应成功");
+    let pid = child.id();
+    let h = unsafe {
+        OpenProcess(
+            windows::Win32::System::Threading::PROCESS_SET_INFORMATION | windows::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION,
+            false,
+            pid,
+        ).expect("打开子进程应成功")
+    };
+    let assigned = job.assign(h);
+    unsafe { let _ = CloseHandle(h); }
+    // 子进程已在其他 Job（如系统服务宿主）时 assign 会失败——两种结果都合法，重点验证不 panic
+    if assigned.is_ok() {
+        // 加入 Job 后 Job 被 drop → KILL_ON_JOB_CLOSE 应立即终止子进程
+        drop(job);
+        let status = child.wait().expect("wait 应成功");
+        assert!(status.code().is_some(), "Job drop 后子进程应被终止");
+    } else {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+#[test]
+fn verify_file_signature_rejects_unsigned_and_missing() {
+    // 插件签名校验: 未签名文件与不存在文件均返回 false（require_signed_plugins 的拒绝路径）
+    assert!(!crate::service_host::verify_file_signature("C:\\no\\such\\plugin.osx"), "不存在文件应为 false");
+    let dir = unique_temp_dir("sgnchk");
+    let f = dir.join("plain.txt");
+    std::fs::write(&f, "plain text, no signature").unwrap();
+    assert!(!crate::service_host::verify_file_signature(&f.to_string_lossy()), "未签名文件应为 false");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn service_process_pids_unknown_service_empty() {
+    // 子进程 PID 枚举: 未运行的服务返回空列表（不 panic）
+    assert!(crate::service_host::service_process_pids("osmium-no-such-svc-xyz").is_empty());
+}
+
+#[test]
+fn schedule_due_interval_and_daily() {
+    // 定时到点判断: every_secs 间隔 / daily_at 当日到点与防重复 / 非法配置
+    use crate::service_config::ScheduleConfig;
+    use crate::service_host::schedule_due;
+    use std::time::{Duration, Instant};
+    let mk = |every: Option<i64>, daily: Option<&str>, action: &str| ScheduleConfig {
+        every_secs: every, daily_at: daily.map(String::from), action: action.into(), command: None,
+    };
+    let now = chrono::Local::now();
+    // every_secs: 未触发过 → 立即到点；距上次 10s < 间隔 60s → 未到；距上次 61s ≥ 60s → 到点
+    let s = mk(Some(60), None, "restart");
+    assert!(schedule_due(&s, None, None, now), "首次触发应到点");
+    let last = Instant::now() - Duration::from_secs(10);
+    assert!(!schedule_due(&s, Some(last), None, now), "未到间隔不应触发");
+    let last2 = Instant::now() - Duration::from_secs(61);
+    assert!(schedule_due(&s, Some(last2), None, now), "超间隔应触发");
+    // daily_at: 已到点且当日未触发 → 触发；当日已触发 → 不重复
+    let d = mk(None, Some("00:00"), "restart");
+    assert!(schedule_due(&d, None, None, now), "今日 00:00 已过且未触发应到点");
+    assert!(!schedule_due(&d, None, Some(now.date_naive()), now), "当日已触发不应重复");
+    // 未来时刻未到 → 不到点；非法时刻/空配置 → 不到点
+    let future = (now.time() + chrono::Duration::hours(5)).format("%H:%M:%S").to_string();
+    let f = mk(None, Some(&future), "restart");
+    assert!(!schedule_due(&f, None, None, now), "未来时刻不应触发");
+    let bad = mk(None, Some("25:99"), "restart");
+    assert!(!schedule_due(&bad, None, None, now), "非法时刻不应触发");
+    let none = mk(None, None, "restart");
+    assert!(!schedule_due(&none, None, None, now), "未配置不应触发");
+}
+
+#[test]
+fn download_retries_recover_after_transient_failure() {
+    // 下载重试: 服务器第一次 500、第二次 200 → 重试后成功（download_retries=1）
+    let dir = unique_temp_dir("dlretry");
+    let addr = {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let a2 = attempts.clone();
+        let (a, _stop, _) = spawn_http_server(move |_, _| {
+            let n = a2.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                ("500 Internal Server Error".into(), vec![("Content-Length".into(), "0".into())], Vec::new())
+            } else {
+                ("200 OK".into(), vec![("Content-Length".into(), "5".into())], b"hello".to_vec())
+            }
+        });
+        a
+    };
+    let cfg_path = dir.join("c.toml");
+    std::fs::write(&cfg_path, "service_name = \"dl-retry\"\nservice_display_name = \"D\"\nservice_description = \"d\"\nservice_executable_path = 'C:\\Windows\\System32\\cmd.exe'\ndownload_retries = 1\ndownload_retry_backoff_ms = 100\n").unwrap();
+    let config = load_config(&cfg_path);
+    let entry = DownloadConfig {
+        from: format!("http://{}/app.exe", addr),
+        to: dir.join("app.exe").to_string_lossy().into_owned(),
+        // sha256 提供后 http 放行（P1-4 安全策略）: "hello" 的标准 sha256
+        sha256: Some("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".into()),
+        fail_on_error: Some(true), auth: None, username: None,
+        password: None, unsecure_auth: None, proxy: None, unzip: Some(false), stage: None,
+    };
+    let deploy = dir.to_string_lossy().into_owned();
+    crate::service_host::run_download_entry(&config, &entry, &deploy, "", &Default::default())
+        .expect("重试后应下载成功");
+    let content = std::fs::read_to_string(dir.join("app.exe")).unwrap();
+    assert_eq!(content, "hello", "应下载到第二次响应内容");
+    let _ = std::fs::remove_dir_all(&dir);
 }

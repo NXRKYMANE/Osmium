@@ -25,14 +25,14 @@ Osmium 使用现代 Rust 2024 语言开发，编译为一个独立的 `osmium64.
 | 项         | 说明                                                                          |
 | --- | --- |
 | 语言       | Rust 2024                                                                     |
-| 产物       | `Publish\osmium64.exe` `Publish\osmium64-official-kits.osx`                                   |
+| 产物       | `Publish\osmium64.exe` `Publish\exts\osmium64-official-kits-v<版本>.osx`（插件文件名带版本号，便于区分新旧；安装到系统后去掉版本后缀固定为 `osmium64-official-kits.osx`——宿主只认 `.osx` + kit 名，不认文件名，升级覆盖不影响调用） |
 | 大小       | `osmium64.exe` 约 3.6 MB，`osmium64-official-kits.osx` 约 1.9 MB（体积优先编译，opt-level=z） |
 | UPX 压缩   | `Publish\osmium64-upx.exe`（约 1.1 MB）                                             |
 | 分发安装包 | `osmium-win-x64-setup-v<版本>.exe`（使用非 UPX 版本）                         |
 | 工具链     | Rust stable + MSVC                                                            |
 
 > 不想用平台框架？想集成到自己的项目？我推荐优先使用 UPX 压缩版（`osmium64-upx.exe`）——体积非常小、可扩展，非常轻量，而且冷启动与原版差异不大。
-> 没有你想要的功能？项目支持万物皆插件，用任意语言写出属于你自己的插件放入 exe 目录（平台安装放 `exts\`）即可接入——完整插件开发与使用指南见 [插件指南](EXTENSION_CN.md)，os.exe 运行亮绿灯即为可用插件。
+> 没有你想要的功能？项目支持万物皆插件，用任意语言写出属于你自己的插件放入 exe 目录（平台安装放 `exts\`）即可接入——完整插件开发与使用指南见 [插件系统](#插件系统)，os.exe 运行亮绿灯即为可用插件。
 
 > 说明：平台部署需要使用安装包安装框架，所有的生命周期、日志记录和服务管理完全由框架核心程序 os.exe 完成，一旦缺失服务将无法启动，当然安装回来会恢复作业。
 > 依赖框架可以使您自己的项目和配置更加简单，如果不放心或者重要项目建议使用集成方案，集成方案可以随意替换插件，所有的操作和日志记录全部在项目内落实。
@@ -69,17 +69,20 @@ os --list
 | `--stop <名称>`                           | 停止服务                                                                                                     |
 | `--restart <名称>`                        | 重启服务                                                                                                     |
 | `--refresh <名称>`                        | 从已部署配置刷新 SCM 服务注册属性（显示名/描述/启动类型/账户/故障恢复等），无需重装          |
+| `--reload <名称>`                         | 触发热刷新：宿主重载部署配置并优雅重启子进程（不依赖 auto_refresh 配置；简写 `--rld`）          |
+| `--export <名称> <目标目录>`              | 导出平台部署服务配置（`svcs\<名称>\<名称>.osiml`）到指定目录，便于迁移/备份（简写 `--exp`）      |
+| `--import <配置.osiml>`                   | 导入部署配置并重新注册服务（等价 `--install`，用于从导出配置恢复；简写 `--imp`）                |
 | `--kill <名称>`                           | 管理员/开发工具：强制终止服务的目标进程树（按 `WINSGF_SERVICE_ID` 定位；简写 `--kil`） |
-| `--status <名称>`                         | 查询服务状态                                                                                                 |
+| `--status <名称>`                         | 查询服务状态 + 注册属性详情（启动类型/运行账户/故障恢复动作序列）+ 目标子进程 PID 列表              |
 | `--delete <名称>`                         | 强制删除（停止 + 卸载）                                                                                      |
 | `--list`                                  | 列出平台部署的所有服务（不含 inplace 集成服务）                                                              |
-| `--extend`                                | 列出已安装插件并检查可用性（可用绿点 / 不可用红点；可简写 `--ext`；插件开发见 [插件指南](EXTENSION_CN.md)）  |
+| `--extend`                                | 列出已安装插件并检查可用性（可用绿点 / 不可用红点；可简写 `--ext`；插件开发见 [插件系统](#插件系统)）  |
 | `--test <配置>`                           | 前台控制台直接运行目标进程（不安装服务，仅调试用；部署目录=配置目录，`%BASE%` 指向配置目录；可简写 `--tst`） |
 | `help` / `-h` / `--help`                  | 显示帮助信息                                                                                                 |
 
 > 管理命令均等价于旧写法 `-m --xxx`（前缀可省略）；框架安装后可直接用 `os` 快捷别名代替 `os.exe`。
 
-> 所有命令均支持简化别名：`--ins` / `--uin` / `--str` / `--stp` / `--rst` / `--rfs` / `--kil` / `--sts` / `--del` / `--lst` / `--tst` / `--ext`（分别对应安装 / 卸载 / 启动 / 停止 / 重启 / 刷新 / 强杀 / 状态 / 删除 / 列表 / 测试 / 扩展）。
+> 所有命令均支持简化别名：`--ins` / `--uin` / `--str` / `--stp` / `--rst` / `--rfs` / `--kil` / `--sts` / `--del` / `--lst` / `--tst` / `--ext`（分别对应安装 / 卸载 / 启动 / 停止 / 重启 / 刷新 / 强杀 / 状态 / 删除 / 列表 / 测试 / 扩展）；批量命令 `--start-all` / `--stop-all` / `--restart-all` 可简写 `--stra` / `--stpa` / `--rsta`。
 
 > 服务名 `Osmium Service Refresher` 为保留名；服务名需合法：拒绝空名、`.` / `..`（防路径穿越）、路径分隔符与控制字符，长度 ≤ 256。
 
@@ -111,6 +114,9 @@ service_executable_path = 'C:\app\myapp.exe'
 | `env`                     | object | 无            | 注入目标进程的环境变量（值支持 `%VAR%` 展开，`%BASE%` 指部署目录）。宿主还会自动注入 `BASE`（部署目录）与 `WINSGF_SERVICE_ID`（服务名，供 RunawayProcessKiller 防误杀校验）——用户 `env` 显式配置 `BASE` 时以用户为准 |
 | `working_directory`       | string | exe 所在目录  | 目标进程工作目录；相对路径基于服务部署目录                                                                                                                                                                           |
 | `process_priority`        | string | `normal`      | 目标进程优先级：`idle` / `belownormal` / `normal` / `abovenormal` / `high` / `realtime`                                                                                                                              |
+| `process_affinity`        | string | 无            | 目标进程 CPU 亲和性：核心编号列表如 `"0,1,2"`（越界核心忽略、掩码空不设置，按系统核心数钳制）                                                                                                                     |
+| `io_priority`             | string | `normal`      | 目标进程 IO 优先级：`idle` / `low` / `normal` / `high`（ThreadIoPriority，Windows 8+）                                                                                                                               |
+| `job_object`              | bool   | `true`        | 把子进程放入 Job Object（`KILL_ON_JOB_CLOSE`）：宿主进程异常退出（含崩溃）时系统级终止整棵子进程树，防孤儿进程；正常停止仍走优雅关闭流程                                                                            |
 
 **配置全局展开**：整个配置都支持 `%VAR%` 环境变量与特殊变量 `%BASE%`（服务部署/配置目录）展开——`service_executable_path`、`service_executable_args`、`start_arguments`、`working_directory`、`download_url`、`download_to`、`stop_executable`、`stop_arguments`、`log_dir`、`runaway_pid_file`、共享映射路径以及 `env` 值（与 WinSW 对齐）。钩子命令是 shell 语义，不展开。`%PID%` 为保留占位符：配置全局展开时原样保留，仅在运行停止命令时替换为目标进程 PID（对应 WinSW #217）。
 
@@ -133,11 +139,12 @@ service_executable_path = 'C:\app\myapp.exe'
 | `hide_window`               | bool   | `true`    | 以 `CreateNoWindow` 启动目标进程；`false` 时允许其创建控制台窗口（对应 WinSW `hidewindow`）                                                                                                                                                                           |
 | `stop_parent_process_first` | bool   | `false`   | 强杀时先终止父进程再杀子树（对应 WinSW `stopparentprocessfirst`）                                                                                                                                                                                                     |
 | `allow_service_logon`       | bool   | `false`   | 使用自定义服务账户时，自动授予其"作为服务登录"权限                                                                                                                                                                                                                    |
-| `event_log`                 | bool   | `false`   | 同时写入 Windows 事件日志（信息级别，来源名 `Osmium`）                                                                                                                                                                                                                |
+| `event_log`                 | bool   | `false`   | 同时写入 Windows 事件日志（来源名 `Osmium`；结构化事件 ID：1000 启动 / 1001 停止 / 1002 崩溃 / 1003 下载失败 / 1004 配置错误）                                                                            |
 | `security_descriptor`       | string | 无        | 服务安全描述符（SDDL），安装时应用到服务 DACL，控制谁能管理该服务（对应 WinSW securityDescriptor）                                                                                                                                                                    |
 | `preshutdown`               | bool   | `false`   | 上报 `SERVICE_ACCEPT_PRESHUTDOWN`，系统关停时获得更长的优雅时间                                                                                                                                                                                                       |
 | `extensions`                | array  | 无        | 生命周期扩展命令列表：`[{ phase = "start", command = "...", stdout_path?, stderr_path? }]`——`start` 启动前、`start_after` 启动后、`stop_before` 停止前、`stop` 停止后执行，失败不阻断；`stdout_path` / `stderr_path` 把钩子输出重定向到独立文件                       |
-| `plugins`                   | array  | 无        | 生命周期插件调用（exe 目录下的 `.osx` 插件）：`[{ kit, phase, payload?, fail_on_error? }]`——详见 [插件指南](EXTENSION_CN.md)                                                                                                                                                      |
+| `plugins`                   | array  | 无        | 生命周期插件调用（exe 目录下的 `.osx` 插件）：`[{ kit, phase, payload?, fail_on_error? }]`——详见 [插件系统](#插件系统)                                                                                                                                                      |
+| `require_signed_plugins`    | bool   | `false`   | 仅执行带有效 Authenticode 签名的插件（WinVerifyTrust 校验）；未签名/签名无效直接拒绝（默认 false 仅校验 ACL 信任）                                                                                                                                                                   |
 
 ### 高级功能 — 资源监控与网络映射
 
@@ -150,6 +157,17 @@ service_executable_path = 'C:\app\myapp.exe'
 | `runaway_stop_timeout_ms`     | int    | `5000`  | 启动清理时残留进程的优雅停止超时（毫秒），超时后强杀                                                                                                                                               |
 | `runaway_stop_parent_first`   | bool   | `false` | 启动清理时先终止父进程再杀子树                                                                                                                                                                     |
 | `shared_directory_mappers`    | array  | 无      | SharedDirectoryMapper：服务启动时映射网络共享、停止时断开：`[{ local_path = "Z:", remote_path = "\\\\server\\share", username?, password? }]`                                                      |
+| `health_check_url`            | string | 无      | HTTP 健康检查：子进程运行期间轮询该 URL，连续失败达到阈值视为崩溃，走故障恢复流程（重启/告警）                                                                                                              |
+| `health_check_interval_secs`  | int    | `30`    | 健康检查轮询间隔（秒）                                                                                                                                                                                          |
+| `health_check_timeout_secs`   | int    | `5`     | 健康检查请求超时（秒）                                                                                                                                                                                          |
+| `health_check_failures`       | int    | `3`     | 连续失败多少次视为崩溃                                                                                                                                                                                          |
+| `health_check_expected_status`| int    | `200`   | 期望的 HTTP 状态码（其余视为失败）                                                                                                                                                                              |
+
+### 高级功能 — 定时调度
+
+| 字段          | 类型  | 默认值 | 说明                                                                                                                       |
+| --- | --- | --- | --- |
+| `schedules`   | array | 无     | 定时调度：`[{ every_secs?, daily_at?, action?, command? }]`——`every_secs` 固定间隔（秒）与 `daily_at` 每日定点（`"HH:mm:ss"`）二选一；`action`：`restart`（重启子进程，默认）/ `reload`（热刷新重载配置）/ `hook`（执行 `command`，cmd /c 语义） |
 
 ### 高级功能 — 效率模式（EcoQoS）
 
@@ -177,6 +195,8 @@ service_executable_path = 'C:\app\myapp.exe'
 | `download_unzip`         | bool   | `false`        | 下载文件为 zip 时自动解压到目标位置（防 zip-slip 穿越）                                                                                                                                                                                                                       |
 | `download_stage`         | string | `before_start` | 下载执行阶段：`before_start`（启动前确保目标可执行文件就绪）、`after_start`（目标启动后下载额外资源）、`after_stop`（停止后下载额外资源）；仅 `before_start` 参与启动可执行性检查                                                                                             |
 | `download_threads`       | int    | `16`           | 分块下载线程数上限；`0`/`1` 禁用多线程（单线程回退）                                                                                                                                                                                                                          |
+| `download_retries`       | int    | `2`            | 下载失败重试次数（指数退避后仍失败才报错）；`0` 不重试                                                                                                                                                                                                                          |
+| `download_retry_backoff_ms` | int  | `2000`         | 下载重试指数退避基数（毫秒：2s/4s/8s...），仅 `download_retries > 0` 时生效                                                                                                                                                                                                     |
 | `downloads`              | array  | 无             | 多下载条目（对应 WinSW download 列表）：`[{ from, to, sha256?, fail_on_error?, auth?, username?, password?, unsecure_auth?, proxy?, unzip?, stage? }]`——省略字段回退到配置级 `download_*` 值；配置后数组优先于单条 `download_url`，且可执行路径保持 `service_executable_path` |
 | `download_unsecure_auth` | bool   | `false`        | 显式放行 `basic` 认证走明文 `http://`（对应 WinSW unsecureAuth）；默认拒绝（凭据明文泄漏）                                                                                                                                                                                    |
 
@@ -285,7 +305,7 @@ LOG_LEVEL = "info"
 phase = "start"
 command = 'echo start >> C:\app\hook.log'
 
-# 生命周期插件调用（kit/phase/payload/fail_on_error 完整说明见 Docs\EXTENSION_CN.md）
+# 生命周期插件调用（kit/phase/payload/fail_on_error 完整说明见本文档[插件系统](#插件系统)）
 # [[plugins]]
 # kit = "backup"
 # phase = "start_after"
@@ -295,6 +315,25 @@ command = 'echo start >> C:\app\hook.log'
 # 资源监视器: 子进程内存超过 512 MB 自动终止（RunawayProcessKiller）
 runaway_memory_limit_mb = 512
 runaway_check_interval_secs = 30
+
+# HTTP 健康检查: 连续 3 次非 200 视为崩溃重启（每 30s 轮询）
+health_check_url = "http://127.0.0.1:8080/health"
+health_check_interval_secs = 30
+health_check_failures = 3
+
+# 下载失败重试（指数退避 2s/4s/8s）
+download_retries = 2
+download_retry_backoff_ms = 2000
+
+# 定时调度: 每天 03:00 重启子进程; 每小时执行一次维护钩子
+[[schedules]]
+daily_at = "03:00"
+action = "restart"
+
+[[schedules]]
+every_secs = 3600
+action = "hook"
+command = 'echo scheduled tick >> C:\app\schedule.log'
 
 # 启动时映射网络共享、停止时断开（SharedDirectoryMapper）
 # [[shared_directory_mappers]]
@@ -413,6 +452,500 @@ Java 应用经 `java.exe` 启动，与其他可执行程序一样享受崩溃自
 
 > 刷新程序在下次开机时运行；安装器会在安装完成后立即重启之前停止的服务。
 
+## 插件系统
+
+Osmium 支持万物皆插件：官方的高级功能、第三方的扩展能力，都是一个独立的可执行程序（`.osx`），放到 exe 所在目录下（平台安装用 `exts\`），由宿主按需拉起。插件的用法、协议和开发方式都在下面了。
+
+## 插件是什么
+
+- 插件就是一个普通程序，把扩展名改成 `.osx` 就行（比如 `osmium-kit.exe` → `osmium64-official-kits.osx`）
+- 插件放在宿主 exe 所在目录的任意位置——宿主递归发现所有 `.osx`（跳过 `.` 开头的隐藏目录），独立部署可以直接把插件放在 exe 旁；平台安装仍装 `%ProgramFiles%\Osmium\exts\`
+- 宿主启动时递归扫描 exe 目录下所有 `.osx`，按请求里的 `kit` 字段分发调用
+- **插件不常驻**：每次调用临时拉起，处理完一个请求就退出
+
+### 文件名叫什么无所谓（改名不影响调用）
+
+宿主调用插件**不认文件名**，只认三样东西：`kit` 能力名、`.osx` 扩展名、位于 exe 目录下可被发现。所以官方插件（`osmium64-official-kits.osx`）改成任意名字（比如 `my-tools.osx`、`随便什么.osx`），只要满足上面三点，所有功能照常：
+
+- 宿主内置配置字段照常：`download_auth = "sspi"`、`download_unzip = true`、`shared_directory_mappers`、`failure_action = "reboot"` —— 它们调的是 kit 名（`sspi`/`unzip`/`netmap`/`reboot`），跟文件名无关
+- 配置里 `[[plugins]]` 声明的 `kit` 照常命中
+- `--extend` 照常列出（只是显示的名字变成新文件名）
+
+调用链是这样的：
+
+```
+run_plugin("sspi", ...)       # 宿主只关心 kit 名
+  → discover_plugins()        # 扫描 exe 目录下 *.osx —— 不看名字，全量收集
+  → 广播 {"kit":"sspi", ...}  # 请求里只有能力名，没有文件名
+  → 插件自己认领              # 内部按 kit 字段分发，认得就干
+  → 首个 ok 即成功
+```
+
+正因为认能力不认文件，才有的这些特性：
+
+- **改名自由**：插件换名字、换版本、升级替换，宿主和配置一行不用动
+- **多插件共存**：`exts\` 下可以同时放官方插件和任意多个第三方插件，互不干扰
+- **同名能力多实现**：多个插件都响应同一个 kit 时，宿主按发现顺序取第一个成功的
+- **一个文件多能力**：官方插件一个文件同时响应 `ping`/`sspi`/`netmap`/`unzip`/`reboot` 五个 kit
+
+唯一要注意的：
+
+1. 扩展名必须是 `.osx`（改成 `.exe` 之类 `discover_plugins` 就找不到了）
+2. 必须位于宿主 exe 目录下且可被发现（任意层级，`.` 开头的隐藏目录被跳过）
+3. 插件内部的 kit 分发逻辑不能改（比如把 `sspi` 分发改成了别的名字，配置里写 `sspi` 就命中不了了——这种情况才需要同步改配置）
+4. 启用 `require_signed_plugins = true` 时插件还必须带有效的 Authenticode 签名（WinVerifyTrust 校验），未签名/签名无效的插件直接拒绝执行（`--extend` 显示红点）——适合对插件来源有严格要求的场景
+
+### 检查插件是否可用
+
+```powershell
+os --extend
+# 或简写
+os --ext
+```
+
+输出每个插件的状态：**绿点 ●** = 可用，**红点 ●** = 不可用（ACL 不可信 / 协议不响应 / 已损坏）。
+
+## 官方插件 osmium64-official-kits.osx
+
+官方插件随安装包分发（组件页"官方扩展包"默认不勾选，勾上才有），内置这些能力：
+
+| kit      | 功能                                                         | 宿主内置配置字段（更省事）  |
+| --- | --- | --- |
+| `ping`   | 可用性探测（宿主 `--extend` 自检用）                         | 不用配                      |
+| `sspi`   | Windows 集成认证下载（Negotiate/NTLM/Kerberos 401 挑战循环） | `download_auth = "sspi"`    |
+| `netmap` | 网络共享目录映射 / 断开                                      | `shared_directory_mappers`  |
+| `unzip`  | zip 解压（防 zip-slip 穿越）                                 | `download_unzip = true`     |
+| `reboot` | 系统重启（崩溃恢复动作）                                     | `failure_action = "reboot"` |
+| `notify` | Webhook 通知：POST JSON 到配置 URL（服务事件推送）           | 配置 `[[plugins]]` 调用     |
+| `smtp`   | SMTP 邮件告警（可选 AUTH PLAIN 认证，单封邮件）              | 配置 `[[plugins]]` 调用     |
+| `syslog` | Syslog 告警（UDP RFC 5424，facility/severity 可配）          | 配置 `[[plugins]]` 调用     |
+
+### 官方功能怎么用
+
+1. **宿主内置字段**（最省事）：解压、共享映射、重启、sspi 下载都有现成配置字段，宿主自动调对应插件：
+
+```toml
+# sspi 认证下载（经 osmium-kit-sspi 插件完成）
+download_url = "https://server/app.exe"
+download_auth = "sspi"
+
+# 下载 zip 后自动解压（经 unzip 插件）
+download_unzip = true
+
+# 启动时映射共享、停止时断开（经 netmap 插件）
+[[shared_directory_mappers]]
+local_path = "Z:"
+remote_path = '\\server\share'
+
+# 崩溃后重启系统（经 reboot 插件）
+failure_action = "reboot"
+```
+
+2. **`plugins` 配置驱动**（通用通道，第三方插件也走这个）：在服务配置里声明生命周期调用：
+
+```toml
+[[plugins]]
+kit = "backup"              # 插件能力标识（对应插件请求 JSON 的 kit 字段）
+phase = "start_after"       # start / start_after / stop_before / stop
+payload = { mode = "full" } # 可选参数，合并进请求 JSON 透传给插件
+fail_on_error = false       # 可选；true 时插件在 start 阶段失败会阻断启动
+```
+
+告警通道示例（crash 时通知）：
+
+```toml
+# Webhook 通知（kit=notify）: POST {"text": ...} 到 URL
+[[plugins]]
+kit = "notify"
+phase = "crash"
+payload = { url = "https://hooks.example.com/osmium", timeout_secs = 10 }
+
+# SMTP 邮件告警（kit=smtp）: 服务器 host:port，可选用户名/密码（AUTH PLAIN）
+[[plugins]]
+kit = "smtp"
+phase = "crash"
+payload = { host = "mail.example.com:25", from = "alerts@example.com", to = "ops@example.com", subject = "[Osmium] service crashed" }
+
+# Syslog 告警（kit=syslog）: UDP 发送 RFC 5424，facility/severity 可配（默认 daemon/notice）
+[[plugins]]
+kit = "syslog"
+phase = "crash"
+payload = { host = "192.168.1.10:514", facility = 3, severity = 2, tag = "MyService" }
+```
+
+> 告警插件（crash 阶段）自动注入 `service_name` / `exit_code` / `failures` 字段，插件可直接读取（用户 payload 同名字段优先）。
+
+## 插件协议
+
+所有插件共用一套协议，跟语言无关（Rust / C / Go / Python 打包都行）：
+
+| 项     | 规则                                                                |
+| --- | --- |
+| 调用   | 宿主 spawn 插件进程（不带命令行参数，`CREATE_NO_WINDOW`）           |
+| 输入   | stdin 一行 JSON，含 `kit` 字段（宿主注入）+ 业务字段                |
+| 输出   | stdout 一行 JSON：`{"ok": true}` 或 `{"ok": false, "error": "..."}` |
+| 退出码 | 0 = 成功，非 0 = 失败（和 ok 字段双重判定）                         |
+| stderr | 人类能读的错误信息（不污染协议，宿主调用时丢弃）                    |
+| 空输入 | 静默退出（双击运行场景不产生输出）                                  |
+| 限制   | stdin 上限 1MB；宿主 5 秒超时强杀（防插件挂死宿主）                 |
+
+## 第三方插件开发
+
+写一个插件其实很简单：实现协议、放进 `exts\`、配置里声明、`--extend` 看绿点。下面给出 5 种语言的完整示例，都是同一个 backup 能力，逻辑完全一致，挑你顺手的抄。
+
+### Rust 示例
+
+```rust
+use std::io::Read;
+use serde_json::Value;
+
+fn main() {
+    let mut input = String::new();
+    // 限制输入大小: 防异常调用方喂超大输入
+    let _ = std::io::stdin().take(1024 * 1024).read_to_string(&mut input);
+    if input.trim().is_empty() {
+        std::process::exit(0); // 无调用方（双击）: 静默退出
+    }
+    let req: Value = match serde_json::from_str(&input) {
+        Ok(v) => v,
+        Err(e) => fail(&format!("invalid request: {e}")),
+    };
+    // 按 kit 字段分发: 不是你的能力就明确报错
+    match req["kit"].as_str().unwrap_or("") {
+        "backup" => { /* 执行业务 */ println!(r#"{{"ok":true}}"#); }
+        other => fail(&format!("unknown kit: {other}")),
+    }
+}
+
+fn fail(msg: &str) -> ! {
+    eprintln!("osmium-kit error: {msg}");          // stderr: 给人看的
+    println!(r#"{{"ok":false,"error":"{msg}"}}"#); // stdout: 协议响应
+    std::process::exit(1);
+}
+```
+
+### C++ 示例（nlohmann/json）
+
+需要单头库 [nlohmann/json](https://github.com/nlohmann/json)，VS 或 MinGW 编译都行。
+
+```cpp
+#include <iostream>
+#include <string>
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
+
+int fail(const std::string& msg) {
+    std::cerr << "osmium-kit error: " << msg << std::endl;         // stderr: 给人看的
+    std::cout << "{\"ok\":false,\"error\":\"" << msg << "\"}" << std::endl; // stdout: 协议响应
+    return 1;
+}
+
+int main() {
+    // 读完整 stdin（宿主只喂 1MB 以内，不放心可以自己截断）
+    std::string input((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
+    if (input.empty()) {
+        return 0; // 无调用方（双击）: 静默退出
+    }
+    json req;
+    try {
+        req = json::parse(input);
+    } catch (...) {
+        return fail("invalid request");
+    }
+    std::string kit = req.value("kit", "");
+    if (kit == "backup") {
+        // 执行业务
+        std::cout << R"({"ok":true})" << std::endl;
+        return 0;
+    }
+    return fail("unknown kit: " + kit);
+}
+```
+
+### C 示例（标准库，无第三方依赖）
+
+纯 C11 标准库实现，手写极简 `kit` 字段提取（不解析完整 JSON）；生产环境建议换 cJSON / jansson。
+
+```c
+// plugin.c — MSVC: cl /O2 /Fe:plugin.exe plugin.c    MinGW: gcc -O2 -o plugin.exe plugin.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// 极简提取 "kit":"xxx"（不解析完整 JSON，字段顺序无所谓）
+static void extract_kit(const char *json, char *out, size_t out_size) {
+    const char *p = strstr(json, "\"kit\"");
+    if (!p) { out[0] = '\0'; return; }
+    p = strchr(p, ':');  if (!p) { out[0] = '\0'; return; }
+    p = strchr(p, '"');  if (!p) { out[0] = '\0'; return; }
+    p++;
+    const char *q = strchr(p, '"');
+    size_t len = q ? (size_t)(q - p) : 0;
+    if (len >= out_size) len = out_size - 1;
+    memcpy(out, p, len);
+    out[len] = '\0';
+}
+
+static int fail(const char *msg) {
+    fprintf(stderr, "osmium-kit error: %s\n", msg);      // stderr: 给人看的
+    printf("{\"ok\":false,\"error\":\"%s\"}\n", msg);    // stdout: 协议响应
+    return 1;
+}
+
+int main(void) {
+    // 限制输入大小: 只读前 1MB（宿主只喂 1MB 以内，不放心可以自己截断）
+    char *buf = malloc(1024 * 1024);
+    if (!buf) return 1;
+    size_t n = fread(buf, 1, 1024 * 1024, stdin);
+    buf[n] = '\0';
+    char *input = buf;
+    while (*input == ' ' || *input == '\t' || *input == '\r' || *input == '\n') input++;
+    if (*input == '\0') { free(buf); return 0; }          // 无调用方（双击）: 静默退出
+
+    char kit[64];
+    extract_kit(input, kit, sizeof(kit));
+    if (strcmp(kit, "backup") == 0) {
+        // 执行业务
+        printf("{\"ok\":true}\n");
+        free(buf);
+        return 0;
+    }
+    free(buf);
+    return fail("unknown kit");
+}
+```
+
+### C# 示例（.NET 标准库 System.Text.Json）
+
+.NET（Framework / Core / 5+）都内置 JSON 解析，不需要任何第三方包。
+
+```csharp
+// Plugin.cs — .NET Framework: csc /out:plugin.exe Plugin.cs    .NET Core: dotnet build
+using System;
+using System.Text;
+using System.Text.Json;
+
+class Plugin
+{
+    static int Fail(string msg)
+    {
+        Console.Error.WriteLine("osmium-kit error: " + msg);           // stderr: 给人看的
+        Console.WriteLine("{\"ok\":false,\"error\":\"" + msg + "\"}"); // stdout: 协议响应
+        return 1;
+    }
+
+    static int Main()
+    {
+        // 限制输入大小: 只读前 1MB
+        var buf = new byte[1024 * 1024];
+        int n = Console.OpenStandardInput().Read(buf, 0, buf.Length);
+        string input = Encoding.UTF8.GetString(buf, 0, Math.Max(n, 0)).Trim();
+        if (input.Length == 0) return 0;   // 无调用方（双击）: 静默退出
+
+        string kit;
+        try
+        {
+            kit = JsonDocument.Parse(input).RootElement.GetProperty("kit").GetString() ?? "";
+        }
+        catch { return Fail("invalid request"); }
+
+        if (kit == "backup") { Console.WriteLine("{\"ok\":true}"); return 0; }  // 执行业务
+        return Fail("unknown kit: " + kit);
+    }
+}
+```
+
+
+### Python 示例
+
+标准库就够，不需要任何第三方包。
+
+```python
+import json
+import sys
+
+
+def fail(msg):
+    print(f"osmium-kit error: {msg}", file=sys.stderr)      # stderr: 给人看的
+    print(json.dumps({"ok": False, "error": msg}))          # stdout: 协议响应
+    sys.exit(1)
+
+
+def main():
+    # 限制输入大小: 只读前 1MB
+    data = sys.stdin.buffer.read(1024 * 1024)
+    if not data.strip():
+        sys.exit(0)  # 无调用方（双击）: 静默退出
+    try:
+        req = json.loads(data)
+    except ValueError as e:
+        fail(f"invalid request: {e}")
+    kit = req.get("kit", "")
+    if kit == "backup":
+        # 执行业务
+        print(json.dumps({"ok": True}))
+    else:
+        fail(f"unknown kit: {kit}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### Java 示例（无第三方依赖）
+
+JDK 标准库没有 JSON 解析，这里给一个不依赖任何库的极简 `kit` 字段提取；生产环境建议换 Jackson / Gson。
+
+```java
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+
+public class Plugin {
+
+    public static void main(String[] args) throws IOException {
+        // 限制输入大小: 只读前 1MB
+        byte[] buf = new byte[1024 * 1024];
+        int n = System.in.read(buf);
+        String input = new String(buf, 0, Math.max(n, 0), StandardCharsets.UTF_8).trim();
+        if (input.isEmpty()) {
+            return; // 无调用方（双击）: 静默退出
+        }
+        String kit = extractKit(input);
+        if ("backup".equals(kit)) {
+            // 执行业务
+            System.out.println("{\"ok\":true}");
+        } else {
+            fail("unknown kit: " + kit);
+        }
+    }
+
+    // 极简提取 "kit":"xxx"（不解析完整 JSON，字段顺序无所谓）
+    private static String extractKit(String json) {
+        int i = json.indexOf("\"kit\"");
+        if (i < 0) return "";
+        int c = json.indexOf(':', i);
+        if (c < 0) return "";
+        int q1 = json.indexOf('"', c + 1);
+        if (q1 < 0) return "";
+        int q2 = json.indexOf('"', q1 + 1);
+        return q2 < 0 ? "" : json.substring(q1 + 1, q2);
+    }
+
+    private static void fail(String msg) {
+        System.err.println("osmium-kit error: " + msg);                 // stderr: 给人看的
+        System.out.println("{\"ok\":false,\"error\":\"" + msg + "\"}"); // stdout: 协议响应
+        System.exit(1);
+    }
+}
+```
+
+### Node.js 示例
+
+标准库就够，`JSON.parse` 内置。
+
+```js
+// 限制输入大小: 只读前 1MB
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+    input += chunk;
+    if (input.length > 1024 * 1024) {
+        process.exit(1); // 超限快速失败
+    }
+});
+process.stdin.on('end', () => {
+    if (!input.trim()) {
+        process.exit(0); // 无调用方（双击）: 静默退出
+    }
+    let req;
+    try {
+        req = JSON.parse(input);
+    } catch (e) {
+        return fail('invalid request: ' + e.message);
+    }
+    const kit = req.kit || '';
+    if (kit === 'backup') {
+        // 执行业务
+        console.log(JSON.stringify({ ok: true }));
+    } else {
+        fail('unknown kit: ' + kit);
+    }
+});
+
+function fail(msg) {
+    console.error('osmium-kit error: ' + msg);               // stderr: 给人看的
+    console.log(JSON.stringify({ ok: false, error: msg }));  // stdout: 协议响应
+    process.exit(1);
+}
+```
+
+### 接入步骤
+
+1. 把编译好的程序改名为 `xxx.osx`
+2. 放进宿主 exe 目录下的任意位置（独立部署：直接放 exe 旁；平台安装：`%ProgramFiles%\Osmium\exts\`）
+3. 目录和插件文件要满足信任要求（见下面"几个要注意的点"）
+4. 在服务配置里声明调用：
+
+```toml
+[[plugins]]
+kit = "backup"            # 必须和插件内分发的 kit 名一致
+phase = "start_after"
+payload = { mode = "full" }
+```
+
+5. 跑 `os --extend` 确认绿点，重启服务生效
+
+### 多插件与执行顺序
+
+- 同一 phase 按配置数组声明顺序逐个执行
+- 每个调用独立拉起插件进程，互不干扰、没有状态共享
+- 单个插件失败不影响其他插件（`fail_on_error` 只在 start 阶段能阻断）
+- 同一 kit 可以被多个插件声明，宿主按发现顺序取第一个成功的
+
+## 几个要注意的点
+
+- **ACL 信任校验**：信任锚点是宿主 exe 自身位置——exe 装在受保护位置（如 `%ProgramFiles%\Osmium\`）时，插件目录和文件必须放在仅 SYSTEM / Administrators 可写的地方（防止有人偷偷换掉 `.osx` 提权成 SYSTEM），不符合的插件会被拒绝执行、标红；**inplace 集成部署**（exe 放在你自己的项目目录）时插件与 exe 同级，攻击面跟宿主一致，自动放行（能替换插件的攻击者同样能替换 exe，不额外增加风险）
+- **执行隔离**：插件是独立进程，5 秒超时强杀，崩了不影响宿主
+- **输入限制**：stdin 1MB 上限；官方 unzip 插件还有总解压 8GiB 上限（zip bomb 兜底）
+- **凭据安全**：插件请求里的密码由宿主从配置解密后传入，日志只记去敏后的 URL
+
+## 常见问题
+
+**插件显示红点 / 日志报 "writable by unprivileged users"**：`exts\` 目录或插件文件被非管理员账户可写（比如解压到了用户目录）。把插件放到管理员安装的 `%ProgramFiles%\Osmium\exts\` 就行。
+
+**日志报 "plugin 'xxx' not found (exts\*.osx missing)"**：exe 目录下没有 `.osx`，或者插件扩展名不是 `.osx`。
+
+**插件改名后配置失效了吗**：不会。配置只认 `kit` 能力名，不认文件名；只要扩展名还是 `.osx` 且在 exe 目录下就行。
+
+**想让插件常驻运行**：插件协议是一次性调用（拉起 → 处理 → 退出）。要常驻服务就用 Osmium 宿主管目标进程，别写成插件。
+
+
+
+一键构建产出全部 2 个产物（exe + 安装包）：
+
+```powershell
+.\BUILD.ps1
+```
+
+**流水线**：构建 → 单元测试 → ISCC 编译安装包（Inno Setup 7）。
+
+安装包编译完成后，脚本会询问是否生成可选的 UPX 压缩版。选择 `y` 后以 `opt-level = "z"`（体积优先）重建并用 UPX（`--ultra-brute --lzma`）压缩，输出 `Publish\osmium64-upx.exe`（约 1.1 MB，普通版约 3.6 MB）——不影响普通 exe 与安装包。
+
+脚本从 `Project\Cargo.toml` 读取版本号，自动同步到 `installer.iss`（含版权年份）。测试失败会终止流水线；跳过测试用 `.\BUILD.ps1 -SkipTests`。
+
+**代码签名**：找到证书时，全部产物（`osmium64.exe`、`osmium64-official-kits.osx`、安装包、`osmium64-upx.exe`）都会做 Authenticode 签名（SHA256 + RFC 3161 时间戳）。证书来源按优先级：环境变量 `OSMIUM_CERT_PFX`（可配 `OSMIUM_CERT_PASSWORD`），或仓库内开发证书 `Misc\codesign.pfx`（自签名，已被 gitignore 不会提交）。没有证书时流水线照常运行仅告警；显式跳过签名用 `.\BUILD.ps1 -SkipSign`。自签名开发证书签名有效但不被其他机器信任——公开发行要消除 SmartScreen 警告，请用商业证书经 `OSMIUM_CERT_PFX` 签名。
+
+### 单独构建
+
+```powershell
+Set-Location Project
+cargo build --release                     # → Project\target\release\osmium64.exe
+Copy-Item target\release\osmium64.exe ..\Publish\osmium64.exe
+# 构建插件 → Extension\osmium64-official-kits.osx（见 Extension\osmium-official-kits）
+ISCC installer.iss                        # → Publish\osmium-win-x64-setup-v<版本>.exe
+```
+
 ## 构建
 
 一键构建产出全部 2 个产物（exe + 安装包）：
@@ -439,6 +972,7 @@ Copy-Item target\release\osmium64.exe ..\Publish\osmium64.exe
 ISCC installer.iss                        # → Publish\osmium-win-x64-setup-v<版本>.exe
 ```
 
+
 ## 安装包部署
 
 预构建的安装包可在 [Releases](https://github.com/NXRKYMANE/Osmium/releases) 页面获取。
@@ -454,7 +988,7 @@ ISCC installer.iss                        # → Publish\osmium-win-x64-setup-v<�
 ### 安装器特性
 
 - 将 `os.exe` 安装到 `%ProgramFiles%\Osmium\` 并加入系统 PATH
-- 选择组件页：core（`os.exe`）固定必选；官方扩展包（`osmium64-official-kits.osx` → `Extension\`）**默认不勾选**，需要插件功能（sspi 下载 / 解压 / 共享映射 / 重启）时勾上，用法见 [插件指南](EXTENSION_CN.md)
+- 选择组件页：core（`os.exe`）固定必选；官方扩展包（`osmium64-official-kits.osx` → `Extension\`）**默认不勾选**，需要插件功能（sspi 下载 / 解压 / 共享映射 / 重启）时勾上，用法见 [插件系统](#插件系统)
 - 自动注册开机服务刷新程序（`--install-refresher`）
 - 注册控制面板卸载条目
 - 自动检测旧版本：高版本静默升级、同版本询问重装、低版本警告降级
@@ -504,9 +1038,6 @@ Osmium/
 │   ├── Setup.png              # .osiml 图标源图
 │   ├── Extension.ico          # .osx 插件图标（安装为 icons\osx.ico）
 │   └── Extension.png          # .osx 图标源图
-├── Docs/                      # 文档
-│   ├── EXTENSION_CN.md        # 插件开发与使用指南（中文）
-│   └── EXTENSION_EN.md        # 插件开发与使用指南（英文）
 ├── Publish/                   # 构建产物（exe + 安装包，不提交）
 ├── BUILD.ps1                  # 一键构建脚本（Rust 构建与测试 + 安装包）
 ├── .github/                   # GitHub 社区模板（Issue / PR）

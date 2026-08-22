@@ -183,6 +183,14 @@ pub struct ServiceConfig {
     #[serde(rename = "log_zip_date_format")]
     pub log_zip_date_format: Option<String>,
 
+    /// 日志脱敏正则列表（每条匹配的文本替换为 ***，应用于宿主/钩子/子进程日志写入前）
+    #[serde(rename = "log_redact", default)]
+    pub log_redact: Option<Vec<String>>,
+
+    /// 指标导出文件路径（相对部署目录）: 周期性追加 JSON 行（时间/子进程 CPU%/内存/重启次数/运行时长）
+    #[serde(rename = "metrics_file")]
+    pub metrics_file: Option<String>,
+
     // ==================== 进程环境（可选） ====================
 
     /// 目标进程工作目录 — 省略时取目标 exe 所在目录；相对路径基于服务部署目录
@@ -192,6 +200,18 @@ pub struct ServiceConfig {
     /// 目标进程优先级: idle | belownormal | normal | abovenormal | high | realtime（默认 normal）
     #[serde(rename = "process_priority")]
     pub process_priority: Option<String>,
+
+    /// 目标进程 CPU 亲和性（默认全部核心）: 核心编号列表 "0,1,2"（按系统核心数钳制）
+    #[serde(rename = "process_affinity")]
+    pub process_affinity: Option<String>,
+
+    /// 目标进程 IO 优先级: idle | low | normal | high（默认 normal，对应 ThreadIoPriority）
+    #[serde(rename = "io_priority")]
+    pub io_priority: Option<String>,
+
+    /// 将子进程放入 Job Object（KILL_ON_JOB_CLOSE）: 宿主异常退出时系统级保证整棵进程树被终止（防孤儿），默认 true
+    #[serde(rename = "job_object", default = "default_true")]
+    pub job_object: bool,
 
     // ==================== 自定义停止（可选） ====================
 
@@ -273,6 +293,14 @@ pub struct ServiceConfig {
     #[serde(rename = "download_threads", default = "default_sixteen")]
     pub download_threads: i32,
 
+    /// 下载失败重试次数（默认 2，指数退避后仍失败才报错）；0 不重试
+    #[serde(rename = "download_retries", default)]
+    pub download_retries: i64,
+
+    /// 下载重试指数退避基数（毫秒，默认 2000: 2s/4s/8s...），仅 download_retries > 0 时生效
+    #[serde(rename = "download_retry_backoff_ms", default)]
+    pub download_retry_backoff_ms: i64,
+
     // ==================== 进程与停止（可选） ====================
 
     /// 隐藏目标进程窗口（CreateNoWindow），默认 true；false 时子进程可创建控制台窗口
@@ -296,10 +324,43 @@ pub struct ServiceConfig {
 
     // ==================== 生命周期插件调用（可选） ====================
 
-    /// 生命周期插件调用（多条），phase 与 extensions 相同四阶段；
+    /// 生命周期插件调用（多条），phase 与 extensions 相同四阶段 + crash（崩溃恢复前）；
     /// 按 kit 分发到 exe 同级 .osx 插件（stdin/stdout JSON 协议），第三方插件无需改宿主代码
     #[serde(rename = "plugins", default)]
     pub plugins: Option<Vec<PluginCallConfig>>,
+
+    /// 仅执行带有效 Authenticode 签名的插件（默认 false 仅校验 ACL 信任）；
+    /// true 时未签名/签名无效的 .osx 拒绝执行（WinVerifyTrust 校验）
+    #[serde(rename = "require_signed_plugins", default)]
+    pub require_signed_plugins: bool,
+
+    // ==================== 资源监控 / 健康检查（可选） ====================
+
+    /// HTTP 健康检查: 子进程运行期间轮询该 URL，连续 health_check_failures 次非 200 视为崩溃重启
+    #[serde(rename = "health_check_url")]
+    pub health_check_url: Option<String>,
+
+    /// 健康检查轮询间隔（秒），默认 30
+    #[serde(rename = "health_check_interval_secs", default)]
+    pub health_check_interval_secs: i64,
+
+    /// 健康检查请求超时（秒），默认 5
+    #[serde(rename = "health_check_timeout_secs", default)]
+    pub health_check_timeout_secs: i64,
+
+    /// 连续失败多少次视为崩溃（默认 3）
+    #[serde(rename = "health_check_failures", default)]
+    pub health_check_failures: i64,
+
+    /// 期望的 HTTP 状态码（默认 200）
+    #[serde(rename = "health_check_expected_status", default)]
+    pub health_check_expected_status: i64,
+
+    // ==================== 定时调度（可选） ====================
+
+    /// 定时调度: 固定间隔或每日定点触发动作（restart 重启子进程 / reload 热刷新 / hook 执行命令）
+    #[serde(rename = "schedules", default)]
+    pub schedules: Option<Vec<ScheduleConfig>>,
 
     // ==================== 资源监控 / 网络映射（可选） ====================
 
@@ -398,6 +459,24 @@ pub struct PluginCallConfig {
     /// 可选: 插件失败是否阻断流程（start 阶段阻断启动；其他阶段仅告警），默认 false
     #[serde(default)]
     pub fail_on_error: bool,
+}
+
+/// 定时调度配置: every_secs（固定间隔）与 daily_at（每日定点 "HH:mm:ss"）二选一；
+/// action = restart（重启子进程）| reload（热刷新重载配置）| hook（执行 command）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleConfig {
+    /// 固定间隔触发（秒），与 daily_at 互斥
+    #[serde(rename = "every_secs")]
+    pub every_secs: Option<i64>,
+    /// 每日定点触发时刻（"HH:mm:ss"）
+    #[serde(rename = "daily_at")]
+    pub daily_at: Option<String>,
+    /// 触发动作: restart | reload | hook（默认 restart）
+    #[serde(rename = "action", default)]
+    pub action: String,
+    /// action=hook 时执行的命令（cmd /c 语义）
+    #[serde(rename = "command")]
+    pub command: Option<String>,
 }
 
 /// 故障恢复动作配置: action = restart | reboot | none，delay_secs 为动作前等待秒数

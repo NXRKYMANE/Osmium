@@ -119,18 +119,18 @@ New-Item -ItemType Directory -Force -Path $publishDir | Out-Null
 Get-ChildItem $publishDir -Force | Remove-Item -Recurse -Force
 # 主程序: 直接以 osmium64.exe 输出（安装时改名为 os.exe）
 Copy-Item (Join-Path $ProjectRoot "target\release\osmium64.exe") (Join-Path $publishDir "osmium64.exe") -Force
-# 官方插件: osmium-kit.exe → exts\osmium64-official-kits.osx
+# 官方插件: osmium-kit.exe → exts\osmium64-official-kits-v<VERSION>.osx（文件名带版本后缀）
 $extDir = Join-Path $publishDir "exts"
 New-Item -ItemType Directory -Force -Path $extDir | Out-Null
-Copy-Item (Join-Path $ProjectRoot "target\release\osmium-kit.exe") (Join-Path $extDir "osmium64-official-kits.osx") -Force
+Copy-Item (Join-Path $ProjectRoot "target\release\osmium-kit.exe") (Join-Path $extDir "osmium64-official-kits-v$rsVersion.osx") -Force
 
-# 4.5 代码签名: osmium64.exe + osmium64-official-kits.osx（安装包在第 6 步编译完成后签名）
+# 4.5 代码签名: osmium64.exe + 插件（安装包在第 6 步编译完成后签名）
 $signCert = $null
 if (-not $SkipSign) {
     $signCert = Get-SignCert
     if ($signCert) {
         Sign-File (Join-Path $publishDir "osmium64.exe") $signCert
-        Sign-File (Join-Path $extDir "osmium64-official-kits.osx") $signCert
+        Sign-File (Join-Path $extDir "osmium64-official-kits-v$rsVersion.osx") $signCert
     } else {
         Write-Warning "No code-signing certificate found (OSMIUM_CERT_PFX or Misc\codesign.pfx), skipping signature."
     }
@@ -156,7 +156,7 @@ if ($signCert) {
     Sign-File (Join-Path $publishDir $setupName) $signCert
 }
 Write-Host "Done: Publish\osmium64.exe" -ForegroundColor Green
-Write-Host "Done: Publish\exts\osmium64-official-kits.osx" -ForegroundColor Green
+Write-Host "Done: Publish\exts\osmium64-official-kits-v$rsVersion.osx" -ForegroundColor Green
 Write-Host "Done: Publish\$setupName" -ForegroundColor Green
 
 # 7. 可选: UPX 压缩版本 (opt-level="z" 体积优先 + UPX --ultra-brute --lzma)

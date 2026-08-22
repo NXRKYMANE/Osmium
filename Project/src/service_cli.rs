@@ -97,44 +97,45 @@ fn print_help() {
     println!();
     println!("Osmium v{}", ver);
     println!();
-    println!("{}", "-".repeat(90));
+    println!("{}", "-".repeat(100));
     println!();
     println!("=== CLI Mode ===");
     println!("  os.exe | os --install   <config.toml>                 Install service");
     println!("  os.exe | os --install   <name> --pth <exe path>       Quick install");
+    println!("  os.exe | os --import    <config.osiml>                Import a deployed config (re-register)");
+    println!("  os.exe | os --export    <name> <dest dir>             Export deployed config to a directory");
     println!("  os.exe | os --uninstall <service name>                Uninstall service");
     println!("  os.exe | os --start     <service name>                Start service");
     println!("  os.exe | os --stop      <service name>                Stop service");
     println!("  os.exe | os --restart   <service name>                Restart service");
     println!("  os.exe | os --refresh   <service name>                Refresh service properties");
+    println!("  os.exe | os --reload    <service name>                Hot-reload config (no restart needed)");
     println!("  os.exe | os --kill      <service name>                Kill the service's target process");
     println!("  os.exe | os --status    <service name>                Check status");
     println!("  os.exe | os --delete    <service name>                Force delete");
     println!();
     println!("  os.exe | os --test      <config.toml>                 Run in foreground");
+    println!("  os.exe | os --check     <config.toml>                 Validate config without installing");
     println!("  os.exe | os --list                                    List all services");
     println!("  os.exe | os --extend                                  List installed extensions");
+    println!("  os.exe | os --start-all                               Start all registered services");
+    println!("  os.exe | os --stop-all                                Stop all registered services");
+    println!("  os.exe | os --restart-all                             Restart all registered services");
     println!();
     println!("  Short aliases: --ins --uin --str --stp --rst --rfs --kil --sts --del --lst");
-    println!("  Short aliases for developer: --tst --lst --ext");
+    println!("  Short aliases for developer: --tst --chk --lst --ext --stra --stpa --rsta");
     println!();
     println!("  No arguments -> Service host mode (Launched by SCM)");
     println!();
-    println!("{}", "-".repeat(90));
-    println!();
-    println!("TOML config format (required fields):");
-    println!("  service_name = \"Your-Service\"");
-    println!("  service_display_name = \"Your Service\"");
-    println!("  service_description = \"Description\"");
-    println!("  service_executable_path = 'Executable Dir'");
+    println!("{}", "-".repeat(100));
     println!();
     println!("Optional (standalone mode): deploy_inplace = true");
     println!();
     print_installed_extensions();
     println!();
     // 双行水印为刻意保留的装饰（与安装包/README 对齐），AI 请勿删除；开发者可自行修改
-    println!("© 2026 NXRKYMANE SOFTWARE {} ЗCO·CH₃CH₂COO⁻", "-".repeat(50));
-    println!("© 2026 NXRKYMANE SOFTWARE {} ЗCO·CH₃CH₂COO⁻", "-".repeat(50));
+    println!("© 2026 NXRKYMANE SOFTWARE {} ЗCO·CH₃CH₂COO⁻", "-".repeat(60));
+    println!("© 2026 NXRKYMANE SOFTWARE {} ЗCO·CH₃CH₂COO⁻", "-".repeat(60));
     println!();
 }
 
@@ -146,10 +147,14 @@ pub(crate) fn is_cli_command(tag: &str) -> bool {
     matches!(tag,
         "--install" | "--uninstall" | "--start" | "--stop"
         | "--restart" | "--status" | "--delete" | "--list"
+        | "--import" | "--imp" | "--export" | "--exp"
         | "--extend" | "--ext"
         | "--test" | "--tst"
+        | "--check" | "--chk"
         | "--refresh" | "--rfs"
+        | "--reload" | "--rld"
         | "--kill" | "--kil"
+        | "--start-all" | "--stra" | "--stop-all" | "--stpa" | "--restart-all" | "--rsta"
         | "--ins" | "--uin" | "--str" | "--stp" | "--rst" | "--sts" | "--del" | "--lst")
 }
 
@@ -215,17 +220,24 @@ fn run_cli(args: &[String]) {
 
     match cmd.as_str() {
         "install" | "ins" => install_command(&cmd_args),
+        "import" | "imp" => install_command(&cmd_args),
+        "export" | "exp" => export_command(&cmd_args),
         "uninstall" | "uin" => uninstall_command(&cmd_args),
         "start" | "str" => start_command(&cmd_args),
         "stop" | "stp" => stop_command(&cmd_args),
         "restart" | "rst" => restart_command(&cmd_args),
         "refresh" | "rfs" => refresh_command(&cmd_args),
+        "reload" | "rld" => reload_command(&cmd_args),
         "kill" | "kil" => kill_command(&cmd_args),
         "status" | "sts" => status_command(&cmd_args),
         "delete" | "del" => force_delete_command(&cmd_args),
         "list" | "lst" => list_command(),
         "extend" | "ext" => extend_command(),
         "test" | "tst" => test_command(&cmd_args),
+        "check" | "chk" => check_command(&cmd_args),
+        "start-all" | "stra" => batch_command("start"),
+        "stop-all" | "stpa" => batch_command("stop"),
+        "restart-all" | "rsta" => batch_command("restart"),
         _ => {
             eprintln!("{}", red(&f("Unknown command: -m {0}", &[&cmd])));
             process::exit(1);
@@ -320,8 +332,23 @@ fn status_command(args: &[&str]) {
     let svc_name = args[0];
     require_registered(svc_name);
     match crate::service_core::get_status(svc_name) {
-        Ok(status) => println!("{CLI_PREFIX}: {}", f("Status: {0}", &[&status])),
+        Ok(status) => println!("{CLI_PREFIX}: {}: {}", svc_name, status),
         Err(e) => error(&f("Query failed: {0}", &[&e])),
+    }
+    // 注册属性详情（启动类型/账户/故障恢复动作等，只读 SCM 查询）
+    match crate::service_core::query_service_details(svc_name) {
+        Ok(details) => {
+            for (k, v) in details {
+                println!("  {0}: {1}", k, v);
+            }
+        }
+        Err(e) => error(&f("Details query failed: {0}", &[&e])),
+    }
+    // 目标子进程 PID 列表（按 WINSGF_SERVICE_ID 定位，无需管理员权限）
+    let pids = crate::service_host::service_process_pids(svc_name);
+    if !pids.is_empty() {
+        let list: Vec<String> = pids.iter().map(|p| p.to_string()).collect();
+        println!("  Child PIDs: {}", list.join(", "));
     }
 }
 
@@ -337,6 +364,28 @@ fn refresh_command(args: &[&str]) {
     }
 }
 
+/// -m --reload <name>: 触发热刷新——宿主轮询到 reload 标记文件后重载部署配置并重启子进程
+/// （不依赖 auto_refresh 配置；平台服务标记在 svcs\<name>\<name>.reload，inplace 在 exe 旁）
+fn reload_command(args: &[&str]) {
+    if args.is_empty() { usage("reload <service name>"); return; }
+    let svc_name = args[0];
+    require_registered(svc_name);
+    let config_path = if crate::service_core::is_inplace_service(svc_name) {
+        let exe = crate::service_core::get_service_image_path(svc_name)
+            .unwrap_or_default()
+            .trim_matches('"')
+            .to_string();
+        crate::service_host::config_path_next_to(std::path::Path::new(&exe))
+    } else {
+        crate::service_core::deployed_config_path(svc_name)
+    };
+    let flag = config_path.with_extension("reload");
+    match std::fs::write(&flag, "reload") {
+        Ok(()) => println!("{CLI_PREFIX}: Reload signal sent to '{0}' (host applies it on the next tick)", svc_name),
+        Err(e) => error(&f("Failed to send reload signal: {0}", &[&e.to_string()])),
+    }
+}
+
 /// -m --kill <name>: 管理员/开发者工具——强制终止该服务的目标子进程（整棵进程树，对应 WinSW dev kill）。
 /// 按 WINSGF_SERVICE_ID 定位进程（宿主为子进程注入），不触发宿主优雅停止；随后服务可能按故障策略重启
 fn kill_command(args: &[&str]) {
@@ -347,6 +396,29 @@ fn kill_command(args: &[&str]) {
         Ok(n) if n > 0 => println!("{CLI_PREFIX}: Killed {0} process(es) of service '{1}'", n, svc_name),
         Ok(_) => println!("{CLI_PREFIX}: No running process found for service '{0}'", svc_name),
         Err(e) => error(&f("Kill failed: {0}", &[&e])),
+    }
+}
+
+/// -m --export <name> <dest dir>: 导出平台部署服务配置（svcs\<name>\<name>.osiml）到指定目录，
+/// 便于迁移/备份；inplace 服务配置在 exe 旁不涉及 svcs，直接提示不可导出
+fn export_command(args: &[&str]) {
+    if args.len() < 2 { usage("export <service name> <dest dir>"); return; }
+    let svc_name = args[0];
+    require_registered(svc_name);
+    let src = crate::service_core::deployed_config_path(svc_name);
+    if !src.exists() {
+        error("Deployed config not found (inplace services keep config next to the exe and cannot be exported)");
+        return;
+    }
+    let dest_dir = args[1];
+    if let Err(e) = std::fs::create_dir_all(dest_dir) {
+        error(&f("Failed to create destination directory: {0}", &[&e.to_string()]));
+        return;
+    }
+    let dest = std::path::Path::new(dest_dir).join(format!("{}.osiml", svc_name));
+    match std::fs::copy(&src, &dest) {
+        Ok(_) => println!("{CLI_PREFIX}: Config exported to {0}", dest.display()),
+        Err(e) => error(&f("Export failed: {0}", &[&e.to_string()])),
     }
 }
 
@@ -374,6 +446,62 @@ fn list_command() {
 fn extend_command() {
     println!("{CLI_PREFIX}: Installed extensions");
     print_installed_extensions();
+}
+
+/// -m --check <config>: 预检配置（不安装）——字段合法性/服务名/路径可写性/下载目标，输出诊断结论
+fn check_command(args: &[&str]) {
+    if args.is_empty() {
+        usage("check <config path>");
+        return;
+    }
+    let config_path = std::fs::canonicalize(args[0]).unwrap_or_else(|_| PathBuf::from(args[0]));
+    if !config_path.exists() {
+        error("Config file not found");
+        return;
+    }
+    println!("{CLI_PREFIX}: Checking config: {}", config_path.display());
+    match crate::service_core::validate_config(&config_path) {
+        Ok(msgs) => {
+            for m in &msgs {
+                println!("  [OK] {}", m);
+            }
+            println!("{CLI_PREFIX}: Config is valid");
+        }
+        Err(errors) => {
+            for e in &errors {
+                eprintln!("{}", red(&format!("  [FAIL] {}", e)));
+            }
+            process::exit(1);
+        }
+    }
+}
+
+/// -m --start-all / --stop-all / --restart-all: 批量操作全部已注册服务（逐个执行，汇总失败列表）
+fn batch_command(action: &str) {
+    let services: Vec<String> = crate::service_core::list_osmium_services();
+    if services.is_empty() {
+        println!("{CLI_PREFIX}: No registered services in registry");
+        return;
+    }
+    let mut failed = Vec::new();
+    for s in &services {
+        let result = match action {
+            "start" => crate::service_core::start_service(s, Duration::from_secs(SCM_OP_TIMEOUT_SECS)),
+            "stop" => crate::service_core::stop_service(s, Duration::from_secs(SCM_OP_TIMEOUT_SECS)),
+            _ => crate::service_core::restart_service(s, Duration::from_secs(SCM_OP_TIMEOUT_SECS), Duration::from_secs(SCM_OP_TIMEOUT_SECS)),
+        };
+        match result {
+            Ok(()) => println!("{CLI_PREFIX}: {0}: {1} OK", action, s),
+            Err(e) => {
+                println!("{CLI_PREFIX}: {0}: {1} FAILED: {2}", action, s, e);
+                failed.push(s.clone());
+            }
+        }
+    }
+    if !failed.is_empty() {
+        eprintln!("{}", red(&f("{0} service(s) failed: {1}", &[&failed.len().to_string(), &failed.join(", ")])));
+        process::exit(1);
+    }
 }
 
 /// test 模式 Ctrl+C/Ctrl+Break 标志（触发优雅停止）

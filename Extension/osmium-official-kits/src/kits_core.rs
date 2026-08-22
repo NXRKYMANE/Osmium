@@ -4,6 +4,7 @@
 // ==================== SSPI（Negotiate/NTLM）认证下载 ====================
 // 自 service_core.rs 搬迁: 独立进程内完成完整 401 挑战-响应循环（凭据上下文进程内自持）
 
+use std::io::{BufRead, Write};
 use std::time::Duration;
 
 use windows::Win32::Security::Authentication::Identity::{
@@ -400,4 +401,168 @@ pub fn reboot_system() -> Result<(), String> {
         )
         .map_err(|e| format!("InitiateSystemShutdownExW failed: {e}"))
     }
+}
+
+// ==================== Webhook 通知（服务事件推送） ====================
+// 宿主在 start/stop/crash 生命周期阶段调用 notify kit: POST JSON 到配置的 URL
+
+/// 推送通知: 向 webhook URL POST application/json（{"text": ...}），2xx 视为成功；
+/// 超时/网络错误返回错误详情（宿主按 fail_on_error 决定是否阻断）；
+/// 错误消息中的 URL 去除 userinfo（防内嵌凭据经日志泄漏）
+pub fn notify_webhook(url: &str, text: &str, timeout_secs: u64) -> Result<(), String> {
+    let agent = build_agent(timeout_secs, None);
+    let resp = agent.post(url)
+        .header("content-type", "application/json")
+        .send(serde_json::json!({ "text": text }).to_string())
+        .map_err(|e| format!("notify request failed for '{0}': {e}", redact_webhook_url(url)))?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("notify webhook returned HTTP {}", resp.status().as_u16()))
+    }
+}
+
+/// 去除 URL 的 userinfo 部分（http://user:pass@host → http://host）
+fn redact_webhook_url(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut u) => {
+            let _ = u.set_username("");
+            let _ = u.set_password(None);
+            u.to_string()
+        }
+        Err(_) => url.to_string(),
+    }
+}
+
+// ==================== 通用工具（host:port 解析） ====================
+
+/// 解析 "host[:port]"（IPv6 字面量如 `[::1]:514` 原样透传）；端口缺省用 default_port
+fn parse_host_port<'a>(host: &'a str, default_port: u16, kind: &str) -> Result<(&'a str, u16), String> {
+    match host.rsplit_once(':') {
+        Some((h, p)) if !h.contains(':') && p.chars().all(|c| c.is_ascii_digit()) => {
+            Ok((h, p.parse::<u16>().map_err(|_| format!("{kind}: invalid port"))?))
+        }
+        Some((h, _)) if !h.contains(':') => Err(format!("{kind}: invalid port")),
+        _ => Ok((host, default_port)),
+    }
+}
+
+// ==================== SMTP 邮件告警 ====================
+// 最小 SMTP 客户端: 会话直连（可选 AUTH PLAIN 认证），仅支持单封邮件（服务事件通知场景）；
+// 不引入 SMTP crate 依赖（与主程序依赖策略一致: 零重依赖）
+
+/// 发送一封 SMTP 邮件（25 或 465/587 需明文/STARTTLS 由服务器协商决定——
+/// 本实现仅支持明文端口（25/587 无 TLS），认证走 AUTH PLAIN）；
+/// 服务器地址支持 "host:port"（缺省 25）
+#[allow(clippy::too_many_arguments)] // 全部为邮件会话所需参数，打包反增调用点负担
+pub fn send_email_smtp(
+    host: &str,
+    from: &str,
+    to: &str,
+    subject: &str,
+    body: &str,
+    username: Option<&str>,
+    password: Option<&str>,
+    timeout_secs: u64,
+) -> Result<(), String> {
+    use std::io::BufReader;
+    use std::net::TcpStream;
+
+    // 解析 host[:port]
+    let (addr, port) = parse_host_port(host, 25, "smtp")?;
+    let timeout = Duration::from_secs(timeout_secs.max(5));
+    let stream = TcpStream::connect((addr, port))
+        .map_err(|e| format!("smtp: connect to {host} failed: {e}"))?;
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    // 读/写各持一份句柄（clone），避免闭包捕获与后续写入的借用冲突
+    let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+    let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
+
+    // 读欢迎行（220）
+    let mut line = String::new();
+    reader.read_line(&mut line).map_err(|e| format!("smtp: read greeting failed: {e}"))?;
+    if !line.starts_with("220") {
+        return Err(format!("smtp: unexpected greeting: {line}"));
+    }
+    smtp_expect(&mut writer, &mut reader, "EHLO osmium\r\n", &["250"])?;
+    if username.is_some() {
+        smtp_expect(&mut writer, &mut reader, "AUTH PLAIN\r\n", &["334"])?;
+        // AUTH PLAIN 凭据: base64("\0user\0pass")
+        let user = username.unwrap_or("");
+        let pass = password.unwrap_or("");
+        let auth = format!("\0{user}\0{pass}");
+        let auth_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, auth.as_bytes());
+        smtp_expect(&mut writer, &mut reader, &format!("{auth_b64}\r\n"), &["235"])?;
+    }
+    smtp_expect(&mut writer, &mut reader, &format!("MAIL FROM:<{from}>\r\n"), &["250"])?;
+    smtp_expect(&mut writer, &mut reader, &format!("RCPT TO:<{to}>\r\n"), &["250", "251"])?;
+    smtp_expect(&mut writer, &mut reader, "DATA\r\n", &["354"])?;
+    // body 规范化换行（\n → \r\n），以单点行结束
+    let body_escaped = body.replace("\r\n", "\n").replace('\n', "\r\n");
+    smtp_expect(&mut writer, &mut reader,
+        &format!("From: {from}\r\nTo: {to}\r\nSubject: {subject}\r\n\r\n{body_escaped}\r\n.\r\n"), &["250"])?;
+    smtp_expect(&mut writer, &mut reader, "QUIT\r\n", &["221"])?;
+    Ok(())
+}
+
+/// SMTP 命令交互: 发送命令行并读取响应，校验期望的状态码前缀（3 位数字）；
+/// 多行响应（第 4 字符为 '-'）持续读取
+fn smtp_expect(
+    writer: &mut impl Write,
+    reader: &mut impl BufRead,
+    command: &str,
+    expect: &[&str],
+) -> Result<(), String> {
+    writer.write_all(command.as_bytes()).map_err(|e| format!("smtp: send failed: {e}"))?;
+    let mut resp = String::new();
+    loop {
+        resp.clear();
+        reader.read_line(&mut resp).map_err(|e| format!("smtp: read failed: {e}"))?;
+        if resp.len() < 4 {
+            return Err(format!("smtp: short response: {resp}"));
+        }
+        // 多行响应: 第 4 字符为 '-' 时继续读
+        if resp.as_bytes().get(3) != Some(&b'-') {
+            break;
+        }
+    }
+    let code = &resp[..3];
+    if !expect.contains(&code) {
+        return Err(format!("smtp: unexpected response '{code}' to {0}: {1}", command.trim_end(), resp.trim_end()));
+    }
+    Ok(())
+}
+
+// ==================== Syslog 告警（UDP） ====================
+// RFC 5424 轻量发送: PRI(facility*8+severity) + 时间戳 + HOSTNAME + APP-NAME + MSG
+
+/// UDP 发送一条 syslog 消息（RFC 5424）; host 支持 "host:port"（缺省 514）
+pub fn send_syslog_udp(
+    host: &str,
+    message: &str,
+    facility: u8,
+    severity: u8,
+    tag: &str,
+    timeout_secs: u64,
+) -> Result<(), String> {
+    use std::net::UdpSocket;
+
+    // 解析 host[:port]
+    let (addr, port) = parse_host_port(host, 514, "syslog")?;
+    // facility/severity 钳制到合法范围（0-23 / 0-7）
+    let pri = ((facility.min(23) as u16) << 3) | (severity.min(7) as u16);
+    // RFC 5424 时间戳: UTC（Z 后缀），GetSystemTime 免 chrono 依赖
+    let st = unsafe { windows::Win32::System::SystemInformation::GetSystemTime() };
+    let ts = format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    let hostname = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "localhost".into());
+    let msg = message.replace('\n', " ");
+    let frame = format!("<{pri}>1 {ts} {hostname} {tag} - - - {msg}");
+    let socket = UdpSocket::bind("0.0.0.0:0")
+        .map_err(|e| format!("syslog: bind failed: {e}"))?;
+    let _ = socket.set_write_timeout(Some(Duration::from_secs(timeout_secs.max(2))));
+    socket.send_to(frame.as_bytes(), (addr, port))
+        .map_err(|e| format!("syslog: send to {host} failed: {e}"))?;
+    Ok(())
 }

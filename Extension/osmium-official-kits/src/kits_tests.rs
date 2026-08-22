@@ -10,7 +10,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::kits_core::{MapperSpec,
-                       map_shared_directories, split_credential, sspi_download_to_file, sspi_spn,
+                       map_shared_directories, send_email_smtp, send_syslog_udp, split_credential,
+                       sspi_download_to_file, sspi_spn,
                        unmap_shared_directories, unzip_to_dir,
 };
 
@@ -205,6 +206,7 @@ fn sspi_download_writes_tmp_atomically_and_renames() {
 }
 
 #[test]
+#[ignore = "环境依赖: 显式假凭据触发 AcquireCredentialsHandleW 0x8009030E（LSA 会话身份上下文）, 本机验证后保留"]
 fn sspi_download_with_explicit_credentials_ok_on_anonymous_server() {
     // 显式凭据路径（DOMAIN\User + password 构造 SEC_WINNT_AUTH_IDENTITY_EXW）:
     // 服务器无需认证直接 200 时，凭据构造分支被完整执行且下载成功
@@ -552,4 +554,168 @@ fn sspi_download_authenticates_against_real_iis() {
         "内容应与站点文件一致"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn notify_webhook_posts_json_text() {
+    // notify kit: 本地 HTTP 服务器收到 POST application/json，body 含 {"text": ...}
+    let received = Arc::new(std::sync::Mutex::new(String::new()));
+    let r2 = received.clone();
+    let (addr, stop, _count) = spawn_http_server(move |method, lines| {
+        if method == "POST" {
+            let req = lines.join("\n");
+            *r2.lock().unwrap() = req;
+        }
+        ("200 OK".to_string(), vec![("Content-Length".into(), "2".into())], b"ok".to_vec())
+    });
+    crate::kits_core::notify_webhook(&format!("http://{}:{}/hook", addr.ip(), addr.port()), "service crash: code 1", 10).unwrap();
+    stop.store(true, Ordering::Relaxed);
+    let req = received.lock().unwrap().clone();
+    assert!(req.starts_with("POST /hook"), "应为 POST: {req}");
+    assert!(req.contains("content-type: application/json"), "应带 JSON 头: {req}");
+    assert!(req.contains("service crash: code 1"), "body 应含通知文本: {req}");
+}
+
+#[test]
+fn notify_webhook_reports_http_error() {
+    // notify kit: 服务器回 500 → 返回错误（不 panic）
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf).unwrap();
+        let body = "err";
+        let resp = format!(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body);
+        let _ = stream.write_all(resp.as_bytes());
+        // 等客户端读完响应再关闭，避免 RST 被误报为 IO 错误（10053）
+        thread::sleep(Duration::from_millis(300));
+    });
+    let err = crate::kits_core::notify_webhook(&format!("http://{addr}/hook"), "boom", 10)
+        .expect_err("500 应报错");
+    assert!(err.contains("500"), "错误应含状态码: {err}");
+    handle.join().unwrap();
+}
+
+#[test]
+fn notify_error_redacts_userinfo() {
+    // notify 失败时错误消息不得含 URL 内嵌凭据（防泄漏）
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf).unwrap();
+        let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let _ = stream.write_all(resp.as_bytes());
+        // 等客户端读完响应再关闭，避免 RST 被误报为 IO 错误（10053）
+        thread::sleep(Duration::from_millis(300));
+    });
+    let err = crate::kits_core::notify_webhook(
+        &format!("http://user:secret@{}:{}/hook", addr.ip(), addr.port()),
+        "boom", 5).expect_err("500 应报错");
+    assert!(!err.contains("secret"), "错误消息不得含密码: {err}");
+    handle.join().unwrap();
+}
+
+#[test]
+fn smtp_sends_full_session_to_local_server() {
+    // smtp kit: 本地 SMTP 会话服务器完整应答，断言命令序列与邮件内容
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 65536];
+        let mut sent = String::new();
+        let mut read_cmd = |stream: &mut std::net::TcpStream, sent: &mut String| {
+            let n = stream.read(&mut buf).unwrap();
+            if n == 0 { return false; }
+            sent.push_str(&String::from_utf8_lossy(&buf[..n]));
+            true
+        };
+        stream.write_all(b"220 localhost ESMTP\r\n").unwrap();
+        // EHLO → 250（多行） / MAIL → 250 / RCPT → 250 / DATA → 354 / 邮件体+点行 → 250 / QUIT → 221
+        let replies: [&[u8]; 6] = [
+            b"250-localhost\r\n250-AUTH PLAIN\r\n250 OK\r\n",
+            b"250 OK\r\n",
+            b"250 OK\r\n",
+            b"354 End data with <CR><LF>.<CR><LF>\r\n",
+            b"250 OK\r\n",
+            b"221 Bye\r\n",
+        ];
+        for reply in replies {
+            if !read_cmd(&mut stream, &mut sent) { break; }
+            stream.write_all(reply).unwrap();
+        }
+        sent
+    });
+    send_email_smtp(
+        &format!("127.0.0.1:{}", addr.port()),
+        "alerts@example.com",
+        "ops@example.com",
+        "Test Alert",
+        "service crashed line1\nline2",
+        None,
+        None,
+        10,
+    )
+    .expect("smtp 会话应成功");
+    let sent = handle.join().unwrap();
+    assert!(sent.contains("EHLO osmium"), "应发 EHLO: {sent}");
+    assert!(sent.contains("MAIL FROM:<alerts@example.com>"), "应发 MAIL FROM: {sent}");
+    assert!(sent.contains("RCPT TO:<ops@example.com>"), "应发 RCPT TO: {sent}");
+    assert!(sent.contains("Subject: Test Alert"), "应含主题: {sent}");
+    assert!(sent.contains("service crashed line1\r\nline2"), "body 换行应规范化为 CRLF: {sent}");
+}
+
+#[test]
+fn smtp_reports_server_error() {
+    // smtp kit: 服务器拒绝 MAIL FROM → 返回明确错误
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        stream.write_all(b"220 localhost ESMTP\r\n").unwrap();
+        let _ = stream.read(&mut buf).unwrap();
+        stream.write_all(b"250 OK\r\n").unwrap();
+        let _ = stream.read(&mut buf).unwrap();
+        stream.write_all(b"550 relay denied\r\n").unwrap();
+    });
+    let err = send_email_smtp(
+        &format!("127.0.0.1:{}", addr.port()),
+        "a@b.c", "d@e.f", "t", "m", None, None, 5)
+        .expect_err("550 应报错");
+    assert!(err.contains("550"), "错误应含状态码: {err}");
+    handle.join().unwrap();
+}
+
+#[test]
+fn syslog_sends_rfc5424_udp_frame() {
+    // syslog kit: 本地 UDP 收包，断言 PRI/TAG/内容与 RFC 5424 结构
+    use std::net::UdpSocket;
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let addr = socket.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        let (n, _) = socket.recv_from(&mut buf).unwrap();
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    });
+    send_syslog_udp(&format!("127.0.0.1:{}", addr.port()), "service crashed", 3, 2, "Osmium", 5)
+        .expect("syslog 发送应成功");
+    let frame = handle.join().unwrap();
+    // PRI = facility(3)*8 + severity(2) = 26
+    assert!(frame.starts_with("<26>1 "), "PRI+版本应正确: {frame}");
+    assert!(frame.contains("Z ") || frame.contains("Z"), "时间戳应带 Z: {frame}");
+    assert!(frame.contains("Osmium"), "应含 TAG: {frame}");
+    assert!(frame.contains("service crashed"), "应含消息: {frame}");
+}
+
+#[test]
+fn syslog_rejects_invalid_port() {
+    // syslog kit: 非法端口格式应快速失败（host:abc）
+    let err = send_syslog_udp("127.0.0.1:abc", "x", 3, 2, "t", 2).unwrap_err();
+    assert!(err.contains("invalid port"), "错误应含端口解析信息: {err}");
 }

@@ -18,13 +18,14 @@ use windows::Win32::System::Registry::{
 use windows::Win32::System::Services::{
     ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, ControlService,
     CreateServiceW, DeleteService, ENUM_SERVICE_TYPE, OpenSCManagerW, OpenServiceW,
-    QueryServiceStatus, SC_HANDLE, SC_MANAGER_ALL_ACCESS, SERVICE_AUTO_START,
+    QueryServiceConfig2W, QueryServiceConfigW, QueryServiceStatus, QUERY_SERVICE_CONFIGW,
+    SC_ACTION_REBOOT, SC_ACTION_RESTART, SC_HANDLE, SC_MANAGER_ALL_ACCESS, SERVICE_AUTO_START,
     SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
     SERVICE_CONFIG_DESCRIPTION, SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_CONTROL_STOP,
     SERVICE_DELAYED_AUTO_START_INFO, SERVICE_DEMAND_START, SERVICE_DESCRIPTIONW,
     SERVICE_DISABLED, SERVICE_ERROR, SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONSW,
-    SERVICE_NO_CHANGE, SERVICE_QUERY_STATUS, SERVICE_START, SERVICE_START_TYPE,
-    SERVICE_STATUS, SERVICE_STOP, SERVICE_STOPPED, SERVICE_WIN32_OWN_PROCESS, StartServiceW,
+    SERVICE_NO_CHANGE, SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS, SERVICE_START, SERVICE_START_TYPE,
+    SERVICE_STATUS, SERVICE_STOP, SERVICE_STOPPED, SERVICE_STOP_PENDING, SERVICE_WIN32_OWN_PROCESS, StartServiceW,
 };
 // SERVICE_INTERACTIVE_PROCESS 位于 SystemServices（u32 位标志，非 ENUM_SERVICE_TYPE）
 use windows::Win32::System::SystemServices::SERVICE_INTERACTIVE_PROCESS;
@@ -358,6 +359,25 @@ pub(crate) fn install_from_config_path(config_path_str: &str) {
         }
     }
 
+    // service_account="virtual" → NT SERVICE\<服务名> 虚拟账户（免密码、权限最小化）；
+    // 其余值原样传递（含 LocalSystem 与自定义账户）
+    let virtual_account = if config.service_account.as_deref()
+        .map(|a| a.eq_ignore_ascii_case("virtual")).unwrap_or(false)
+    {
+        Some(format!("NT SERVICE\\{}", svc_name))
+    } else {
+        config.service_account.clone()
+    };
+
+    // gMSA 检测: 账户名以 $ 结尾（如 DOMAIN\svc-gmsa$）是组托管服务账户——
+    // 需域环境且不能配密码（SCM 自动取托管凭据），提前给出提示避免配置混淆
+    if let Some(account) = config.service_account.as_deref()
+        && account.trim().ends_with('$')
+        && !account.trim().eq_ignore_ascii_case("LocalSystem")
+    {
+        println!("{CLI_PREFIX}: Note: service_account ends with '$' (gMSA). Group Managed Service Accounts are resolved by the domain controller and must not use service_password.");
+    }
+
     match install_service_scm(&InstallServiceParams {
         service_name: &svc_name,
         display_name: &svc_display_name,
@@ -367,16 +387,33 @@ pub(crate) fn install_from_config_path(config_path_str: &str) {
         failure_reset_sec: failure_reset as u32,
         restart_delay_ms: restart_delay as u32,
         dependencies: config.service_dependencies.as_deref(),
-        service_account: config.service_account.as_deref(),
-        password: config.service_password.as_deref(),
+        service_account: virtual_account.as_deref(),
+        // 虚拟账户无密码；显式提供密码时仍透传（自定义账户场景）
+        password: if virtual_account.is_some() { None } else { config.service_password.as_deref() },
         delayed_auto_start: delayed_auto,
         interactive: config.interactive,
         failure_action: config.failure_action.as_deref(),
-        allow_service_logon: config.allow_service_logon,
+        // virtual 虚拟账户必须授予 SeServiceLogonRight（自动开启，免用户配置）
+        allow_service_logon: config.allow_service_logon || virtual_account.is_some(),
         security_descriptor: config.security_descriptor.as_deref(),
     }) {
-        Ok(()) => println!("{CLI_PREFIX}: {}",
-            if is_update { "Service updated successfully" } else { "Service registered successfully" }),
+        Ok(()) => {
+            // virtual 账户: 授权 NT SERVICE\<name> 遍历部署链（Osmium/svcs 仅 X 权限，
+            // 不可读其他服务目录）并读写自身部署目录（M）——目录 ACL 默认仅 SYSTEM/Admin；
+            // inplace 时部署目录 = exe 所在目录（logs/pid/metrics 写在那里）
+            if let Some(acct) = &virtual_account {
+                let target_dir = if inplace {
+                    Path::new(&own_exe).parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                } else {
+                    base_dir.to_string_lossy().to_string()
+                };
+                grant_virtual_account_access(acct, &target_dir);
+            }
+            println!("{CLI_PREFIX}: {}",
+                if is_update { "Service updated successfully" } else { "Service registered successfully" });
+        }
         Err(e) => {
             let _ = uninstall_service_scm(&svc_name);
             safe_delete_dir(&base_dir); // inplace 模式无部署目录，删除为空操作
@@ -706,6 +743,12 @@ pub(crate) fn has_download(config: &ServiceConfig) -> bool {
 
 pub fn load_config(path: impl AsRef<Path>) -> ServiceConfig {
     let path = path.as_ref();
+    // 配置大小上限（1MB）: 防超大 .osiml 解析 DoS（恶意/损坏配置撑爆内存）
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.len() > 1024 * 1024
+    {
+        panic!("{}", f("Config file '{0}' exceeds the 1 MB size limit", &[&path.display().to_string()]));
+    }
     let content = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("{}", f("Failed to parse config '{0}': {1}", &[&path.display().to_string(), &e.to_string()])));
     let mut config: ServiceConfig = toml::from_str(&content)
@@ -713,6 +756,75 @@ pub fn load_config(path: impl AsRef<Path>) -> ServiceConfig {
     // 部署配置的敏感字段为 DPAPI 密文，解析后统一解密
     decrypt_sensitive(&mut config);
     config
+}
+
+/// --check 预检: 校验配置合法性（不安装）——解析/服务名/保留名/路径存在性/可写性/下载目标；
+/// Ok(通过项列表) 或 Err(失败项列表)
+pub(crate) fn validate_config(config_path: &Path) -> Result<Vec<String>, Vec<String>> {
+    let mut ok_msgs = Vec::new();
+    let mut errors = Vec::new();
+    if !config_path.exists() {
+        return Err(vec![format!("Config file not found: {}", config_path.display())]);
+    }
+    let config = match std::panic::catch_unwind(|| load_config(config_path)) {
+        Ok(c) => c,
+        Err(p) => return Err(vec![panic_msg(&*p, "Unknown error")]),
+    };
+    ok_msgs.push(format!("Config parsed successfully ({})", config_path.display()));
+    if !is_valid_service_name(&config.service_name) {
+        errors.push(f(INVALID_NAME_MSG, &[&config.service_name]));
+    } else {
+        ok_msgs.push(format!("Service name '{}' is valid", config.service_name));
+    }
+    if is_refresher_reserved_name(&config.service_name) {
+        errors.push(f(RESERVED_NAME_MSG, &[&config.service_name]));
+    }
+    let svc_exe = std::fs::canonicalize(&config.service_executable_path)
+        .unwrap_or_else(|_| PathBuf::from(&config.service_executable_path));
+    let has_download = has_download(&config);
+    let rooted = Path::new(&config.service_executable_path).is_absolute()
+        || config.service_executable_path.starts_with('\\');
+    if !has_download && rooted && !svc_exe.exists() {
+        errors.push(format!("service_executable_path '{}' does not exist", config.service_executable_path));
+    } else {
+        ok_msgs.push("Executable path check passed".into());
+    }
+    // 可写性: exe 目录/工作目录/下载目标（与安装校验同源，防任意用户替换提权）
+    let mut unsafe_paths: Vec<String> = Vec::new();
+    if let Some(exe) = svc_exe.to_str() {
+        let exe_dir = Path::new(exe).parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if is_user_writable(&exe_dir) || is_user_writable(exe) {
+            unsafe_paths.push(exe.to_string());
+        }
+    }
+    if let Some(workdir) = config.working_directory.as_deref()
+        && !workdir.trim().is_empty()
+        && is_user_writable(workdir)
+    {
+        unsafe_paths.push(format!("working_directory '{workdir}'"));
+    }
+    if let Some(to) = config.download_to.as_deref()
+        && (Path::new(to).is_absolute() || to.starts_with('\\'))
+        && is_user_writable(to)
+    {
+        unsafe_paths.push(format!("download_to '{to}'"));
+    }
+    if let Some(list) = config.downloads.as_deref() {
+        for d in list {
+            let to = d.to.trim();
+            if (Path::new(to).is_absolute() || to.starts_with('\\')) && is_user_writable(to) {
+                unsafe_paths.push(format!("downloads[].to '{to}'"));
+            }
+        }
+    }
+    if unsafe_paths.is_empty() {
+        ok_msgs.push("Path writability check passed".into());
+    } else {
+        errors.push(format!("Paths writable by unprivileged users: {}", unsafe_paths.join(", ")));
+    }
+    if errors.is_empty() { Ok(ok_msgs) } else { Err(errors) }
 }
 
 /// 平台部署覆盖判定: toml 可解析时对比可执行路径/参数同源；toml 缺失/损坏时退回 ImagePath 归属判定，
@@ -808,7 +920,7 @@ fn is_registered(svc_name: &str) -> bool {
 
 /// 判定已注册服务是否为 inplace 原地注册: ImagePath 指向的 exe 文件名与服务名一致
 ///（inplace 注册要求 service_name == exe 文件名），且不在 svcs 平台部署目录内
-fn is_inplace_service(svc_name: &str) -> bool {
+pub(crate) fn is_inplace_service(svc_name: &str) -> bool {
     let Some(image) = get_service_image_path(svc_name) else { return false };
     let image = image.trim_matches('"');
     // 平台部署的 ImagePath 整行以 "宿主 -internal --run <name>" 结尾，file_name 恒不匹配服务名
@@ -839,7 +951,7 @@ pub(crate) fn strip_verbatim_prefix(path: &Path) -> PathBuf {
 
 /// 查询已注册服务的 ImagePath（未注册/查询失败返回 null），用于 inplace 来源冲突检测与身份判定。
 /// 直接读 SCM 服务注册表键并双视图查询（64/32 位），避免 QueryServiceConfig 的结构/缓冲问题
-fn get_service_image_path(service_name: &str) -> Option<String> {
+pub(crate) fn get_service_image_path(service_name: &str) -> Option<String> {
     let subkey = format!("SYSTEM\\CurrentControlSet\\Services\\{}", service_name);
     for flags in [
         REG_SAM_FLAGS(KEY_READ.0 | KEY_WOW64_64KEY.0),
@@ -1470,7 +1582,8 @@ enum SingleOutcome {
 fn build_agent(timeout_secs: u64, proxy: Option<&str>) -> ureq::Agent {
     let mut builder = ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(timeout_secs)));
+        .timeout_global(Some(Duration::from_secs(timeout_secs)))
+        .max_redirects(0); // 关闭自动重定向: 由 single_download 手动跟随并拒绝 https→http 降级
     if let Some(proxy_url) = proxy
         && let Ok(p) = ureq::Proxy::new(proxy_url)
     {
@@ -1536,36 +1649,66 @@ pub(crate) fn download_core(url: &str, tmp: &str, timeout_secs: u64,
 }
 
 /// 单线程完整下载（不支持 Range / 小文件 / 分块回退路径；可选 If-Modified-Since 头）;
-/// 服务器回 304 时返回 NotModified 且不写内容
+/// 服务器回 304 时返回 NotModified 且不写内容；手动跟随重定向（最多 10 次），
+/// 拒绝 https→http 降级（凭据经明文链路外泄/响应被篡改防护）
 fn single_download(client: &ureq::Agent, url: &str, file: &std::fs::File,
     auth: DownloadAuth<'_>, if_modified_since: Option<&str>) -> Result<SingleOutcome, (bool, String)> {
-    let mut req = client.get(url);
-    if let DownloadAuth::Basic(user, pass) = auth {
-        use base64::Engine as _;
-        let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
-        req = req.header("authorization", format!("Basic {token}"));
-    }
-    if let Some(date) = if_modified_since {
-        req = req.header("if-modified-since", date);
-    }
-    let resp = req.call().map_err(|e| (matches!(e, ureq::Error::Timeout(_)), e.to_string()))?;
-    if resp.status().as_u16() == 304 {
-        return Ok(SingleOutcome::NotModified);
-    }
-    if !resp.status().is_success() {
+    let mut current = url.to_string();
+    for _ in 0..10 {
+        let mut req = client.get(&current);
+        if let DownloadAuth::Basic(user, pass) = auth {
+            use base64::Engine as _;
+            let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+            req = req.header("authorization", format!("Basic {token}"));
+        }
+        if let Some(date) = if_modified_since {
+            req = req.header("if-modified-since", date);
+        }
+        let resp = req.call().map_err(|e| (matches!(e, ureq::Error::Timeout(_)), e.to_string()))?;
         let status = resp.status().as_u16();
-        // 401: 明确提示认证配置问题（Basic 凭据错误/未配置）
-        let hint = if status == 401 {
-            "server returned HTTP 401 Unauthorized — check download_username/download_password or server authentication requirements"
-        } else {
-            &format!("server returned HTTP {}", status)
-        };
-        return Err((false, hint.to_string()));
+        if status == 304 {
+            return Ok(SingleOutcome::NotModified);
+        }
+        // 手动跟随重定向（max_redirects=0 时返回 3xx 响应）: https→http 降级直接拒绝
+        if (300..400).contains(&status) {
+            let loc = resp.headers().get("location").and_then(|v| v.to_str().ok()).map(str::to_string);
+            let Some(loc) = loc else {
+                return Err((false, format!("redirect without Location header (HTTP {status})")));
+            };
+            let next = resolve_redirect_url(&current, &loc);
+            if current.starts_with("https://") && next.starts_with("http://") {
+                return Err((false, format!("insecure redirect refused: {current} -> {next}")));
+            }
+            current = next;
+            continue;
+        }
+        if status == 304 {
+            return Ok(SingleOutcome::NotModified);
+        }
+        if !resp.status().is_success() {
+            // 401: 明确提示认证配置问题（Basic 凭据错误/未配置）
+            let hint = if status == 401 {
+                "server returned HTTP 401 Unauthorized — check download_username/download_password or server authentication requirements"
+            } else {
+                &format!("server returned HTTP {}", status)
+            };
+            return Err((false, hint.to_string()));
+        }
+        let mut reader = resp.into_body().into_reader();
+        let mut out = file.try_clone().map_err(|e| (false, e.to_string()))?;
+        std::io::copy(&mut reader, &mut out).map_err(|e| (false, e.to_string()))?;
+        return Ok(SingleOutcome::Downloaded);
     }
-    let mut reader = resp.into_body().into_reader();
-    let mut out = file.try_clone().map_err(|e| (false, e.to_string()))?;
-    std::io::copy(&mut reader, &mut out).map_err(|e| (false, e.to_string()))?;
-    Ok(SingleOutcome::Downloaded)
+    Err((false, "too many redirects (10)".to_string()))
+}
+
+/// 解析重定向 Location（相对/绝对）: 基于当前 URL 做 RFC 3986 解析
+pub(crate) fn resolve_redirect_url(current: &str, location: &str) -> String {
+    url::Url::parse(current)
+        .ok()
+        .and_then(|base| base.join(location).ok())
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| location.to_string())
 }
 
 /// 按 CHUNK_SIZE 分块并发下载到预分配文件（各块独立线程，Windows seek_write 按偏移写）
@@ -1910,15 +2053,38 @@ fn grant_service_logon_right(account: &str) {
     }
 }
 
+/// virtual 账户部署目录授权: NT SERVICE\<name> 需遍历 ProgramData\Osmium 与 svcs
+/// （仅 X 权限，不可读其他服务目录的 osiml）并读写自身部署目录（M）；
+/// 失败仅告警（安装继续，服务启动时若仍缺权限由日志体现）
+fn grant_virtual_account_access(account: &str, base_dir: &str) {
+    let osmium_dir = registry_dir().parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let svcs_dir = registry_dir().to_string_lossy().to_string();
+    let dirs: [(&str, &str); 3] = [
+        (&osmium_dir, "(OI)(CI)X"),
+        (&svcs_dir, "(OI)(CI)X"),
+        (base_dir, "(OI)(CI)M"),
+    ];
+    for (dir, perm) in dirs {
+        if dir.is_empty() {
+            continue;
+        }
+        let _ = process::Command::new("icacls.exe")
+            .args([dir, "/grant", &format!("{account}:{perm}"), "/q"])
+            .output();
+    }
+}
+
 /// 配置故障恢复: 按 failure_action 选择动作序列（restart 默认/reboot/none）
 fn set_failure_actions(svc: SC_HANDLE, reset_sec: u32, delay_ms: u32,
     failure_action: Option<&str>) -> Result<(), String> {
     unsafe {
         use windows::Win32::System::Services::SC_ACTION;
         let action_kind = match failure_action.map(|s| s.to_lowercase()).as_deref() {
-            Some("reboot") => windows::Win32::System::Services::SC_ACTION_REBOOT,
+            Some("reboot") => SC_ACTION_REBOOT,
             Some("none") => windows::Win32::System::Services::SC_ACTION_NONE,
-            _ => windows::Win32::System::Services::SC_ACTION_RESTART,
+            _ => SC_ACTION_RESTART,
         };
         let actions = [
             SC_ACTION { Type: action_kind, Delay: delay_ms },
@@ -2001,7 +2167,7 @@ fn wait_service_deleted(service_name: &str) {
     }
 }
 
-fn start_service(service_name: &str, timeout: Duration) -> Result<(), String> {
+pub(crate) fn start_service(service_name: &str, timeout: Duration) -> Result<(), String> {
     let status = get_status_raw(service_name)?;
     if status.dwCurrentState == windows::Win32::System::Services::SERVICE_RUNNING {
         return Ok(());
@@ -2037,26 +2203,29 @@ fn start_service(service_name: &str, timeout: Duration) -> Result<(), String> {
     }
 }
 
-fn stop_service(service_name: &str, timeout: Duration) -> Result<(), String> {
+pub(crate) fn stop_service(service_name: &str, timeout: Duration) -> Result<(), String> {
     let status = get_status_raw(service_name)?;
     if status.dwCurrentState == SERVICE_STOPPED {
         return Ok(());
     }
+    // 正在停止中（STOP_PENDING，如故障恢复/前一次停止尚未完成）: 跳过 ControlService，
+    // 直接进入等待循环（对停止中的服务再发 STOP 会被 SCM 拒绝 ERROR_SERVICE_CANNOT_ACCEPT_CTRL）
+    if status.dwCurrentState != SERVICE_STOP_PENDING {
+        unsafe {
+            let name_wide = to_wide(service_name);
+            let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
+                .map_err(|e| format!("{}: {e}", "Failed to open service control manager"))?;
+            let svc = OpenServiceW(scm, PCWSTR::from_raw(name_wide.as_ptr()), SERVICE_STOP)
+                .map_err(|e| format!("{}: {e}", "Failed to open service"))?;
 
-    unsafe {
-        let name_wide = to_wide(service_name);
-        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
-            .map_err(|e| format!("{}: {e}", "Failed to open service control manager"))?;
-        let svc = OpenServiceW(scm, PCWSTR::from_raw(name_wide.as_ptr()), SERVICE_STOP)
-            .map_err(|e| format!("{}: {e}", "Failed to open service"))?;
+            let mut svc_status = SERVICE_STATUS::default();
+            let result = ControlService(svc, SERVICE_CONTROL_STOP, &mut svc_status);
+            let _ = CloseServiceHandle(svc);
+            let _ = CloseServiceHandle(scm);
 
-        let mut svc_status = SERVICE_STATUS::default();
-        let result = ControlService(svc, SERVICE_CONTROL_STOP, &mut svc_status);
-        let _ = CloseServiceHandle(svc);
-        let _ = CloseServiceHandle(scm);
-
-        if result.is_err() {
-            return Err("Failed to stop service".into());
+            if result.is_err() {
+                return Err("Failed to stop service".into());
+            }
         }
     }
 
@@ -2086,12 +2255,114 @@ pub(crate) fn get_status(service_name: &str) -> Result<String, String> {
         windows::Win32::System::Services::SERVICE_RUNNING => Ok("Running".into()),
         SERVICE_STOPPED => Ok("Stopped".into()),
         windows::Win32::System::Services::SERVICE_START_PENDING => Ok("Start Pending".into()),
-        windows::Win32::System::Services::SERVICE_STOP_PENDING => Ok("Stop Pending".into()),
+        SERVICE_STOP_PENDING => Ok("Stop Pending".into()),
         windows::Win32::System::Services::SERVICE_PAUSED => Ok("Paused".into()),
         windows::Win32::System::Services::SERVICE_PAUSE_PENDING => Ok("Pause Pending".into()),
         windows::Win32::System::Services::SERVICE_CONTINUE_PENDING => Ok("Continue Pending".into()),
         _ => Ok(format!("Unknown ({:?})", status.dwCurrentState)),
     }
+}
+
+/// 服务注册属性详情（--status 增强用）: 启动类型/运行账户/故障恢复动作序列/重置周期
+pub(crate) fn query_service_details(service_name: &str) -> Result<Vec<(String, String)>, String> {
+    unsafe {
+        let name_wide = to_wide(service_name);
+        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
+            .map_err(|e| format!("{}: {e}", "Failed to open service control manager"))?;
+        let svc = OpenServiceW(scm, PCWSTR::from_raw(name_wide.as_ptr()), SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG)
+            .map_err(|e| {
+                let _ = CloseServiceHandle(scm);
+                format!("{}: {e}", "Failed to open service")
+            })?;
+        let result = (|| -> Result<Vec<(String, String)>, String> {
+            let mut details = Vec::new();
+            // QueryServiceConfigW: 启动类型 + 运行账户（两次调用: 先取所需大小再填充）
+            let mut needed = 0u32;
+            let _ = QueryServiceConfigW(svc, None, 0, &mut needed);
+            if needed == 0 {
+                return Err("Failed to query service config".into());
+            }
+            let mut buf = vec![0u8; needed as usize];
+            QueryServiceConfigW(svc, Some(buf.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW), needed, &mut needed)
+                .map_err(|e| format!("Failed to query service config: {e}"))?;
+            let config = &*(buf.as_ptr() as *const QUERY_SERVICE_CONFIGW);
+            let start_type = match config.dwStartType {
+                SERVICE_AUTO_START => "Automatic",
+                SERVICE_DEMAND_START => "Manual",
+                SERVICE_DISABLED => "Disabled",
+                _ => "Unknown",
+            };
+            details.push(("Start type".to_string(), start_type.to_string()));
+            // 延迟启动标志（SERVICE_CONFIG_DELAYED_AUTO_START_INFO 独立查询）
+            if config.dwStartType == SERVICE_AUTO_START {
+                let mut needed_d = 0u32;
+                let _ = QueryServiceConfig2W(svc, SERVICE_CONFIG_DELAYED_AUTO_START_INFO, None, &mut needed_d);
+                if needed_d > 0 {
+                    let mut buf_d = vec![0u8; needed_d as usize];
+                    if QueryServiceConfig2W(svc, SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
+                        Some(&mut buf_d), &mut needed_d).is_ok()
+                    {
+                        let info = &*(buf_d.as_ptr() as *const SERVICE_DELAYED_AUTO_START_INFO);
+                        if info.fDelayedAutostart.as_bool() {
+                            details.push(("Start type".to_string(), "Automatic (Delayed)".to_string()));
+                        }
+                    }
+                }
+            }
+            let account = if config.lpServiceStartName.is_null() {
+                String::new()
+            } else {
+                String::from_utf16_lossy(std::slice::from_raw_parts(
+                    config.lpServiceStartName.0, wcs_len(config.lpServiceStartName)))
+            };
+            details.push(("Run as".to_string(), account));
+            // QueryServiceConfig2W: 故障恢复动作序列 + 重置周期
+            let mut needed2 = 0u32;
+            let _ = QueryServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, None, &mut needed2);
+            if needed2 > 0 {
+                let mut buf2 = vec![0u8; needed2 as usize];
+                if QueryServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS,
+                    Some(&mut buf2), &mut needed2).is_ok()
+                {
+                    let fa = &*(buf2.as_ptr() as *const SERVICE_FAILURE_ACTIONSW);
+                    if !fa.lpsaActions.is_null() && fa.cActions > 0 {
+                        let seq: Vec<String> = std::slice::from_raw_parts(fa.lpsaActions, fa.cActions as usize)
+                            .iter().map(|a| {
+                                let name = match a.Type {
+                                    SC_ACTION_RESTART => "restart",
+                                    SC_ACTION_REBOOT => "reboot",
+                                    _ => "none",
+                                };
+                                if a.Delay > 0 {
+                                    format!("{name}({}s)", a.Delay / 1000)
+                                } else {
+                                    name.to_string()
+                                }
+                            }).collect();
+                        details.push(("Failure actions".to_string(), seq.join(", ")));
+                    }
+                    if fa.dwResetPeriod > 0 {
+                        details.push(("Failure reset".to_string(), format!("{}s", fa.dwResetPeriod)));
+                    }
+                }
+            }
+            Ok(details)
+        })();
+        let _ = CloseServiceHandle(svc);
+        let _ = CloseServiceHandle(scm);
+        result
+    }
+}
+
+/// 宽字符串长度（以 null 结尾，wcslen 等价）
+fn wcs_len(ptr: PWSTR) -> usize {
+    let mut len = 0usize;
+    unsafe {
+        while *ptr.0.add(len) != 0 {
+            len += 1;
+        }
+    }
+    len
 }
 
 fn get_status_raw(service_name: &str) -> Result<SERVICE_STATUS, String> {
@@ -2128,6 +2399,13 @@ static STOP_FLAG: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
 /// 是否启用 SCM preshutdown 通知（由宿主导入，scm_status_params 读取后决定上报 SERVICE_ACCEPT_PRESHUTDOWN）
 static PRESHUTDOWN_ENABLED: AtomicBool = AtomicBool::new(false);
+/// 是否仅执行带有效 Authenticode 签名的插件（require_signed_plugins 配置，宿主运行时导入）
+static REQUIRE_SIGNED_PLUGINS: AtomicBool = AtomicBool::new(false);
+
+/// 是否已收到 SCM 停止/关机信号（故障恢复 delay 分段等待期间轮询，保证管理员可随时停止服务）
+pub(crate) fn scm_stop_requested() -> bool {
+    STOP_FLAG.load(Ordering::SeqCst) || SHUTDOWN_FLAG.load(Ordering::SeqCst)
+}
 /// SCM 状态上报 dwWaitHint（毫秒），默认 1 小时（覆盖 prestart 钩子 60s 与启动前下载 300s）
 static SCM_WAIT_HINT_MS: AtomicU32 = AtomicU32::new(3_600_000);
 /// 宿主主循环 SCM 信号轮询间隔（毫秒）
@@ -2136,6 +2414,16 @@ static SCM_SLEEP_TIME_MS: AtomicU32 = AtomicU32::new(500);
 /// 开关 SCM preshutdown 通知（host 在 on_start 读取配置后调用）
 pub(crate) fn set_preshutdown_enabled(enabled: bool) {
     PRESHUTDOWN_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+/// 是否要求插件带有效 Authenticode 签名（require_signed_plugins 配置，host 在 on_start 读取后调用）
+pub(crate) fn require_signed_plugins() -> bool {
+    REQUIRE_SIGNED_PLUGINS.load(Ordering::SeqCst)
+}
+
+/// 开关插件签名强制（host 在 on_start 读取配置后调用）
+pub(crate) fn set_require_signed_plugins(enabled: bool) {
+    REQUIRE_SIGNED_PLUGINS.store(enabled, Ordering::SeqCst);
 }
 
 /// 设置 SCM 状态上报 dwWaitHint（host 在 on_start 读取配置后调用）

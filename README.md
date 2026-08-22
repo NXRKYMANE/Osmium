@@ -25,14 +25,14 @@ Osmium is written in modern Rust (edition 2024) and compiles into a standalone `
 | Item        | Detail                                                                         |
 | --- | --- |
 | Language    | Rust 2024                                                                      |
-| Artifacts   | `Publish\osmium64.exe` `Publish\osmium64-official-kits.osx`                                    |
+| Artifacts   | `Publish\osmium64.exe` `Publish\exts\osmium64-official-kits-v<VERSION>.osx` (the plugin filename carries the version to distinguish releases; after installation the suffix is dropped and it stays `osmium64-official-kits.osx` — the host only cares about `.osx` + kit name, not the filename, so upgrade overwrites never break calls) |
 | Size        | `osmium64.exe` ~3.6 MB, `osmium64-official-kits.osx` ~1.9 MB (size-first compile, opt-level=z) |
 | UPX build   | `Publish\osmium64-upx.exe` (~1.1 MB)                                                 |
 | Installer   | `osmium-win-x64-setup-v<VERSION>.exe` (non-UPX build)                          |
 | Build tools | Rust stable + MSVC                                                             |
 
 > Don't want the platform framework? Embedding into your own project? I'd recommend the UPX build (`osmium64-upx.exe`) — tiny, extensible and very lightweight, and cold start is barely different from the original.
-> Missing a feature? The project is plugin-everything: write your own plugin in any language and place it under the executable (e.g. `exts\` on platform installs) — see the [Extension Guide](Docs/EXTENSION_EN.md) for full plugin development and usage; a green dot on `os --extend` means your plugin is usable.
+> Missing a feature? The project is plugin-everything: write your own plugin in any language and place it under the executable (e.g. `exts\` on platform installs) — see the [Extension Guide](#plugin-system) for full plugin development and usage; a green dot on `os --extend` means your plugin is usable.
 
 > Note: platform deployment needs the framework installed via the installer; all lifecycle, logging and service management are done by the core program os.exe. Without it, services cannot start — reinstalling the framework restores everything.
 > Relying on the framework keeps your own project and config simpler; if you're unsure or the project is important, use the embedded approach — plugins can be swapped freely and all operations and logs stay inside your project.
@@ -69,17 +69,20 @@ os --list
 | `--stop <name>`                            | Stop a service                                                                                                                                 |
 | `--restart <name>`                         | Restart a service                                                                                                                              |
 | `--refresh <name>`                         | Refresh SCM service properties (display name / description / start type / account / recovery, etc.) from the deployed config without reinstalling |
+| `--reload <name>`                          | Hot-reload the deployed config and gracefully restart the child (independent of `auto_refresh`; short alias `--rld`)                                 |
+| `--export <name> <dest dir>`               | Export the deployed config (`svcs\<name>\<name>.osiml`) to a directory for migration/backup (short alias `--exp`)                                  |
+| `--import <config.osiml>`                  | Import a deployed config and re-register the service (same as `--install`, for restoring from an export; short alias `--imp`)                     |
 | `--kill <name>`                            | Admin/dev tool: force-kill the service's target process tree (via `WINSGF_SERVICE_ID`; short alias `--kil`)                                          |
-| `--status <name>`                          | Query service status                                                                                                                           |
+| `--status <name>`                          | Query service status + registration details (start type / account / failure actions) + child process PIDs                                          |
 | `--delete <name>`                          | Force delete (stop + uninstall)                                                                                                                |
 | `--list`                                   | List all platform-deployed services (excludes inplace embedded services)                                                                       |
-| `--extend`                                 | List installed plugins with availability check (green dot / red dot; short alias `--ext`; plugin dev: [Extension Guide](Docs/EXTENSION_EN.md)) |
+| `--extend`                                 | List installed plugins with availability check (green dot / red dot; short alias `--ext`; plugin dev: [Extension Guide](#plugin-system)) |
 | `--test <config>`                          | Run the service in a foreground console without installing (debug only; deploy dir = config dir, `%BASE%` points there; short alias `--tst`)   |
 | `help` / `-h` / `--help`                   | Print help text                                                                                                                                |
 
 > Management commands are equivalent to the legacy `-m --xxx` form (the prefix is optional); after a framework install you can use the `os` shortcut alias instead of `os.exe`.
 
-> Every command has a short alias: `--ins` / `--uin` / `--str` / `--stp` / `--rst` / `--rfs` / `--kil` / `--sts` / `--del` / `--lst` / `--tst` / `--ext` (install / uninstall / start / stop / restart / refresh / kill / status / delete / list / test / extend).
+> Every command has a short alias: `--ins` / `--uin` / `--str` / `--stp` / `--rst` / `--rfs` / `--rld` / `--kil` / `--sts` / `--del` / `--lst` / `--tst` / `--ext` / `--exp` / `--imp` (install / uninstall / start / stop / restart / refresh / reload / kill / status / delete / list / test / extend / export / import). Batch commands `--start-all` / `--stop-all` / `--restart-all` can be shortened to `--stra` / `--stpa` / `--rsta`.
 
 > The service name `Osmium Service Refresher` is reserved; service names are validated: empty names, `.` / `..` (path traversal), path separators and control characters are rejected, length capped at 256.
 
@@ -111,6 +114,9 @@ service_executable_path = 'C:\app\myapp.exe'
 | `env`                     | object | none          | Environment variables injected into the target process (values support `%VAR%` expansion; `%BASE%` means the deploy directory). The host also auto-injects `BASE` (deploy directory) and `WINSGF_SERVICE_ID` (service name, used by RunawayProcessKiller anti-miskill checks) — an explicit user `env` value for `BASE` wins over the default |
 | `working_directory`       | string | exe dir       | Working directory for the target process; relative paths resolve against the service directory                                                                                                                                                                                                                                                |
 | `process_priority`        | string | `normal`      | Target process priority: `idle` / `belownormal` / `normal` / `abovenormal` / `high` / `realtime`                                                                                                                                                                                                                                              |
+| `process_affinity`        | string | none          | Target process CPU affinity: core list like `"0,1,2"` (out-of-range cores ignored, empty mask not applied, clamped to the system core count)                                                                                                                                                                                                   |
+| `io_priority`             | string | `normal`      | Target process I/O priority: `idle` / `low` / `normal` / `high` (ThreadIoPriority, Windows 8+)                                                                                                                                                                                                                                                 |
+| `job_object`              | bool   | `true`        | Place the child in a Job Object (`KILL_ON_JOB_CLOSE`): if the host dies abnormally (including crashes) the whole child process tree is terminated by the system — no orphan processes. Normal shutdown still uses graceful stop                                                                                                                   |
 
 **Config-wide expansion**: `%VAR%` environment variables and the special `%BASE%` (the service deploy/config directory) are expanded across the whole config — `service_executable_path`, `service_executable_args`, `start_arguments`, `working_directory`, `download_url`, `download_to`, `stop_executable`, `stop_arguments`, `log_dir`, `runaway_pid_file`, shared mapper paths, and `env` values (WinSW-compatible). Hook commands are shell commands and are not expanded. `%PID%` is a reserved placeholder: config expansion leaves it untouched, and it is replaced with the target process PID only when running the stop command (WinSW #217).
 
@@ -133,11 +139,12 @@ service_executable_path = 'C:\app\myapp.exe'
 | `hide_window`               | bool   | `true`    | Launch the target with `CreateNoWindow`; set `false` to let it create a console window (WinSW `hidewindow`)                                                                                                                                                                                                                        |
 | `stop_parent_process_first` | bool   | `false`   | When force-killing, terminate the parent before its subtree (WinSW `stopparentprocessfirst`)                                                                                                                                                                                                                                       |
 | `allow_service_logon`       | bool   | `false`   | When a custom service account is used, automatically grant it the "Log on as a service" right                                                                                                                                                                                                                                      |
-| `event_log`                 | bool   | `false`   | Also write to the Windows Event Log (informational level, source `Osmium`)                                                                                                                                                                                                                                                         |
+| `event_log`                 | bool   | `false`   | Also write to the Windows Event Log (source `Osmium`; structured event IDs: 1000 start / 1001 stop / 1002 crash / 1003 download failure / 1004 config error)                                                                                    |
 | `security_descriptor`       | string | none      | Service security descriptor (SDDL) applied to the service DACL at install — controls who can manage the service (WinSW `securityDescriptor`)                                                                                                                                                                                       |
 | `preshutdown`               | bool   | `false`   | Advertise `SERVICE_ACCEPT_PRESHUTDOWN` so the SCM grants extra time for graceful shutdown                                                                                                                                                                                                                                          |
 | `extensions`                | array  | none      | Extra lifecycle extension commands: `[{ phase = "start", command = "...", stdout_path?, stderr_path? }]` — `start` runs before launch, `start_after` after launch, `stop_before` before stop, `stop` after stop; failures are non-fatal. `stdout_path` / `stderr_path` redirect the hook output to standalone files                |
-| `plugins`                   | array  | none      | Lifecycle plugin calls (`.osx` plugins next to the executable): `[{ kit, phase, payload?, fail_on_error? }]` — see the [Extension Guide](Docs/EXTENSION_EN.md)                                                                                                                                                                                              |
+| `plugins`                   | array  | none      | Lifecycle plugin calls (`.osx` plugins next to the executable): `[{ kit, phase, payload?, fail_on_error? }]` — see the [Extension Guide](#plugin-system)                                                                                                                                                                                              |
+| `require_signed_plugins`    | bool   | `false`   | Only execute plugins with a valid Authenticode signature (WinVerifyTrust); unsigned/invalid-signature plugins are refused (default false keeps ACL-based trust only)                                                                                                                                                                                   |
 
 ### Advanced — Resource Monitor & Network Mapping
 
@@ -150,6 +157,17 @@ service_executable_path = 'C:\app\myapp.exe'
 | `runaway_stop_timeout_ms`     | int    | `5000`  | Graceful-stop timeout for the leftover process during startup cleanup, then force-kill                                                                                                                                                                                                             |
 | `runaway_stop_parent_first`   | bool   | `false` | During startup cleanup, kill the parent process before its children                                                                                                                                                                                                                                |
 | `shared_directory_mappers`    | array  | none    | SharedDirectoryMapper: map network shares at service start and disconnect at stop: `[{ local_path = "Z:", remote_path = "\\\\server\\share", username?, password? }]`                                                                                                                              |
+| `health_check_url`            | string | none    | HTTP health check: while the child runs, poll this URL; after consecutive failures the child is treated as crashed and the failure-recovery flow runs (restart/alerts)                                                                                                                          |
+| `health_check_interval_secs`  | int    | `30`    | Health-check polling interval in seconds                                                                                                                                                                                                                                                          |
+| `health_check_timeout_secs`   | int    | `5`     | Health-check request timeout in seconds                                                                                                                                                                                                                                                           |
+| `health_check_failures`       | int    | `3`     | Consecutive failures that count as a crash                                                                                                                                                                                                                                                        |
+| `health_check_expected_status`| int    | `200`   | Expected HTTP status code (anything else counts as failure)                                                                                                                                                                                                                                      |
+
+### Advanced — Scheduled Tasks
+
+| Field        | Type  | Default | Description                                                                                                                                  |
+| --- | --- | --- | --- |
+| `schedules`  | array | none    | Scheduled tasks: `[{ every_secs?, daily_at?, action?, command? }]` — `every_secs` (fixed interval) and `daily_at` (`"HH:mm:ss"`, daily at) are mutually exclusive; `action`: `restart` (restart the child, default) / `reload` (hot-reload the config) / `hook` (run `command`, cmd /c semantics) |
 
 ### Advanced — Efficiency Mode (EcoQoS)
 
@@ -177,6 +195,8 @@ service_executable_path = 'C:\app\myapp.exe'
 | `download_unzip`         | bool   | `false`        | Auto-extract the downloaded file when it is a zip (zip-slip traversal is blocked)                                                                                                                                                                                                                                                                                           |
 | `download_stage`         | string | `before_start` | When the download runs: `before_start` (ensure the executable before launch), `after_start` (extra resource after the target launches), `after_stop` (extra resource after stop). Only `before_start` participates in startup executability checks                                                                                                                          |
 | `download_threads`       | int    | `16`           | Max chunked-download thread count; `0`/`1` disables multi-threading (single-threaded fallback)                                                                                                                                                                                                                                                                              |
+| `download_retries`       | int    | `2`            | Download retry count with exponential backoff (still fails after all retries); `0` disables retries                                                                                                                                                                                                                                                                         |
+| `download_retry_backoff_ms` | int  | `2000`         | Exponential backoff base in ms (2s/4s/8s...), only used when `download_retries > 0`                                                                                                                                                                                                                                                                                          |
 | `downloads`              | array  | none           | Multiple download entries (WinSW `download` list): `[{ from, to, sha256?, fail_on_error?, auth?, username?, password?, unsecure_auth?, proxy?, unzip?, stage? }]` — omitted fields fall back to the top-level `download_*` values; when configured, the array takes precedence over the single `download_url` entry and the executable path stays `service_executable_path` |
 | `download_unsecure_auth` | bool   | `false`        | Explicitly allow `basic` authentication over plain `http://` (WinSW `unsecureAuth`); default refuses because credentials would be sent in cleartext                                                                                                                                                                                                                         |
 
@@ -285,7 +305,7 @@ LOG_LEVEL = "info"
 phase = "start"
 command = 'echo start >> C:\app\hook.log'
 
-# Lifecycle plugin calls (kit/phase/payload/fail_on_error — see Docs\EXTENSION_EN.md)
+# Lifecycle plugin calls (kit/phase/payload/fail_on_error — see [Plugin System](#plugin-system))
 # [[plugins]]
 # kit = "backup"
 # phase = "start_after"
@@ -295,6 +315,25 @@ command = 'echo start >> C:\app\hook.log'
 # Resource monitor: kill the child when memory exceeds 512 MB (RunawayProcessKiller)
 runaway_memory_limit_mb = 512
 runaway_check_interval_secs = 30
+
+# HTTP health check: 3 consecutive non-200 responses count as a crash and restart (polled every 30s)
+health_check_url = "http://127.0.0.1:8080/health"
+health_check_interval_secs = 30
+health_check_failures = 3
+
+# Download retries with exponential backoff (2s/4s/8s)
+download_retries = 2
+download_retry_backoff_ms = 2000
+
+# Scheduled tasks: restart the child daily at 03:00; run a maintenance hook every hour
+[[schedules]]
+daily_at = "03:00"
+action = "restart"
+
+[[schedules]]
+every_secs = 3600
+action = "hook"
+command = 'echo scheduled tick >> C:\app\schedule.log'
 
 # Map a network share at start, disconnect at stop (SharedDirectoryMapper)
 # [[shared_directory_mappers]]
@@ -413,6 +452,474 @@ The installer automatically registers a **Service Refresher** (`Osmium Service R
 
 > The Service Refresher runs at the next boot; the installer also restarts previously stopped services immediately after install.
 
+## Plugin System
+
+Osmium is plugin-everything: official advanced features and third-party extensions are all standalone executables (`.osx`) placed under the executable's directory (the platform installer uses `exts\`), launched by the host on demand. How plugins work, the protocol, and how to write one — it's all here.
+
+## What a Plugin Is
+
+- A plugin is just an ordinary program with its extension renamed to `.osx` (e.g. `osmium-kit.exe` → `osmium64-official-kits.osx`)
+- Plugins live anywhere under the host exe's directory — the host recursively discovers every `.osx` (skipping dot-hidden folders), so standalone deployments can put plugins directly next to the exe; the platform installer still ships the official kit to `%ProgramFiles%\Osmium\exts\`
+- At startup the host recursively scans every `.osx` under the executable's directory and dispatches requests by the `kit` field
+- **Plugins are not resident**: each call launches a fresh process, which handles one request and exits
+
+### The File Name Doesn't Matter (Renaming Doesn't Break Calls)
+
+The host does **not** identify plugins by file name — it only cares about three things: the `kit` capability name, the `.osx` extension, and discoverability under the executable's directory. So renaming the official plugin (`osmium64-official-kits.osx`) to any other name (e.g. `my-tools.osx`, `whatever.osx`) keeps every feature working, as long as those three hold:
+
+- Host built-in config fields keep working: `download_auth = "sspi"`, `download_unzip = true`, `shared_directory_mappers`, `failure_action = "reboot"` — they call the kit names (`sspi`/`unzip`/`netmap`/`reboot`), which have nothing to do with file names
+- A `kit` declared in a `[[plugins]]` block still matches
+- `--extend` still lists it (just showing the new file name)
+
+The call chain looks like this:
+
+```
+run_plugin("sspi", ...)        # the host only cares about the kit name
+  → discover_plugins()         # scans *.osx under the executable — no name matching, collects all
+  → broadcast {"kit":"sspi"}   # the request carries the capability name, not a file name
+  → the plugin claims it       # internal dispatch by the kit field — recognize and run
+  → first ok wins
+```
+
+Because it resolves capabilities instead of files, you get:
+
+- **Free renaming**: swap plugin names, versions, or upgrades — the host and config need zero changes
+- **Multiple plugins coexist**: the official plugin and any number of third-party plugins can live in `exts\` side by side without interference
+- **Multiple implementations of one capability**: when several plugins respond to the same kit, the host takes the first success in discovery order
+- **One file, many capabilities**: the official plugin responds to eight kits (`ping`/`sspi`/`netmap`/`unzip`/`reboot`/`notify`/`smtp`/`syslog`) from a single file
+
+The only things to watch:
+
+1. The extension must stay `.osx` (renaming to `.exe` or similar means `discover_plugins` can't find it)
+2. It must be discoverable under the host exe's directory (any depth; dot-hidden folders are skipped)
+3. The plugin's internal kit dispatch must not change (e.g. if you rename the `sspi` dispatch inside the plugin, a config writing `sspi` can't hit it anymore — only in that case do you need to update the config too)
+4. With `require_signed_plugins = true`, plugins must also carry a valid Authenticode signature (verified via WinVerifyTrust); unsigned or invalid-signature plugins are refused (`--extend` shows a red dot) — for deployments with strict plugin origin requirements
+
+### Checking Whether a Plugin Is Usable
+
+```powershell
+os --extend
+# or the short alias
+os --ext
+```
+
+Prints each plugin's status: **green dot ●** = usable, **red dot ●** = unusable (untrusted ACL / protocol not responding / broken).
+
+## Official Plugin osmium64-official-kits.osx
+
+The official plugin ships with the installer (component page "Official extension kit", unchecked by default — tick it to get it), with these built-in capabilities:
+
+| kit      | Feature                                                                       | Host built-in config field (easier) |
+| --- | --- | --- |
+| `ping`   | Availability probe (used by the host's `--extend` self-check)                 | nothing to configure                |
+| `sspi`   | Windows integrated-auth download (Negotiate/NTLM/Kerberos 401 challenge loop) | `download_auth = "sspi"`            |
+| `netmap` | Network share mapping / disconnecting                                         | `shared_directory_mappers`          |
+| `unzip`  | zip extraction (zip-slip traversal blocked)                                   | `download_unzip = true`             |
+| `reboot` | System reboot (failure-recovery action)                                       | `failure_action = "reboot"`         |
+| `notify` | Webhook notification: POST JSON to a URL (service-event push)                 | via `[[plugins]]`                   |
+| `smtp`   | SMTP email alerts (optional AUTH PLAIN, single message)                       | via `[[plugins]]`                   |
+| `syslog` | Syslog alerts (UDP RFC 5424, configurable facility/severity)                  | via `[[plugins]]`                   |
+
+### Two Ways to Use Official Features
+
+1. **Host built-in fields** (easiest): unzip, share mapping, reboot and sspi download all have ready-made config fields — the host calls the matching plugin automatically:
+
+```toml
+# sspi-authenticated download (done via the osmium-kit-sspi plugin)
+download_url = "https://server/app.exe"
+download_auth = "sspi"
+
+# auto-extract downloaded zip (via the unzip plugin)
+download_unzip = true
+
+# map shares at start, disconnect at stop (via the netmap plugin)
+[[shared_directory_mappers]]
+local_path = "Z:"
+remote_path = '\\server\share'
+
+# reboot the system after a crash (via the reboot plugin)
+failure_action = "reboot"
+```
+
+2. **`plugins` config-driven calls** (generic channel — third-party plugins use this too): declare lifecycle calls in the service config:
+
+```toml
+[[plugins]]
+kit = "backup"              # plugin capability id (the kit field of the plugin request JSON)
+phase = "start_after"       # start / start_after / stop_before / stop
+payload = { mode = "full" } # optional args, merged into the request JSON and passed to the plugin
+fail_on_error = false       # optional; true blocks startup when the plugin fails in the start phase
+```
+
+Alert-channel examples (notify on crash):
+
+```toml
+# Webhook notification (kit=notify): POST {"text": ...} to the URL
+[[plugins]]
+kit = "notify"
+phase = "crash"
+payload = { url = "https://hooks.example.com/osmium", timeout_secs = 10 }
+
+# SMTP email alert (kit=smtp): server host:port, optional username/password (AUTH PLAIN)
+[[plugins]]
+kit = "smtp"
+phase = "crash"
+payload = { host = "mail.example.com:25", from = "alerts@example.com", to = "ops@example.com", subject = "[Osmium] service crashed" }
+
+# Syslog alert (kit=syslog): UDP RFC 5424, configurable facility/severity (default daemon/notice)
+[[plugins]]
+kit = "syslog"
+phase = "crash"
+payload = { host = "192.168.1.10:514", facility = 3, severity = 2, tag = "MyService" }
+```
+
+> Alert plugins (crash phase) automatically receive injected `service_name` / `exit_code` / `failures` fields — use them in `text`/message or provide an explicit `text` (user payload wins).
+
+## Plugin Protocol
+
+All plugins share one protocol, independent of language (Rust / C / Go / Python packaging all work):
+
+| Item        | Rule                                                                                                        |
+| --- | --- |
+| Invocation  | the host spawns the plugin process (no command-line args, `CREATE_NO_WINDOW`)                               |
+| Input       | one line of JSON on stdin, with the `kit` field (injected by the host) + business fields                    |
+| Output      | one line of JSON on stdout: `{"ok": true}` or `{"ok": false, "error": "..."}`                               |
+| Exit code   | 0 = success, non-zero = failure (double-checked with the ok field)                                          |
+| stderr      | human-readable error info (does not pollute the protocol; discarded by the host)                            |
+| Empty input | exits silently (double-click scenario produces no output)                                                   |
+| Limits      | stdin capped at 1MB; the host force-kills after a 5-second timeout (so a stuck plugin cannot hang the host) |
+
+## Third-Party Plugin Development
+
+Writing a plugin is actually simple: implement the protocol, drop it into `exts\`, declare it in the config, and check the green dot with `--extend`. Below are complete examples in 5 languages — all implementing the same `backup` capability with identical logic; pick whichever you're comfortable with.
+
+### Rust Example
+
+```rust
+use std::io::Read;
+use serde_json::Value;
+
+fn main() {
+    let mut input = String::new();
+    // cap input size: protect against an abnormal caller feeding oversized input
+    let _ = std::io::stdin().take(1024 * 1024).read_to_string(&mut input);
+    if input.trim().is_empty() {
+        std::process::exit(0); // no caller (double-click): exit silently
+    }
+    let req: Value = match serde_json::from_str(&input) {
+        Ok(v) => v,
+        Err(e) => fail(&format!("invalid request: {e}")),
+    };
+    // dispatch by kit field: if it's not your capability, fail with a clear message
+    match req["kit"].as_str().unwrap_or("") {
+        "backup" => { /* do the business */ println!(r#"{{"ok":true}}"#); }
+        other => fail(&format!("unknown kit: {other}")),
+    }
+}
+
+fn fail(msg: &str) -> ! {
+    eprintln!("osmium-kit error: {msg}");          // stderr: for humans
+    println!(r#"{{"ok":false,"error":"{msg}"}}"#); // stdout: protocol response
+    std::process::exit(1);
+}
+```
+
+### C++ Example (nlohmann/json)
+
+Needs the single-header library [nlohmann/json](https://github.com/nlohmann/json); compiles with VS or MinGW.
+
+```cpp
+#include <iostream>
+#include <string>
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
+
+int fail(const std::string& msg) {
+    std::cerr << "osmium-kit error: " << msg << std::endl;         // stderr: for humans
+    std::cout << "{\"ok\":false,\"error\":\"" << msg << "\"}" << std::endl; // stdout: protocol response
+    return 1;
+}
+
+int main() {
+    // read all of stdin (the host only feeds up to 1MB; truncate yourself if you want to be safe)
+    std::string input((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
+    if (input.empty()) {
+        return 0; // no caller (double-click): exit silently
+    }
+    json req;
+    try {
+        req = json::parse(input);
+    } catch (...) {
+        return fail("invalid request");
+    }
+    std::string kit = req.value("kit", "");
+    if (kit == "backup") {
+        // do the business
+        std::cout << R"({"ok":true})" << std::endl;
+        return 0;
+    }
+    return fail("unknown kit: " + kit);
+}
+```
+
+### C Example (standard library only)
+
+Pure C11 with the standard library — a minimal hand-rolled `kit` extraction (no full JSON parsing); for production consider cJSON / jansson.
+
+```c
+// plugin.c — MSVC: cl /O2 /Fe:plugin.exe plugin.c    MinGW: gcc -O2 -o plugin.exe plugin.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// minimal "kit":"xxx" extraction (no full JSON parsing, field order irrelevant)
+static void extract_kit(const char *json, char *out, size_t out_size) {
+    const char *p = strstr(json, "\"kit\"");
+    if (!p) { out[0] = '\0'; return; }
+    p = strchr(p, ':');  if (!p) { out[0] = '\0'; return; }
+    p = strchr(p, '"');  if (!p) { out[0] = '\0'; return; }
+    p++;
+    const char *q = strchr(p, '"');
+    size_t len = q ? (size_t)(q - p) : 0;
+    if (len >= out_size) len = out_size - 1;
+    memcpy(out, p, len);
+    out[len] = '\0';
+}
+
+static int fail(const char *msg) {
+    fprintf(stderr, "osmium-kit error: %s\n", msg);      // stderr: for humans
+    printf("{\"ok\":false,\"error\":\"%s\"}\n", msg);    // stdout: protocol response
+    return 1;
+}
+
+int main(void) {
+    // cap input at 1MB (the host feeds at most 1MB; truncate if you want to be safe)
+    char *buf = malloc(1024 * 1024);
+    if (!buf) return 1;
+    size_t n = fread(buf, 1, 1024 * 1024, stdin);
+    buf[n] = '\0';
+    char *input = buf;
+    while (*input == ' ' || *input == '\t' || *input == '\r' || *input == '\n') input++;
+    if (*input == '\0') { free(buf); return 0; }          // no caller (double-click): exit silently
+
+    char kit[64];
+    extract_kit(input, kit, sizeof(kit));
+    if (strcmp(kit, "backup") == 0) {
+        // do the business
+        printf("{\"ok\":true}\n");
+        free(buf);
+        return 0;
+    }
+    free(buf);
+    return fail("unknown kit");
+}
+```
+
+### C# Example (System.Text.Json)
+
+JSON parsing is built into .NET (Framework / Core / 5+), no third-party packages needed.
+
+```csharp
+// Plugin.cs — .NET Framework: csc /out:plugin.exe Plugin.cs    .NET Core: dotnet build
+using System;
+using System.Text;
+using System.Text.Json;
+
+class Plugin
+{
+    static int Fail(string msg)
+    {
+        Console.Error.WriteLine("osmium-kit error: " + msg);           // stderr: for humans
+        Console.WriteLine("{\"ok\":false,\"error\":\"" + msg + "\"}"); // stdout: protocol response
+        return 1;
+    }
+
+    static int Main()
+    {
+        // cap input at 1MB
+        var buf = new byte[1024 * 1024];
+        int n = Console.OpenStandardInput().Read(buf, 0, buf.Length);
+        string input = Encoding.UTF8.GetString(buf, 0, Math.Max(n, 0)).Trim();
+        if (input.Length == 0) return 0;   // no caller (double-click): exit silently
+
+        string kit;
+        try
+        {
+            kit = JsonDocument.Parse(input).RootElement.GetProperty("kit").GetString() ?? "";
+        }
+        catch { return Fail("invalid request"); }
+
+        if (kit == "backup") { Console.WriteLine("{\"ok\":true}"); return 0; }  // do the business
+        return Fail("unknown kit: " + kit);
+    }
+}
+```
+
+
+### Python Example
+
+The standard library is enough — no third-party packages.
+
+```python
+import json
+import sys
+
+
+def fail(msg):
+    print(f"osmium-kit error: {msg}", file=sys.stderr)      # stderr: for humans
+    print(json.dumps({"ok": False, "error": msg}))          # stdout: protocol response
+    sys.exit(1)
+
+
+def main():
+    # cap input size: read only the first 1MB
+    data = sys.stdin.buffer.read(1024 * 1024)
+    if not data.strip():
+        sys.exit(0)  # no caller (double-click): exit silently
+    try:
+        req = json.loads(data)
+    except ValueError as e:
+        fail(f"invalid request: {e}")
+    kit = req.get("kit", "")
+    if kit == "backup":
+        # do the business
+        print(json.dumps({"ok": True}))
+    else:
+        fail(f"unknown kit: {kit}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### Java Example (no third-party dependencies)
+
+The JDK has no built-in JSON parser, so here's a dependency-free minimal `kit` extraction; for production, switch to Jackson / Gson.
+
+```java
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+
+public class Plugin {
+
+    public static void main(String[] args) throws IOException {
+        // cap input size: read only the first 1MB
+        byte[] buf = new byte[1024 * 1024];
+        int n = System.in.read(buf);
+        String input = new String(buf, 0, Math.max(n, 0), StandardCharsets.UTF_8).trim();
+        if (input.isEmpty()) {
+            return; // no caller (double-click): exit silently
+        }
+        String kit = extractKit(input);
+        if ("backup".equals(kit)) {
+            // do the business
+            System.out.println("{\"ok\":true}");
+        } else {
+            fail("unknown kit: " + kit);
+        }
+    }
+
+    // minimal extraction of "kit":"xxx" (no full JSON parse; field order doesn't matter)
+    private static String extractKit(String json) {
+        int i = json.indexOf("\"kit\"");
+        if (i < 0) return "";
+        int c = json.indexOf(':', i);
+        if (c < 0) return "";
+        int q1 = json.indexOf('"', c + 1);
+        if (q1 < 0) return "";
+        int q2 = json.indexOf('"', q1 + 1);
+        return q2 < 0 ? "" : json.substring(q1 + 1, q2);
+    }
+
+    private static void fail(String msg) {
+        System.err.println("osmium-kit error: " + msg);                 // stderr: for humans
+        System.out.println("{\"ok\":false,\"error\":\"" + msg + "\"}"); // stdout: protocol response
+        System.exit(1);
+    }
+}
+```
+
+### Node.js Example
+
+The standard library is enough — `JSON.parse` is built in.
+
+```js
+// cap input size: read only the first 1MB
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+    input += chunk;
+    if (input.length > 1024 * 1024) {
+        process.exit(1); // fail fast when over the limit
+    }
+});
+process.stdin.on('end', () => {
+    if (!input.trim()) {
+        process.exit(0); // no caller (double-click): exit silently
+    }
+    let req;
+    try {
+        req = JSON.parse(input);
+    } catch (e) {
+        return fail('invalid request: ' + e.message);
+    }
+    const kit = req.kit || '';
+    if (kit === 'backup') {
+        // do the business
+        console.log(JSON.stringify({ ok: true }));
+    } else {
+        fail('unknown kit: ' + kit);
+    }
+});
+
+function fail(msg) {
+    console.error('osmium-kit error: ' + msg);               // stderr: for humans
+    console.log(JSON.stringify({ ok: false, error: msg }));  // stdout: protocol response
+    process.exit(1);
+}
+```
+
+### Getting Started
+
+1. Rename the compiled program to `xxx.osx`
+2. Drop it anywhere under the host exe's directory (standalone: next to the exe; platform install: `%ProgramFiles%\Osmium\exts\`)
+3. The directory and plugin file must satisfy the trust requirement (see "Things to Keep in Mind" below)
+4. Declare the call in the service config:
+
+```toml
+[[plugins]]
+kit = "backup"            # must match the kit name dispatched inside the plugin
+phase = "start_after"
+payload = { mode = "full" }
+```
+
+5. Run `os --extend` to confirm the green dot, then restart the service
+
+### Multiple Plugins & Execution Order
+
+- Same phase runs in declaration order of the config array
+- Each call launches a separate plugin process — no interference, no shared state
+- A single plugin failure does not affect the others (`fail_on_error` can only block in the start phase)
+- The same kit can be declared by multiple plugins; the host takes the first success in discovery order
+
+## Things to Keep in Mind
+
+- **ACL trust check**: the trust anchor is the host exe's own location — when the exe lives in a protected location (e.g. `%ProgramFiles%\Osmium\`), the plugin directory and file must sit somewhere only SYSTEM / Administrators can write (so nobody can swap a `.osx` to escalate to SYSTEM); untrusted plugins are refused and marked red. **Inplace embedded deployment** (exe inside your own project directory) is trusted automatically: the plugin sits next to the exe, sharing the same attack surface — an attacker who could replace the plugin could equally replace the exe, so no extra risk is added
+- **Execution isolation**: plugins are separate processes, force-killed after 5 seconds; a crash does not affect the host
+- **Input limits**: stdin capped at 1MB; the official unzip plugin also has a total 8GiB extraction cap (zip-bomb protection)
+- **Credential safety**: passwords in plugin requests are decrypted by the host from the config before being passed in; logs only record redacted URLs
+
+## FAQ
+
+**Plugin shows a red dot / log says "writable by unprivileged users"**: the `exts\` directory or the plugin file is writable by a non-admin account (e.g. you extracted it to a user directory). Put the plugin into the admin-installed `%ProgramFiles%\Osmium\exts\` and you're done.
+
+**Log says "plugin 'xxx' not found (exts\*.osx missing)"**: there's no `.osx` under the executable's directory, or the plugin extension isn't `.osx`.
+
+**Does renaming the plugin break my config?** No. The config only knows the `kit` capability name, not the file name; as long as the extension stays `.osx` and it sits under the executable's directory, it works.
+
+**Want a resident plugin?** The plugin protocol is one-shot (launch → handle → exit). If you need a resident service, use the Osmium host to manage the target process — don't write it as a plugin.
+
 ## Build
 
 The one-click build script produces 2 artifacts (executable + installer):
@@ -454,7 +961,7 @@ The installer places `os.exe` in `%ProgramFiles%\Osmium\` and registers the Cont
 ### Installer Features
 
 - Installs `os.exe` to `%ProgramFiles%\Osmium\` and adds it to the system PATH
-- Component selection page: core (`os.exe`) is fixed; the official extension kit (`osmium64-official-kits.osx` → `Extension\`) is **unchecked by default** — tick it if you need the plugin features (sspi download / unzip / share mapping / reboot), usage: [Extension Guide](Docs/EXTENSION_EN.md)
+- Component selection page: core (`os.exe`) is fixed; the official extension kit (`osmium64-official-kits.osx` → `Extension\`) is **unchecked by default** — tick it if you need the plugin features (sspi download / unzip / share mapping / reboot), usage: [Extension Guide](#plugin-system)
 - Automatically registers the boot-time Service Refresher (`--install-refresher`)
 - Registers an uninstall entry in Windows Control Panel
 - Auto-detects old versions: silently upgrades on newer, prompts to reinstall on identical, warns on downgrade
@@ -504,9 +1011,6 @@ Osmium/
 │   ├── Setup.png              # .osiml icon source
 │   ├── Extension.ico          # .osx plugin icon (installed as icons\osx.ico)
 │   └── Extension.png          # .osx icon source
-├── Docs/                      # Documentation
-│   ├── EXTENSION_CN.md        # Plugin development & usage guide (CN)
-│   └── EXTENSION_EN.md        # Plugin development & usage guide (EN)
 ├── Publish/                   # Build artifacts (exe + installer, not committed)
 ├── BUILD.ps1                  # One-click build script (Rust build & tests + installer)
 ├── .github/                   # GitHub community templates (issues / PR)
