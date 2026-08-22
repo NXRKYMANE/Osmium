@@ -74,10 +74,13 @@ if (-not (Test-Path $vswhere)) {
     }
 }
 
-# 1. 读取版本号 (Cargo.toml)
+# 1. 读取版本号 (Cargo.toml) —— 主程序与插件各自独立版本（插件文件名带它自己的版本）
 $cargoToml = Get-Content "$ProjectRoot\Project\Cargo.toml" -Raw
 $rsVersion = [regex]::Match($cargoToml, '^version = "([^"]+)"', 'Multiline').Groups[1].Value.Trim()
 Write-Host "Version (Rust): $rsVersion" -ForegroundColor Cyan
+$kitsToml = Get-Content "$ProjectRoot\Extension\osmium-official-kits\Cargo.toml" -Raw
+$kitsVersion = [regex]::Match($kitsToml, '^version = "([^"]+)"', 'Multiline').Groups[1].Value.Trim()
+Write-Host "Version (kits): $kitsVersion" -ForegroundColor Cyan
 
 # 2. 构建主程序 (release) + 测试
 Write-Host "Building Osmium (release)..." -ForegroundColor Yellow
@@ -119,10 +122,11 @@ New-Item -ItemType Directory -Force -Path $publishDir | Out-Null
 Get-ChildItem $publishDir -Force | Remove-Item -Recurse -Force
 # 主程序: 直接以 osmium64.exe 输出（安装时改名为 os.exe）
 Copy-Item (Join-Path $ProjectRoot "target\release\osmium64.exe") (Join-Path $publishDir "osmium64.exe") -Force
-# 官方插件: osmium-kit.exe → exts\osmium64-official-kits-v<VERSION>.osx（文件名带版本后缀）
+# 官方插件: osmium-kit.exe → exts\osmium64-official-kits-v<KITS_VERSION>.osx（文件名带插件自身版本）
 $extDir = Join-Path $publishDir "exts"
 New-Item -ItemType Directory -Force -Path $extDir | Out-Null
-Copy-Item (Join-Path $ProjectRoot "target\release\osmium-kit.exe") (Join-Path $extDir "osmium64-official-kits-v$rsVersion.osx") -Force
+$kitOsxName = "osmium64-official-kits-v$kitsVersion.osx"
+Copy-Item (Join-Path $ProjectRoot "target\release\osmium-kit.exe") (Join-Path $extDir $kitOsxName) -Force
 
 # 4.5 代码签名: osmium64.exe + 插件（安装包在第 6 步编译完成后签名）
 $signCert = $null
@@ -130,7 +134,7 @@ if (-not $SkipSign) {
     $signCert = Get-SignCert
     if ($signCert) {
         Sign-File (Join-Path $publishDir "osmium64.exe") $signCert
-        Sign-File (Join-Path $extDir "osmium64-official-kits-v$rsVersion.osx") $signCert
+        Sign-File (Join-Path $extDir $kitOsxName) $signCert
     } else {
         Write-Warning "No code-signing certificate found (OSMIUM_CERT_PFX or Misc\codesign.pfx), skipping signature."
     }
@@ -142,6 +146,7 @@ $year = (Get-Date).Year
 
 $rsIss = Get-Content "$ProjectRoot\Project\installer.iss" -Raw -Encoding UTF8
 $rsIss = $rsIss -replace '(?m)^#define MyAppVersion ".*"$', "#define MyAppVersion `"$rsVersion`""
+$rsIss = $rsIss -replace '(?m)^#define KitsVersion ".*"$', "#define KitsVersion `"$kitsVersion`""
 $rsIss = $rsIss -replace '(?m)(?<=^#define MyAppPublisher "Copyright \(C\) )\d{4}', $year
 [System.IO.File]::WriteAllText("$ProjectRoot\Project\installer.iss", $rsIss, [System.Text.UTF8Encoding]::new($false))
 
@@ -156,7 +161,7 @@ if ($signCert) {
     Sign-File (Join-Path $publishDir $setupName) $signCert
 }
 Write-Host "Done: Publish\osmium64.exe" -ForegroundColor Green
-Write-Host "Done: Publish\exts\osmium64-official-kits-v$rsVersion.osx" -ForegroundColor Green
+Write-Host "Done: Publish\exts\$kitOsxName" -ForegroundColor Green
 Write-Host "Done: Publish\$setupName" -ForegroundColor Green
 
 # 7. 可选: UPX 压缩版本 (opt-level="z" 体积优先 + UPX --ultra-brute --lzma)

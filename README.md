@@ -25,7 +25,7 @@ Osmium is written in modern Rust (edition 2024) and compiles into a standalone `
 | Item        | Detail                                                                         |
 | --- | --- |
 | Language    | Rust 2024                                                                      |
-| Artifacts   | `Publish\osmium64.exe` `Publish\exts\osmium64-official-kits-v<VERSION>.osx` (the plugin filename carries the version to distinguish releases; after installation the suffix is dropped and it stays `osmium64-official-kits.osx` — the host only cares about `.osx` + kit name, not the filename, so upgrade overwrites never break calls) |
+| Artifacts   | `Publish\osmium64.exe` `Publish\exts\osmium64-official-kits-v<KITS_VERSION>.osx` (the plugin filename carries **its own version**, independent of the main program (currently v2.0.0), to distinguish releases; after installation the suffix is dropped and it stays `osmium64-official-kits.osx` — the host only cares about `.osx` + kit name, not the filename, so upgrade overwrites never break calls) |
 | Size        | `osmium64.exe` ~3.6 MB, `osmium64-official-kits.osx` ~1.9 MB (size-first compile, opt-level=z) |
 | UPX build   | `Publish\osmium64-upx.exe` (~1.1 MB)                                                 |
 | Installer   | `osmium-win-x64-setup-v<VERSION>.exe` (non-UPX build)                          |

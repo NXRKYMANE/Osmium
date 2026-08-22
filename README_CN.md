@@ -25,7 +25,7 @@ Osmium 使用现代 Rust 2024 语言开发，编译为一个独立的 `osmium64.
 | 项         | 说明                                                                          |
 | --- | --- |
 | 语言       | Rust 2024                                                                     |
-| 产物       | `Publish\osmium64.exe` `Publish\exts\osmium64-official-kits-v<版本>.osx`（插件文件名带版本号，便于区分新旧；安装到系统后去掉版本后缀固定为 `osmium64-official-kits.osx`——宿主只认 `.osx` + kit 名，不认文件名，升级覆盖不影响调用） |
+| 产物       | `Publish\osmium64.exe` `Publish\exts\osmium64-official-kits-v<插件版本>.osx`（插件文件名带**它自己的版本号**（与主程序独立，当前 v2.0.0），便于区分新旧；安装到系统后去掉版本后缀固定为 `osmium64-official-kits.osx`——宿主只认 `.osx` + kit 名，不认文件名，升级覆盖不影响调用） |
 | 大小       | `osmium64.exe` 约 3.6 MB，`osmium64-official-kits.osx` 约 1.9 MB（体积优先编译，opt-level=z） |
 | UPX 压缩   | `Publish\osmium64-upx.exe`（约 1.1 MB）                                             |
 | 分发安装包 | `osmium-win-x64-setup-v<版本>.exe`（使用非 UPX 版本）                         |
