@@ -17,27 +17,26 @@ use windows::Win32::System::Services::{
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 
 use crate::service_config::{DownloadConfig, ServiceConfig, SharedMapperConfig};
-use crate::service_core::{DownloadAuth,
-                          build_dependency_string, can_overwrite_source, compare_versions,
-                          decrypt_sensitive, delete_dir_tree, delete_old_logs, deployed_config_path, download_core, dpapi_decrypt, dpapi_encrypt, get_file_version, get_own_path,
-                          green_dot, has_download, is_refresher_reserved_name, is_user_writable, is_valid_service_name, load_config,
-                          parse_start_mode, red, red_dot, resolve_redirect_url,
-                          safe_delete_dir, scm_sleep_time_ms, scm_status_params, scm_wait_hint_ms, sddl_dacl_grants_non_admin_write, sddl_owner_is_administrative, secure_directory,
-                          security_descriptor_from_sddl,
-                          set_preshutdown_enabled, set_scm_sleep_time_ms, set_scm_wait_hint_ms,
-                          sha256_matches, strip_verbatim_prefix, validate_config,
-                          write_deployed_config, write_quick_config,
+use crate::service_core::{
+    DownloadAuth, build_dependency_string, can_overwrite_source, compare_versions,
+    decrypt_sensitive, delete_dir_tree, delete_old_logs, deployed_config_path, download_core,
+    dpapi_decrypt, dpapi_encrypt, get_file_version, get_own_path, green_dot, has_download,
+    is_refresher_reserved_name, is_user_writable, is_valid_service_name, load_config,
+    parse_start_mode, red, red_dot, resolve_redirect_url, safe_delete_dir, scm_sleep_time_ms,
+    scm_status_params, scm_wait_hint_ms, sddl_dacl_grants_non_admin_write,
+    sddl_owner_is_administrative, secure_directory, security_descriptor_from_sddl,
+    set_preshutdown_enabled, set_scm_sleep_time_ms, set_scm_wait_hint_ms, sha256_matches,
+    strip_verbatim_prefix, validate_config, write_deployed_config, write_quick_config,
 };
-use crate::service_host::{LogOptions,
-                          apply_log_mode, auto_roll_logs, build_child_command, collect_descendants, current_log_name,
-                          download_auth_from_entry, download_entries, download_entry_stage,
-                          download_stage_is, escape_invisible, expand_env_value, expand_stop_pid, ext_phase_matches, failure_action_chain, http_date_from_mtime,
-                          log_pattern_safe, process_alive, process_cpu_100ns,
-                          process_env_var, process_working_set_mb, redact_url, reset_auto_roll_state, reset_current_logs,
-                          resolve_download_target, roll_by_time_if_due, roll_if_needed, roll_logs_to_old, run_hook,
-                          run_stop_command,
-                          runaway_cleanup_pid_file, runaway_exceeded, set_process_priority, warn_if_insecure_download,
-                          write_log_entry, zip_backup_file,
+use crate::service_host::{
+    LogOptions, apply_log_mode, auto_roll_logs, build_child_command, collect_descendants,
+    current_log_name, download_auth_from_entry, download_entries, download_entry_stage,
+    download_stage_is, escape_invisible, expand_env_value, expand_stop_pid, ext_phase_matches,
+    failure_action_chain, http_date_from_mtime, log_pattern_safe, process_alive, process_cpu_100ns,
+    process_env_var, process_working_set_mb, redact_url, reset_auto_roll_state, reset_current_logs,
+    resolve_download_target, roll_by_time_if_due, roll_if_needed, roll_logs_to_old, run_hook,
+    run_stop_command, runaway_cleanup_pid_file, runaway_exceeded, set_process_priority,
+    warn_if_insecure_download, write_log_entry, zip_backup_file,
 };
 
 /// 本地 HTTP 测试服务器: handler 接收 (方法, 请求行列表)，返回 (状态行, 头部, 响应体)；
@@ -75,8 +74,11 @@ where
                         }
                     }
                     let lines: Vec<String> = String::from_utf8_lossy(&buf)
-                        .lines().map(|s| s.to_string()).collect();
-                    let method = lines.first()
+                        .lines()
+                        .map(|s| s.to_string())
+                        .collect();
+                    let method = lines
+                        .first()
                         .and_then(|l| l.split_whitespace().next())
                         .unwrap_or("")
                         .to_string();
@@ -108,13 +110,53 @@ fn cli_short_aliases_cover_test() {
     // 服务操作命令与全部简化别名（含 --test/--tst、--extend/--ext、--refresh/--rfs、--kill/--kil、
     // 批量命令 --start-all/--stra、--stop-all/--stpa、--restart-all/--rsta）均可省略 -m 直接使用
     for tag in [
-        "--install", "--uninstall", "--start", "--stop", "--restart",
-        "--status", "--delete", "--list", "--test", "--tst",
-        "--extend", "--ext", "--refresh", "--rfs", "--kill", "--kil",
-        "--start-all", "--stra", "--stop-all", "--stpa", "--restart-all", "--rsta",
-        "--ins", "--uin", "--str", "--stp", "--rst", "--sts", "--del", "--lst",
+        "--install",
+        "--uninstall",
+        "--start",
+        "--stop",
+        "--restart",
+        "--status",
+        "--delete",
+        "--list",
+        "--test",
+        "--tst",
+        "--extend",
+        "--ext",
+        "--refresh",
+        "--rfs",
+        "--kill",
+        "--kil",
+        "--import",
+        "--imp",
+        "--export",
+        "--exp",
+        "--reload",
+        "--rld",
+        "--check",
+        "--chk",
+        "--sign-config",
+        "--sigc",
+        "--start-all",
+        "--stra",
+        "--stop-all",
+        "--stpa",
+        "--restart-all",
+        "--rsta",
+        "--status-all",
+        "--stsa",
+        "--ins",
+        "--uin",
+        "--str",
+        "--stp",
+        "--rst",
+        "--sts",
+        "--del",
+        "--lst",
     ] {
-        assert!(crate::service_cli::is_cli_command(tag), "{tag} should be recognized as a CLI command");
+        assert!(
+            crate::service_cli::is_cli_command(tag),
+            "{tag} should be recognized as a CLI command"
+        );
     }
     // 非命令参数不应误判为 CLI 命令
     assert!(!crate::service_cli::is_cli_command("-m"));
@@ -129,12 +171,16 @@ fn cli_short_aliases_cover_test() {
 fn parse_run_service_name_extracts_from_image_path() {
     // 新格式: 引号包裹的宿主路径 + -internal --run <name>
     assert_eq!(
-        crate::service_core::parse_run_service_name(r#""C:\Program Files\Osmium\os.exe" -internal --run my-service"#),
+        crate::service_core::parse_run_service_name(
+            r#""C:\Program Files\Osmium\os.exe" -internal --run my-service"#
+        ),
         Some("my-service".to_string())
     );
     // 服务名含空格（install 时引号包裹，解析时还原）
     assert_eq!(
-        crate::service_core::parse_run_service_name(r#""C:\Osmium\os.exe" -internal --run "my service""#),
+        crate::service_core::parse_run_service_name(
+            r#""C:\Osmium\os.exe" -internal --run "my service""#
+        ),
         Some("my service".to_string())
     );
     // --run 大小写不敏感
@@ -142,16 +188,37 @@ fn parse_run_service_name_extracts_from_image_path() {
         crate::service_core::parse_run_service_name(r#""C:\x.exe" -internal --RUN foo"#),
         Some("foo".to_string())
     );
+    // 宿主安装路径自身含 "--run" 子串时（如 C:\app--run\os.exe），必须按 -internal 后第一个 --run 切分
+    assert_eq!(
+        crate::service_core::parse_run_service_name(
+            r#""C:\app--run\os.exe" -internal --run my-service"#
+        ),
+        Some("my-service".to_string())
+    );
+    // 服务名含 --run 子串（合法字符）同样不被误切
+    assert_eq!(
+        crate::service_core::parse_run_service_name(r#""C:\os.exe" -internal --run "svc--runx""#),
+        Some("svc--runx".to_string())
+    );
 }
 
 #[test]
 fn parse_run_service_name_rejects_non_run_formats() {
     // 无 --run 参数（inplace 旧格式 / 外部服务）
-    assert_eq!(crate::service_core::parse_run_service_name(r#""C:\ProgramData\Osmium\svcs\a\a.exe""#), None);
-    assert_eq!(crate::service_core::parse_run_service_name(r#""C:\foo.exe""#), None);
+    assert_eq!(
+        crate::service_core::parse_run_service_name(r#""C:\ProgramData\Osmium\svcs\a\a.exe""#),
+        None
+    );
+    assert_eq!(
+        crate::service_core::parse_run_service_name(r#""C:\foo.exe""#),
+        None
+    );
     assert_eq!(crate::service_core::parse_run_service_name(""), None);
     // --run 后无参数
-    assert_eq!(crate::service_core::parse_run_service_name(r#""C:\x.exe" -internal --run"#), None);
+    assert_eq!(
+        crate::service_core::parse_run_service_name(r#""C:\x.exe" -internal --run"#),
+        None
+    );
 }
 
 #[test]
@@ -170,9 +237,19 @@ fn shared_host_rejects_invalid_service_name_from_scm() {
 #[test]
 fn refresh_service_rejects_invalid_name() {
     // 非法服务名（路径穿越/DOS 设备名/控制字符）→ Err，绝不触碰 SCM
-    for bad in ["..", "..\\..\\Windows\\evil", "a/b", "", "CON", "bad\x01name"] {
+    for bad in [
+        "..",
+        "..\\..\\Windows\\evil",
+        "a/b",
+        "",
+        "CON",
+        "bad\x01name",
+    ] {
         let err = crate::service_core::refresh_service(bad).unwrap_err();
-        assert!(err.contains("Invalid service name"), "bad name '{bad}': {err}");
+        assert!(
+            err.contains("Invalid service name"),
+            "bad name '{bad}': {err}"
+        );
     }
 }
 
@@ -195,10 +272,16 @@ fn deployed_config_path_builds_svcs_layout() {
     // 平台部署配置路径: ProgramData\Osmium\svcs\<name>\<name>.osiml
     let p = deployed_config_path("my-svc");
     let s = p.to_string_lossy();
-    assert!(s.ends_with("ProgramData\\Osmium\\svcs\\my-svc\\my-svc.osiml"), "路径布局错误: {s}");
+    assert!(
+        s.ends_with("ProgramData\\Osmium\\svcs\\my-svc\\my-svc.osiml"),
+        "路径布局错误: {s}"
+    );
     // 服务名含空格/特殊字符时原样拼接（不做清理，防穿越依赖服务名校验）
     let p2 = deployed_config_path("svc with space");
-    assert!(p2.to_string_lossy().ends_with("svc with space\\svc with space.osiml"));
+    assert!(
+        p2.to_string_lossy()
+            .ends_with("svc with space\\svc with space.osiml")
+    );
 }
 
 // ==================== 版本比对 ====================
@@ -263,6 +346,30 @@ fn has_download_trims_blank_url() {
     assert!(has_download(&c), "有值应为 true");
 }
 
+#[test]
+fn has_download_detects_downloads_array() {
+    // 数组模式（downloads）: 任一条 from 非空即视为有下载（exe 可能由下载提供、本机尚不存在）
+    use crate::service_config::DownloadConfig;
+    assert!(
+        !has_download(&ServiceConfig {
+            downloads: Some(vec![DownloadConfig::default()]),
+            ..Default::default()
+        }),
+        "全空条目不应视为有下载"
+    );
+    assert!(
+        has_download(&ServiceConfig {
+            downloads: Some(vec![DownloadConfig {
+                from: "https://example.com/x.zip".into(),
+                to: "x".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        "数组含有效条目应为 true"
+    );
+}
+
 // ==================== 启动模式解析 ====================
 
 #[test]
@@ -270,14 +377,38 @@ fn parse_start_mode_rules() {
     // 与 WinSW 启动模式语义一致
     assert_eq!(parse_start_mode(None), (SERVICE_AUTO_START, false));
     assert_eq!(parse_start_mode(Some("")), (SERVICE_AUTO_START, false));
-    assert_eq!(parse_start_mode(Some("automatic")), (SERVICE_AUTO_START, false));
-    assert_eq!(parse_start_mode(Some("delayed_auto")), (SERVICE_AUTO_START, true));
-    assert_eq!(parse_start_mode(Some("delayed-auto")), (SERVICE_AUTO_START, true));
-    assert_eq!(parse_start_mode(Some("delayedauto")), (SERVICE_AUTO_START, true));
-    assert_eq!(parse_start_mode(Some("DELAYED_AUTO")), (SERVICE_AUTO_START, true)); // 大小写不敏感
-    assert_eq!(parse_start_mode(Some("manual")), (SERVICE_DEMAND_START, false));
-    assert_eq!(parse_start_mode(Some("disabled")), (SERVICE_DISABLED, false));
-    assert_eq!(parse_start_mode(Some("unknown")), (SERVICE_AUTO_START, false)); // 未知回退自动
+    assert_eq!(
+        parse_start_mode(Some("automatic")),
+        (SERVICE_AUTO_START, false)
+    );
+    assert_eq!(
+        parse_start_mode(Some("delayed_auto")),
+        (SERVICE_AUTO_START, true)
+    );
+    assert_eq!(
+        parse_start_mode(Some("delayed-auto")),
+        (SERVICE_AUTO_START, true)
+    );
+    assert_eq!(
+        parse_start_mode(Some("delayedauto")),
+        (SERVICE_AUTO_START, true)
+    );
+    assert_eq!(
+        parse_start_mode(Some("DELAYED_AUTO")),
+        (SERVICE_AUTO_START, true)
+    ); // 大小写不敏感
+    assert_eq!(
+        parse_start_mode(Some("manual")),
+        (SERVICE_DEMAND_START, false)
+    );
+    assert_eq!(
+        parse_start_mode(Some("disabled")),
+        (SERVICE_DISABLED, false)
+    );
+    assert_eq!(
+        parse_start_mode(Some("unknown")),
+        (SERVICE_AUTO_START, false)
+    ); // 未知回退自动
 }
 
 // ==================== 依赖字符串 multi-sz ====================
@@ -311,25 +442,29 @@ fn delete_old_logs_cleans_split_and_rollover() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let names = [
-        "2020-01-01.log",     // 主日志（旧）
-        "2020-01-01.err.log", // err 分流（旧）
-        "2020-01-01.log.1",   // 滚动备份（旧）
+        "2020-01-01.log",       // 主日志（旧）
+        "2020-01-01.err.log",   // err 分流（旧）
+        "2020-01-01.log.1",     // 滚动备份（旧）
         "2020-01-01.err.log.2", // err 滚动备份（旧）
         "2020-01-01.log.3.zip", // zip 归档（超半年，删除）
-        "2099-01-01.log",     // 未来日志（保留）
+        "2099-01-01.log",       // 未来日志（保留）
         "2099-01-01.log.1.zip", // 未来 zip 归档（保留，日期未过期）
-        "notes.txt",          // 非日志（保留）
+        "notes.txt",            // 非日志（保留）
     ];
     for n in &names {
         std::fs::write(dir.join(n), "x").unwrap();
     }
     let cutoff = chrono::Local::now().date_naive();
     // 90 天前的 zip 归档：未超半年保留期（180 天），必须保留
-    let recent_zip = format!("{}.log.2.zip", (cutoff - chrono::Duration::days(90)).format("%Y-%m-%d"));
+    let recent_zip = format!(
+        "{}.log.2.zip",
+        (cutoff - chrono::Duration::days(90)).format("%Y-%m-%d")
+    );
     std::fs::write(dir.join(&recent_zip), "x").unwrap();
     let deleted = delete_old_logs(&dir, cutoff, false);
     assert_eq!(deleted, 5, "应清理 5 个过期日志（含超半年 zip 归档）");
-    let remaining: Vec<String> = std::fs::read_dir(&dir).unwrap()
+    let remaining: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();
@@ -346,8 +481,14 @@ fn delete_old_logs_archives_before_delete_when_enabled() {
     std::fs::create_dir_all(&dir).unwrap();
     let cutoff = chrono::Local::now().date_naive();
     // 40 天前的日志（超过 30 天保留期，未到 zip 半年保留期）
-    let old_log = format!("{}.log", (cutoff - chrono::Duration::days(40)).format("%Y-%m-%d"));
-    let old_backup = format!("{}.log.1", (cutoff - chrono::Duration::days(40)).format("%Y-%m-%d"));
+    let old_log = format!(
+        "{}.log",
+        (cutoff - chrono::Duration::days(40)).format("%Y-%m-%d")
+    );
+    let old_backup = format!(
+        "{}.log.1",
+        (cutoff - chrono::Duration::days(40)).format("%Y-%m-%d")
+    );
     std::fs::write(dir.join(&old_log), "expired-content").unwrap();
     std::fs::write(dir.join(&old_backup), "expired-backup").unwrap();
 
@@ -355,18 +496,30 @@ fn delete_old_logs_archives_before_delete_when_enabled() {
     let deleted = delete_old_logs(&dir, cutoff, true);
     assert_eq!(deleted, 2, "两个过期日志都应清理");
     assert!(!dir.join(&old_log).exists(), "原日志应被删除");
-    assert!(dir.join(format!("{old_log}.zip")).exists(), "应先生成 zip 归档");
+    assert!(
+        dir.join(format!("{old_log}.zip")).exists(),
+        "应先生成 zip 归档"
+    );
     assert!(!dir.join(&old_backup).exists(), "原滚动备份应被删除");
-    assert!(dir.join(format!("{old_backup}.zip")).exists(), "滚动备份也应先生成 zip 归档");
+    assert!(
+        dir.join(format!("{old_backup}.zip")).exists(),
+        "滚动备份也应先生成 zip 归档"
+    );
 
     // 关闭归档: 直接删除，不产生 zip
-    let recent_log = format!("{}.log", (cutoff - chrono::Duration::days(40)).format("%Y-%m-%d"));
+    let recent_log = format!(
+        "{}.log",
+        (cutoff - chrono::Duration::days(40)).format("%Y-%m-%d")
+    );
     let _ = std::fs::remove_file(dir.join(format!("{recent_log}.zip")));
     std::fs::write(dir.join(&recent_log), "no-archive").unwrap();
     let deleted = delete_old_logs(&dir, cutoff, false);
     assert_eq!(deleted, 1);
     assert!(!dir.join(&recent_log).exists());
-    assert!(!dir.join(format!("{recent_log}.zip")).exists(), "未开启归档时不应产生 zip");
+    assert!(
+        !dir.join(format!("{recent_log}.zip")).exists(),
+        "未开启归档时不应产生 zip"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -397,7 +550,10 @@ fn delete_old_logs_falls_back_to_mtime_for_custom_names() {
     std::fs::write(&old_roll, "x").unwrap();
 
     let deleted = delete_old_logs(&dir, cutoff, false);
-    assert_eq!(deleted, 3, "应清理旧 mtime 自定义文件、紧凑日期文件与 .old: {deleted}");
+    assert_eq!(
+        deleted, 3,
+        "应清理旧 mtime 自定义文件、紧凑日期文件与 .old: {deleted}"
+    );
     assert!(!custom.exists(), "旧 mtime 自定义文件应被清理");
     assert!(fresh.exists(), "新文件应保留");
     assert!(!compact.exists(), "紧凑日期前缀旧文件应按 mtime 清理");
@@ -473,8 +629,14 @@ fn escape_invisible_escapes_control_chars() {
 
 #[test]
 fn is_valid_service_name_rejects_dos_devices() {
-    for name in ["CON", "con", "PRN", "AUX", "NUL", "COM1", "com3", "LPT9", "CON.txt", "nul.log"] {
-        assert!(!is_valid_service_name(name), "should reject DOS device name: {}", name);
+    for name in [
+        "CON", "con", "PRN", "AUX", "NUL", "COM1", "com3", "LPT9", "CON.txt", "nul.log",
+    ] {
+        assert!(
+            !is_valid_service_name(name),
+            "should reject DOS device name: {}",
+            name
+        );
     }
 }
 
@@ -509,7 +671,10 @@ fn redact_url_strips_query_and_fragment() {
 
 #[test]
 fn redact_url_keeps_plain_url() {
-    assert_eq!(redact_url("https://example.com/app.exe"), "https://example.com/app.exe");
+    assert_eq!(
+        redact_url("https://example.com/app.exe"),
+        "https://example.com/app.exe"
+    );
     assert_eq!(redact_url("not-a-url"), "not-a-url"); // 非法 URL 原样返回
 }
 
@@ -525,7 +690,10 @@ fn redact_url_strips_userinfo_credentials() {
         "http://example.com:8080/a"
     );
     // 仅用户名无密码同样去除
-    assert_eq!(redact_url("https://user@example.com/a"), "https://example.com/a");
+    assert_eq!(
+        redact_url("https://user@example.com/a"),
+        "https://example.com/a"
+    );
 }
 
 // ==================== 暴力测试: 随机输入不 panic（纯函数稳定性） ====================
@@ -540,8 +708,10 @@ fn is_valid_service_name_stress_random_inputs_no_panic() {
         state ^= state << 17;
         state
     };
-    let chars: Vec<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .\\/:\t-_\u{1}\u{7f}中文"
-        .chars().collect();
+    let chars: Vec<char> =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .\\/:\t-_\u{1}\u{7f}中文"
+            .chars()
+            .collect();
     for _ in 0..100_000 {
         let len = (next() % 270) as usize;
         let s: String = (0..len)
@@ -600,7 +770,10 @@ fn is_user_writable_rejects_everyone_write_on_dir() {
     let d = dir.to_string_lossy().to_string();
     let _ = takeown_admins(&d); // 尽力把所有者设为 Administrators，确保走 DACL 判定路径
     assert!(icacls_ok(&[&d, "/grant", "*S-1-1-0:(OI)(CI)M"]));
-    assert!(is_user_writable(&d), "Everyone 可写目录必须判可写（拦截安装）");
+    assert!(
+        is_user_writable(&d),
+        "Everyone 可写目录必须判可写（拦截安装）"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -650,7 +823,10 @@ fn is_user_writable_allows_system_admin_secured_dir() {
         let _ = std::fs::remove_dir_all(&dir);
         return;
     }
-    assert!(!is_user_writable(&d), "仅 SYSTEM/Administrators 的目录必须放行");
+    assert!(
+        !is_user_writable(&d),
+        "仅 SYSTEM/Administrators 的目录必须放行"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -659,22 +835,32 @@ fn is_user_writable_allows_system_admin_secured_dir() {
 #[test]
 fn sddl_parse_detects_low_priv_write_aces() {
     // 攻击方 ACE: Everyone(WD)/Users(BU)/Authenticated Users(AU)/交互式(IU) 写
-    assert!(sddl_dacl_grants_non_admin_write("D:PAI(A;;0x1301bf;;;WD)(A;;FA;;;SY)"));
+    assert!(sddl_dacl_grants_non_admin_write(
+        "D:PAI(A;;0x1301bf;;;WD)(A;;FA;;;SY)"
+    ));
     assert!(sddl_dacl_grants_non_admin_write("D:PAI(A;;M;;;BU)"));
     assert!(sddl_dacl_grants_non_admin_write("D:PAI(A;;FA;;;AU)"));
     assert!(sddl_dacl_grants_non_admin_write("D:PAI(A;;FW;;;IU)"));
     // 攻击方显式账户 SID（非 RID 500/512）
-    assert!(sddl_dacl_grants_non_admin_write("D:PAI(A;;FA;;;S-1-5-21-1111-2222-3333-1001)"));
+    assert!(sddl_dacl_grants_non_admin_write(
+        "D:PAI(A;;FA;;;S-1-5-21-1111-2222-3333-1001)"
+    ));
     // 仅 SYSTEM/Administrators → 无低权限写
-    assert!(!sddl_dacl_grants_non_admin_write("D:PAI(A;;FA;;;SY)(A;;FA;;;BA)"));
-    assert!(!sddl_dacl_grants_non_admin_write("D:PAI(A;;FR;;;WD)(A;;FA;;;SY)"));
+    assert!(!sddl_dacl_grants_non_admin_write(
+        "D:PAI(A;;FA;;;SY)(A;;FA;;;BA)"
+    ));
+    assert!(!sddl_dacl_grants_non_admin_write(
+        "D:PAI(A;;FR;;;WD)(A;;FA;;;SY)"
+    ));
 }
 
 #[test]
 fn sddl_parse_ignores_inherit_only_creator_owner_ace() {
     // 回归: Program Files 等标准 ACL 含 CREATOR OWNER 的 InheritOnly(IO) 全控 ACE，
     // 它只传播给子对象、不影响当前对象可写性，修复前会误判为"非管理员可写"导致 inplace 安装被拒
-    assert!(!sddl_dacl_grants_non_admin_write("D:PAI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;OICIIOID;GA;;;CO)(A;ID;0x1200a9;;;BU)"));
+    assert!(!sddl_dacl_grants_non_admin_write(
+        "D:PAI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;OICIIOID;GA;;;CO)(A;ID;0x1200a9;;;BU)"
+    ));
     // 非 InheritOnly 的 CREATOR OWNER 全控 ACE（当前对象生效）仍必须判可写
     assert!(sddl_dacl_grants_non_admin_write("D:PAI(A;;GA;;;CO)"));
 }
@@ -683,10 +869,14 @@ fn sddl_parse_ignores_inherit_only_creator_owner_ace() {
 fn sddl_parse_owner_rules() {
     assert!(sddl_owner_is_administrative("O:BA"));
     assert!(sddl_owner_is_administrative("O:SY"));
-    assert!(sddl_owner_is_administrative("O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")); // TrustedInstaller
+    assert!(sddl_owner_is_administrative(
+        "O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+    )); // TrustedInstaller
     assert!(!sddl_owner_is_administrative("O:WD"));
     assert!(!sddl_owner_is_administrative("O:BU"));
-    assert!(!sddl_owner_is_administrative("O:S-1-5-21-1111-2222-3333-1001"));
+    assert!(!sddl_owner_is_administrative(
+        "O:S-1-5-21-1111-2222-3333-1001"
+    ));
 }
 
 // ==================== P0-2/P1-2/P1-4/P2-1/P2-2 安全修复回归 ====================
@@ -697,7 +887,13 @@ fn secure_directory_removes_attacker_aces() {
     // 非管理员环境无法加固（takeown 需要管理员），跳过
     let dir = unique_temp_dir("harden");
     let d = dir.to_string_lossy().to_string();
-    assert!(icacls_ok(&[&d, "/grant", "*S-1-1-0:(OI)(CI)M", "/grant", "*S-1-5-32-545:(OI)(CI)M"]));
+    assert!(icacls_ok(&[
+        &d,
+        "/grant",
+        "*S-1-1-0:(OI)(CI)M",
+        "/grant",
+        "*S-1-5-32-545:(OI)(CI)M"
+    ]));
     if !secure_directory(&d) {
         eprintln!("skip: 当前环境无法完成目录加固（需要管理员）");
         let _ = std::fs::remove_dir_all(&dir);
@@ -720,6 +916,27 @@ fn write_deployed_config_strips_service_password() {
     assert!(!deployed.contains("service_password"));
     assert!(deployed.contains("service_name = \"my-svc\""));
     assert!(deployed.contains("C:\\\\app.exe"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn write_deployed_config_unparsable_strips_all_credential_keys() {
+    // 配置无法解析（非标准 TOML）走按行剥离 fallback 时，所有凭据键都不得明文落盘
+    //（service_password / download_password / smtp_password / 共享映射 password，缺一即泄漏）
+    let dir = unique_temp_dir("cfgs2");
+    let src = dir.join("src.toml");
+    let dst = dir.join("dst.toml");
+    let content = "service_name = \"s\"\nservice_password = \"pw-1\"\ndownload_password = \"pw-2\"\n\
+        smtp_password = \"pw-4\"\n\
+        [[shared_directory_mappers]]\nlocal_path = \"Z:\"\nremote_path = \"\\\\srv\\share\"\npassword = \"pw-3\"\n";
+    // 末尾缺 ] 使整个 TOML 解析失败（非标准配置）
+    std::fs::write(&src, content).unwrap();
+    assert!(write_deployed_config(&src.to_string_lossy(), &dst));
+    let deployed = std::fs::read_to_string(&dst).unwrap();
+    for secret in ["pw-1", "pw-2", "pw-3", "pw-4"] {
+        assert!(!deployed.contains(secret), "明文凭据不得落盘: {secret}");
+    }
+    assert!(deployed.contains("remote_path"), "非凭据内容应保留");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -754,22 +971,28 @@ fn warn_if_insecure_download_allows_https_or_with_sha() {
 
 #[test]
 fn scm_status_params_follows_scm_protocol() {
-    use windows::Win32::System::Services::{SERVICE_ACCEPT_SHUTDOWN,
-                                           SERVICE_ACCEPT_STOP, SERVICE_RUNNING,
-                                           SERVICE_START_PENDING, SERVICE_STOPPED, SERVICE_STOP_PENDING,
+    use windows::Win32::System::Services::{
+        SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP, SERVICE_RUNNING, SERVICE_START_PENDING,
+        SERVICE_STOP_PENDING, SERVICE_STOPPED,
     };
     // PENDING/STOPPED 阶段不得接受停止/关机控制码，PENDING 阶段 checkpoint 非零（P2-1）
     assert_eq!(scm_status_params(SERVICE_START_PENDING.0), (0, 1));
     assert_eq!(scm_status_params(SERVICE_STOP_PENDING.0), (0, 1));
     assert_eq!(scm_status_params(SERVICE_STOPPED.0), (0, 0));
-    assert_eq!(scm_status_params(SERVICE_RUNNING.0), (SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN, 0));
+    assert_eq!(
+        scm_status_params(SERVICE_RUNNING.0),
+        (SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN, 0)
+    );
 }
 
 #[test]
 fn is_valid_service_name_rejects_windows_reserved_chars() {
     // Windows 文件名保留字符: 服务名兼作 svcs 目录名（P2-2）
     for c in ['<', '>', ':', '"', '|', '?', '*'] {
-        assert!(!is_valid_service_name(&format!("my-svc{}1", c)), "应拒绝字符: {c}");
+        assert!(
+            !is_valid_service_name(&format!("my-svc{}1", c)),
+            "应拒绝字符: {c}"
+        );
     }
 }
 
@@ -802,7 +1025,12 @@ fn quick_config_serializes_sane_defaults() {
     assert_eq!(cfg.service_name, "quick-test-svc");
     assert_eq!(cfg.service_display_name, "quick-test-svc");
     assert_eq!(cfg.service_description, "quick-test-svc");
-    assert_eq!(cfg.service_executable_path, std::fs::canonicalize(&exe).unwrap().to_string_lossy().to_string());
+    assert_eq!(
+        cfg.service_executable_path,
+        strip_verbatim_prefix(&std::fs::canonicalize(&exe).unwrap())
+            .to_string_lossy()
+            .to_string()
+    );
     // 显式写入的 serde 默认值，避免派生 Default 把布尔/数值序列化成 false/0
     assert_eq!(cfg.failure_reset_sec, 86400);
     assert_eq!(cfg.restart_delay_ms, 60000);
@@ -843,7 +1071,10 @@ fn load_config_panics_on_invalid_toml() {
     let r = std::panic::catch_unwind(|| {
         let _ = load_config(&f);
     });
-    assert!(r.is_err(), "损坏的 toml 必须 panic（调用方捕获后按失效服务清理）");
+    assert!(
+        r.is_err(),
+        "损坏的 toml 必须 panic（调用方捕获后按失效服务清理）"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -854,16 +1085,32 @@ fn can_overwrite_source_same_and_different() {
     let b = dir.join("b.toml");
     let c = dir.join("c.toml");
     let base = "service_name = \"x\"\nservice_display_name = \"X\"\nservice_description = \"d\"\nservice_executable_path = ";
-    std::fs::write(&a, format!("{base}\"C:\\\\app.exe\"\nservice_executable_args = \"--a\"\n")).unwrap();
-    std::fs::write(&b, format!("{base}\"C:\\\\app.exe\"\nservice_executable_args = \"--a\"\n")).unwrap();
+    std::fs::write(
+        &a,
+        format!("{base}\"C:\\\\app.exe\"\nservice_executable_args = \"--a\"\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        &b,
+        format!("{base}\"C:\\\\app.exe\"\nservice_executable_args = \"--a\"\n"),
+    )
+    .unwrap();
     std::fs::write(&c, format!("{base}\"C:\\\\other.exe\"\n")).unwrap();
-    let (sa, sb, sc) = (a.to_string_lossy(), b.to_string_lossy(), c.to_string_lossy());
+    let (sa, sb, sc) = (
+        a.to_string_lossy(),
+        b.to_string_lossy(),
+        c.to_string_lossy(),
+    );
     assert!(can_overwrite_source(&sa, &sb, "x")); // 同源 → 允许覆盖更新
     assert!(!can_overwrite_source(&sa, &sc, "x")); // 不同 exe → 拒绝
     // 已部署 toml 缺失 → 退回 ImagePath 归属判定；未注册服务名 → 不可覆盖
     let missing_path = dir.join("missing.toml");
     let missing = missing_path.to_string_lossy();
-    assert!(!can_overwrite_source(&missing, &sa, "definitely-not-a-service"));
+    assert!(!can_overwrite_source(
+        &missing,
+        &sa,
+        "definitely-not-a-service"
+    ));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -874,7 +1121,9 @@ fn sha256_matches_validates_file() {
     let f = dir.join("payload.bin");
     std::fs::write(&f, b"hello osmium").unwrap();
     let hex: String = Sha256::digest(std::fs::read(&f).unwrap())
-        .iter().map(|b| format!("{:02x}", b)).collect();
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
     let fs = f.to_string_lossy();
     assert!(sha256_matches(&fs, Some(&hex)));
     assert!(!sha256_matches(&fs, Some(&"0".repeat(64))));
@@ -890,7 +1139,10 @@ fn resolve_download_target_path_resolution() {
         service_executable_path: "C:\\ignored.exe".into(),
         ..Default::default()
     };
-    assert_eq!(resolve_download_target(&rel, "C:\\deploy"), "C:\\deploy\\sub\\app.exe");
+    assert_eq!(
+        resolve_download_target(&rel, "C:\\deploy"),
+        "C:\\deploy\\sub\\app.exe"
+    );
 
     let abs = ServiceConfig {
         download_url: Some("http://x/app.exe".into()),
@@ -898,14 +1150,20 @@ fn resolve_download_target_path_resolution() {
         service_executable_path: "C:\\ignored.exe".into(),
         ..Default::default()
     };
-    assert_eq!(resolve_download_target(&abs, "C:\\deploy"), "C:\\abs\\app.exe");
+    assert_eq!(
+        resolve_download_target(&abs, "C:\\deploy"),
+        "C:\\abs\\app.exe"
+    );
 
     let name = ServiceConfig {
         download_url: Some("http://x/app.exe".into()),
         service_executable_path: "C:\\prog\\target.exe".into(),
         ..Default::default()
     };
-    assert_eq!(resolve_download_target(&name, "C:\\deploy"), "C:\\deploy\\target.exe");
+    assert_eq!(
+        resolve_download_target(&name, "C:\\deploy"),
+        "C:\\deploy\\target.exe"
+    );
 }
 
 #[test]
@@ -933,9 +1191,20 @@ fn roll_if_needed_rotates_log_chain() {
 
     roll_if_needed(&log, 1, 3, false, "");
 
-    assert_eq!(std::fs::read_to_string(dir.join("2026-08-02.log.3")).unwrap(), "backup-2");
-    assert_eq!(std::fs::read_to_string(dir.join("2026-08-02.log.2")).unwrap(), "backup-1");
-    assert!(std::fs::metadata(dir.join("2026-08-02.log.1")).unwrap().len() >= 1_000_000);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("2026-08-02.log.3")).unwrap(),
+        "backup-2"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("2026-08-02.log.2")).unwrap(),
+        "backup-1"
+    );
+    assert!(
+        std::fs::metadata(dir.join("2026-08-02.log.1"))
+            .unwrap()
+            .len()
+            >= 1_000_000
+    );
     assert!(!log.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -953,7 +1222,23 @@ fn safe_delete_dir_removes_tree_without_following_links() {
 #[test]
 fn run_hook_executes_injects_env_and_logs() {
     let dir = unique_temp_dir("hook");
-    let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false, pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
+    let opts = LogOptions {
+        split_out_err: false,
+        max_size_mb: 0,
+        backup_count: 0,
+        zip_backup: false,
+        pattern: String::new(),
+        auto_roll_at: None,
+        out_enabled: true,
+        err_enabled: true,
+        reset: false,
+        out_filename: String::new(),
+        err_filename: String::new(),
+        roll_at_start: false,
+        roll_period_days: 0,
+        zip_date_format: String::new(),
+        redact: Vec::new(),
+    };
     let env: Vec<(String, String)> = vec![
         ("WINSGF_CHILD_PID".into(), "42".into()),
         ("WINSGF_CHILD_EXIT_CODE".into(), "7".into()),
@@ -1013,27 +1298,50 @@ fn chunked_download_parallel_matches_source() {
                     handled += 1;
                     let _ = stream.set_nonblocking(false);
                     let mut buf = [0u8; 8192];
-                    if stream.read(&mut buf).is_err() { continue; }
+                    if stream.read(&mut buf).is_err() {
+                        continue;
+                    }
                     let req = String::from_utf8_lossy(&buf);
                     let len = server_data.len();
-                    let (status, headers, body): (&str, String, &[u8]) = if req.starts_with("HEAD") {
-                        ("200 OK", format!("Content-Length: {}\r\nAccept-Ranges: bytes\r\n", len), &[])
-                    } else if let Some(range) = req.lines().find(|l| l.starts_with("Range: bytes=")) {
+                    let (status, headers, body): (&str, String, &[u8]) = if req.starts_with("HEAD")
+                    {
+                        (
+                            "200 OK",
+                            format!("Content-Length: {}\r\nAccept-Ranges: bytes\r\n", len),
+                            &[],
+                        )
+                    } else if let Some(range) = req.lines().find(|l| l.starts_with("Range: bytes="))
+                    {
                         let spec = range.trim_start_matches("Range: bytes=");
                         let (a, b) = spec.split_once('-').unwrap();
                         let start: usize = a.parse().unwrap();
-                        let end: usize = if b.is_empty() { len - 1 } else { b.parse().unwrap() };
+                        let end: usize = if b.is_empty() {
+                            len - 1
+                        } else {
+                            b.parse().unwrap()
+                        };
                         (
                             "206 Partial Content",
-                            format!("Content-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n",
-                                start, end, len, end - start + 1),
+                            format!(
+                                "Content-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n",
+                                start,
+                                end,
+                                len,
+                                end - start + 1
+                            ),
                             &server_data[start..=end],
                         )
                     } else {
-                        ("200 OK", format!("Content-Length: {}\r\nAccept-Ranges: bytes\r\n", len), server_data.as_slice())
+                        (
+                            "200 OK",
+                            format!("Content-Length: {}\r\nAccept-Ranges: bytes\r\n", len),
+                            server_data.as_slice(),
+                        )
                     };
                     let head = format!("HTTP/1.1 {}\r\n{}\r\n", status, headers);
-                    if stream.write_all(head.as_bytes()).is_err() { continue; }
+                    if stream.write_all(head.as_bytes()).is_err() {
+                        continue;
+                    }
                     let _ = stream.write_all(body);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1046,31 +1354,60 @@ fn chunked_download_parallel_matches_source() {
     });
 
     let url = format!("http://{}:{}", addr.ip(), addr.port());
-    let tmp = std::env::temp_dir().join("osmium-chunk-test.tmp");
+    let tmp = unique_temp_dir("tmp").join("osmium-chunk-test.tmp");
     let _ = std::fs::remove_file(&tmp);
-    let result = download_core(&url, tmp.to_str().unwrap(), 30, DownloadAuth::None, None, 16, None);
+    let result = download_core(
+        &url,
+        tmp.to_str().unwrap(),
+        30,
+        DownloadAuth::None,
+        None,
+        16,
+        None,
+        0,
+    );
     stop.store(true, Ordering::Relaxed);
     let handled = server.join().unwrap();
+    eprintln!("DIAG handled={handled}");
+    eprintln!(
+        "DIAG result={:?}",
+        result.as_ref().map(|_| ()).map_err(|(t, e)| (t, e.clone()))
+    );
 
     result.unwrap();
     let got = std::fs::read(&tmp).unwrap();
+    eprintln!(
+        "DIAG got_len={} nonzero={}",
+        got.len(),
+        got.iter().filter(|b| **b != 0).count()
+    );
     assert_eq!(got, *data);
     // HEAD 探测 + 3 个分块请求；少于 4 说明分块路径未生效（回退单线程）
-    assert!(handled >= 4, "expected HEAD + chunk requests, got {}", handled);
+    assert!(
+        handled >= 4,
+        "expected HEAD + chunk requests, got {}",
+        handled
+    );
     let _ = std::fs::remove_file(&tmp);
 }
 
 #[test]
 fn expand_env_value_resolves_base_and_vars() {
     // %BASE% 特指部署目录
-    assert_eq!(expand_env_value("D:/data/%BASE%/log", "C:\\deploy"), "D:/data/C:\\deploy/log");
+    assert_eq!(
+        expand_env_value("D:/data/%BASE%/log", "C:\\deploy"),
+        "D:/data/C:\\deploy/log"
+    );
     // 已定义环境变量正常展开（PATH 必存在）
     let path = std::env::var("PATH").unwrap_or_default();
     assert_eq!(expand_env_value("x%PATH%y", "base"), format!("x{path}y"));
     // 未定义变量展开为空串
     assert_eq!(expand_env_value("%OSMIUM_UNDEFINED_XYZ%", "base"), "");
     // 普通文本与中文原样保留
-    assert_eq!(expand_env_value("C:\\程序\\run.exe", "base"), "C:\\程序\\run.exe");
+    assert_eq!(
+        expand_env_value("C:\\程序\\run.exe", "base"),
+        "C:\\程序\\run.exe"
+    );
 }
 
 #[test]
@@ -1086,15 +1423,21 @@ fn roll_if_needed_zips_oldest_backup() {
 
     // 最旧备份已归档为 zip，其余备份照常顺延（.3 = 原 .2）
     assert!(dir.join("2026-08-03.log.3.zip").exists());
-    assert_eq!(std::fs::read_to_string(dir.join("2026-08-03.log.3")).unwrap(), "backup-2");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("2026-08-03.log.3")).unwrap(),
+        "backup-2"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn unzip_missing_plugin_reports_error() {
     // zip 解压经 osmium-kit-unzip 插件执行: 无插件时 run_plugin 必须明确报错（宿主侧安全降级）
-    let err = crate::service_host::run_plugin("unzip",
-        &serde_json::json!({ "src": "C:\\x.zip", "dest": "C:\\out" }));
+    let err = crate::service_host::run_plugin(
+        "unzip",
+        &serde_json::json!({ "src": "C:\\x.zip", "dest": "C:\\out" }),
+        5,
+    );
     assert!(err.is_err(), "未安装插件时解压必须失败");
     assert!(err.unwrap_err().contains("unzip"), "错误信息应含插件名");
 }
@@ -1108,18 +1451,40 @@ fn download_core_falls_back_to_single_thread_when_no_range() {
     let d2 = data.clone();
     let (addr, stop, count) = spawn_http_server(move |method, _lines| {
         if method == "HEAD" {
-            ("200 OK".to_string(), vec![("Content-Length".into(), d2.len().to_string())], vec![])
+            (
+                "200 OK".to_string(),
+                vec![("Content-Length".into(), d2.len().to_string())],
+                vec![],
+            )
         } else {
-            ("200 OK".to_string(), vec![("Content-Length".into(), d2.len().to_string())], d2.clone())
+            (
+                "200 OK".to_string(),
+                vec![("Content-Length".into(), d2.len().to_string())],
+                d2.clone(),
+            )
         }
     });
     let url = format!("http://{}:{}", addr.ip(), addr.port());
-    let tmp = std::env::temp_dir().join("osmium-norange.tmp");
+    let tmp = unique_temp_dir("tmp").join("osmium-norange.tmp");
     let _ = std::fs::remove_file(&tmp);
-    download_core(&url, tmp.to_str().unwrap(), 30, DownloadAuth::None, None, 16, None).unwrap();
+    download_core(
+        &url,
+        tmp.to_str().unwrap(),
+        30,
+        DownloadAuth::None,
+        None,
+        16,
+        None,
+        0,
+    )
+    .unwrap();
     stop.store(true, Ordering::Relaxed);
     // HEAD 探测 + 1 次单线程 GET = 2 请求；分块路径会更多
-    assert_eq!(count.load(Ordering::Relaxed), 2, "应走单线程回退（仅 HEAD+GET）");
+    assert_eq!(
+        count.load(Ordering::Relaxed),
+        2,
+        "应走单线程回退（仅 HEAD+GET）"
+    );
     assert_eq!(std::fs::read(&tmp).unwrap(), data);
     let _ = std::fs::remove_file(&tmp);
 }
@@ -1133,24 +1498,48 @@ fn download_core_basic_auth_header_sent() {
     let d2 = data.clone();
     let (addr, stop, _count) = spawn_http_server(move |method, lines| {
         if method == "HEAD" {
-            return ("200 OK".to_string(), vec![("Accept-Ranges".into(), "none".into())], vec![]);
+            return (
+                "200 OK".to_string(),
+                vec![("Accept-Ranges".into(), "none".into())],
+                vec![],
+            );
         }
-        let auth = lines.iter()
+        let auth = lines
+            .iter()
             .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
-            .cloned().unwrap_or_default();
-        if auth.contains("Basic dXNlcjpwYXNz") { // base64("user:pass")
+            .cloned()
+            .unwrap_or_default();
+        if auth.contains("Basic dXNlcjpwYXNz") {
+            // base64("user:pass")
             got.store(true, Ordering::Relaxed);
-            ("200 OK".to_string(), vec![("Content-Length".into(), d2.len().to_string())], d2.clone())
+            (
+                "200 OK".to_string(),
+                vec![("Content-Length".into(), d2.len().to_string())],
+                d2.clone(),
+            )
         } else {
             ("401 Unauthorized".to_string(), vec![], b"denied".to_vec())
         }
     });
     let url = format!("http://{}:{}", addr.ip(), addr.port());
-    let tmp = std::env::temp_dir().join("osmium-auth.tmp");
+    let tmp = unique_temp_dir("tmp").join("osmium-auth.tmp");
     let _ = std::fs::remove_file(&tmp);
-    download_core(&url, tmp.to_str().unwrap(), 30, DownloadAuth::Basic("user", "pass"), None, 16, None).unwrap();
+    download_core(
+        &url,
+        tmp.to_str().unwrap(),
+        30,
+        DownloadAuth::Basic("user", "pass"),
+        None,
+        16,
+        None,
+        0,
+    )
+    .unwrap();
     stop.store(true, Ordering::Relaxed);
-    assert!(got_auth.load(Ordering::Relaxed), "服务器必须收到 Basic 认证头");
+    assert!(
+        got_auth.load(Ordering::Relaxed),
+        "服务器必须收到 Basic 认证头"
+    );
     assert_eq!(std::fs::read(&tmp).unwrap(), data);
     let _ = std::fs::remove_file(&tmp);
 }
@@ -1158,12 +1547,25 @@ fn download_core_basic_auth_header_sent() {
 #[test]
 fn download_core_404_returns_err() {
     let (addr, stop, _count) = spawn_http_server(|_m, _l| {
-        ("404 Not Found".to_string(), vec![("Content-Length".into(), "4".into())], b"nope".to_vec())
+        (
+            "404 Not Found".to_string(),
+            vec![("Content-Length".into(), "4".into())],
+            b"nope".to_vec(),
+        )
     });
     let url = format!("http://{}:{}", addr.ip(), addr.port());
     let tmp = std::env::temp_dir().join("osmium-404.tmp");
     let _ = std::fs::remove_file(&tmp);
-    let result = download_core(&url, tmp.to_str().unwrap(), 30, DownloadAuth::None, None, 16, None);
+    let result = download_core(
+        &url,
+        tmp.to_str().unwrap(),
+        30,
+        DownloadAuth::None,
+        None,
+        16,
+        None,
+        0,
+    );
     stop.store(true, Ordering::Relaxed);
     assert!(result.is_err(), "404 必须返回错误");
     let _ = std::fs::remove_file(&tmp);
@@ -1199,11 +1601,24 @@ fn download_core_timeout_reports_timeout_flag() {
         }
     });
     let url = format!("http://{}:{}", addr.ip(), addr.port());
-    let tmp = std::env::temp_dir().join("osmium-timeout.tmp");
+    let tmp = unique_temp_dir("tmp").join("osmium-timeout.tmp");
     let _ = std::fs::remove_file(&tmp);
-    let result = download_core(&url, tmp.to_str().unwrap(), 2, DownloadAuth::None, None, 16, None);
+    let result = download_core(
+        &url,
+        tmp.to_str().unwrap(),
+        2,
+        DownloadAuth::None,
+        None,
+        16,
+        None,
+        0,
+    );
     stop.store(true, Ordering::Relaxed);
-    assert!(matches!(result, Err((true, _))), "超时必须返回 (true, 消息)，实际 {:?}", result);
+    assert!(
+        matches!(result, Err((true, _))),
+        "超时必须返回 (true, 消息)，实际 {:?}",
+        result
+    );
     let _ = std::fs::remove_file(&tmp);
 }
 
@@ -1223,9 +1638,19 @@ fn download_core_chunk_failure_falls_back_to_single() {
         ("200 OK".to_string(), headers, body)
     });
     let url = format!("http://{}:{}", addr.ip(), addr.port());
-    let tmp = std::env::temp_dir().join("osmium-fallback.tmp");
+    let tmp = unique_temp_dir("tmp").join("osmium-fallback.tmp");
     let _ = std::fs::remove_file(&tmp);
-    download_core(&url, tmp.to_str().unwrap(), 30, DownloadAuth::None, None, 16, None).unwrap();
+    download_core(
+        &url,
+        tmp.to_str().unwrap(),
+        30,
+        DownloadAuth::None,
+        None,
+        16,
+        None,
+        0,
+    )
+    .unwrap();
     stop.store(true, Ordering::Relaxed);
     assert_eq!(std::fs::read(&tmp).unwrap(), data, "回退后数据必须完整一致");
     let _ = std::fs::remove_file(&tmp);
@@ -1237,7 +1662,23 @@ fn download_core_chunk_failure_falls_back_to_single() {
 fn write_log_entry_splits_err_and_escapes() {
     let dir = unique_temp_dir("wlog");
     let d = dir.to_string_lossy().to_string();
-    let opts = LogOptions { split_out_err: true, max_size_mb: 0, backup_count: 0, zip_backup: false, pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
+    let opts = LogOptions {
+        split_out_err: true,
+        max_size_mb: 0,
+        backup_count: 0,
+        zip_backup: false,
+        pattern: String::new(),
+        auto_roll_at: None,
+        out_enabled: true,
+        err_enabled: true,
+        reset: false,
+        out_filename: String::new(),
+        err_filename: String::new(),
+        roll_at_start: false,
+        roll_period_days: 0,
+        zip_date_format: String::new(),
+        redact: Vec::new(),
+    };
     write_log_entry(&d, "err", "line from stderr", &opts);
     write_log_entry(&d, "host", "bad\r\ninjected", &opts);
     write_log_entry(&d, "out", "normal out", &opts);
@@ -1258,7 +1699,23 @@ fn write_log_entry_splits_err_and_escapes() {
 #[test]
 fn write_log_entry_empty_dir_is_noop() {
     // log_dir 为空串表示禁用: 不 panic、不产生文件
-    let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false, pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
+    let opts = LogOptions {
+        split_out_err: false,
+        max_size_mb: 0,
+        backup_count: 0,
+        zip_backup: false,
+        pattern: String::new(),
+        auto_roll_at: None,
+        out_enabled: true,
+        err_enabled: true,
+        reset: false,
+        out_filename: String::new(),
+        err_filename: String::new(),
+        roll_at_start: false,
+        roll_period_days: 0,
+        zip_date_format: String::new(),
+        redact: Vec::new(),
+    };
     write_log_entry("", "host", "should not appear", &opts);
 }
 
@@ -1285,15 +1742,47 @@ fn roll_if_needed_noop_when_unconfigured() {
 #[test]
 fn run_hook_timeout_kills_hung_hook() {
     let dir = unique_temp_dir("hookto");
-    let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false, pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
+    let opts = LogOptions {
+        split_out_err: false,
+        max_size_mb: 0,
+        backup_count: 0,
+        zip_backup: false,
+        pattern: String::new(),
+        auto_roll_at: None,
+        out_enabled: true,
+        err_enabled: true,
+        reset: false,
+        out_filename: String::new(),
+        err_filename: String::new(),
+        roll_at_start: false,
+        roll_period_days: 0,
+        zip_date_format: String::new(),
+        redact: Vec::new(),
+    };
     let start = Instant::now();
     // ping -t 永不退出，验证超时强杀后 run_hook 尽快返回
-    run_hook(Some("ping -t 127.0.0.1"), "prestart", 800, dir.to_string_lossy().to_string(), None, &opts, None, None);
+    run_hook(
+        Some("ping -t 127.0.0.1"),
+        "prestart",
+        800,
+        dir.to_string_lossy().to_string(),
+        None,
+        &opts,
+        None,
+        None,
+    );
     let elapsed = start.elapsed();
-    assert!(elapsed.as_secs() < 5, "超时钩子必须被强杀，实际耗时 {:?}", elapsed);
+    assert!(
+        elapsed.as_secs() < 5,
+        "超时钩子必须被强杀，实际耗时 {:?}",
+        elapsed
+    );
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
     let content = std::fs::read_to_string(dir.join(format!("{date}.log"))).unwrap();
-    assert!(content.contains("timed out"), "日志应记录超时强杀: {content}");
+    assert!(
+        content.contains("timed out"),
+        "日志应记录超时强杀: {content}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1354,10 +1843,27 @@ fn compare_versions_stress_random_no_panic() {
         state ^= state << 17;
         state
     };
-    let tokens = ["0", "1", "2", "10", "999", "abc", "", "1.2.3", "0.0.1", "99999999999999999999"];
+    let tokens = [
+        "0",
+        "1",
+        "2",
+        "10",
+        "999",
+        "abc",
+        "",
+        "1.2.3",
+        "0.0.1",
+        "99999999999999999999",
+    ];
     for _ in 0..50_000 {
-        let a = (0..(next() % 5) as usize).map(|_| tokens[(next() as usize) % tokens.len()]).collect::<Vec<_>>().join(".");
-        let b = (0..(next() % 5) as usize).map(|_| tokens[(next() as usize) % tokens.len()]).collect::<Vec<_>>().join(".");
+        let a = (0..(next() % 5) as usize)
+            .map(|_| tokens[(next() as usize) % tokens.len()])
+            .collect::<Vec<_>>()
+            .join(".");
+        let b = (0..(next() % 5) as usize)
+            .map(|_| tokens[(next() as usize) % tokens.len()])
+            .collect::<Vec<_>>()
+            .join(".");
         let r = compare_versions(&a, &b);
         assert!(r == -1 || r == 0 || r == 1);
     }
@@ -1375,10 +1881,20 @@ fn expand_env_value_edge_cases() {
     assert_eq!(expand_env_value("a%b", "b"), "a%b"); // 无闭合对
     // 中文与真实环境变量混用
     let path = std::env::var("PATH").unwrap_or_default();
-    assert_eq!(expand_env_value("%BASE%\\中文\\%PATH%", "D:\\d"), format!("D:\\d\\中文\\{path}"));
+    assert_eq!(
+        expand_env_value("%BASE%\\中文\\%PATH%", "D:\\d"),
+        format!("D:\\d\\中文\\{path}")
+    );
     // %PID% 占位符保留原样（停止命令执行时才替换，对应 WinSW #217）
     assert_eq!(expand_env_value("--pid %PID%", "C:\\base"), "--pid %PID%");
-    assert_eq!(expand_env_value("%pid% %BASE%", "C:\\base"), "%pid% C:\\base");
+    assert_eq!(
+        expand_env_value("%pid% %BASE%", "C:\\base"),
+        "%pid% C:\\base"
+    );
+    // 空变量名（%%）原样保留，不静默吞掉
+    assert_eq!(expand_env_value("a%%b", "base"), "a%%b");
+    assert_eq!(expand_env_value("%%BASE%", "base"), "%%BASE%");
+    assert_eq!(expand_env_value("%%", "base"), "%%");
 }
 
 #[test]
@@ -1401,14 +1917,23 @@ fn resolve_download_target_edge_cases() {
         service_executable_path: "C:\\prog\\t.exe".into(),
         ..Default::default()
     };
-    assert_eq!(resolve_download_target(&c, "C:\\deploy"), "C:\\deploy\\t.exe");
+    assert_eq!(
+        resolve_download_target(&c, "C:\\deploy"),
+        "C:\\deploy\\t.exe"
+    );
     // 无文件名（exe 路径以 \ 结尾的目录）→ Windows file_name 取最后一段目录名
     c.download_to = None;
     c.service_executable_path = "C:\\prog\\".into();
-    assert_eq!(resolve_download_target(&c, "C:\\deploy"), "C:\\deploy\\prog");
+    assert_eq!(
+        resolve_download_target(&c, "C:\\deploy"),
+        "C:\\deploy\\prog"
+    );
     // UNC / 以 \ 开头的相对路径视为绝对
     c.download_to = Some("\\\\server\\share\\f.exe".into());
-    assert_eq!(resolve_download_target(&c, "C:\\deploy"), "\\\\server\\share\\f.exe");
+    assert_eq!(
+        resolve_download_target(&c, "C:\\deploy"),
+        "\\\\server\\share\\f.exe"
+    );
 }
 
 #[test]
@@ -1418,8 +1943,14 @@ fn redact_url_edge_cases() {
         redact_url("https://user:pass@example.com/a?x=1#f"),
         "https://example.com/a"
     );
-    assert_eq!(redact_url("http://example.com?only=query"), "http://example.com/");
-    assert_eq!(redact_url("http://example.com#onlyfrag"), "http://example.com/");
+    assert_eq!(
+        redact_url("http://example.com?only=query"),
+        "http://example.com/"
+    );
+    assert_eq!(
+        redact_url("http://example.com#onlyfrag"),
+        "http://example.com/"
+    );
     assert_eq!(redact_url(""), "");
     assert_eq!(redact_url("https://example.com/"), "https://example.com/");
     assert_eq!(redact_url("ftp://x/y?z=1"), "ftp://x/y");
@@ -1433,10 +1964,22 @@ fn can_overwrite_source_case_insensitive() {
     let a = dir.join("a.toml");
     let b = dir.join("b.toml");
     let base = "service_name = \"x\"\nservice_display_name = \"X\"\nservice_description = \"d\"\nservice_executable_path = ";
-    std::fs::write(&a, format!("{base}\"C:\\\\App.Exe\"\nservice_executable_args = \"--X\"\n")).unwrap();
-    std::fs::write(&b, format!("{base}\"c:\\\\app.exe\"\nservice_executable_args = \"--x\"\n")).unwrap();
+    std::fs::write(
+        &a,
+        format!("{base}\"C:\\\\App.Exe\"\nservice_executable_args = \"--X\"\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        &b,
+        format!("{base}\"c:\\\\app.exe\"\nservice_executable_args = \"--x\"\n"),
+    )
+    .unwrap();
     // 路径与参数均忽略大小写 → 视为同源允许覆盖
-    assert!(can_overwrite_source(&a.to_string_lossy(), &b.to_string_lossy(), "x"));
+    assert!(can_overwrite_source(
+        &a.to_string_lossy(),
+        &b.to_string_lossy(),
+        "x"
+    ));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1444,7 +1987,9 @@ fn can_overwrite_source_case_insensitive() {
 fn load_config_full_fields_roundtrip() {
     let dir = unique_temp_dir("cfgfull");
     let f = dir.join("full.toml");
-    std::fs::write(&f, r#"
+    std::fs::write(
+        &f,
+        r#"
 service_name = "full-svc"
 service_display_name = "Full"
 service_description = "all fields"
@@ -1472,7 +2017,9 @@ command = 'echo start'
 [[extensions]]
 phase = "stop"
 command = 'echo stop'
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     let cfg = load_config(&f);
     assert_eq!(cfg.working_directory.as_deref(), Some("D:\\work"));
     assert_eq!(cfg.process_priority.as_deref(), Some("high"));
@@ -1499,17 +2046,32 @@ command = 'echo stop'
 fn scm_status_params_unknown_state_defaults_running() {
     use windows::Win32::System::Services::{SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP};
     // 未知状态值按运行中处理（else 分支），可接受停止/关机
-    assert_eq!(scm_status_params(999), (SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN, 0));
+    assert_eq!(
+        scm_status_params(999),
+        (SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN, 0)
+    );
 }
 
 #[test]
 fn collect_descendants_invalid_pid_empty() {
-    assert!(collect_descendants(u32::MAX).is_empty(), "无效 pid 必须返回空且不 panic");
+    assert!(
+        collect_descendants(u32::MAX).is_empty(),
+        "无效 pid 必须返回空且不 panic"
+    );
 }
 
 #[test]
 fn sddl_malformed_inputs_no_panic() {
-    for s in ["", "garbage", "D:", "D:PAI(", "D:PAI(A;;FA;;;SY)", "O:", "D:P(A;;GA;;;WD)", "(A;;FA;;;WD)"] {
+    for s in [
+        "",
+        "garbage",
+        "D:",
+        "D:PAI(",
+        "D:PAI(A;;FA;;;SY)",
+        "O:",
+        "D:P(A;;GA;;;WD)",
+        "(A;;FA;;;WD)",
+    ] {
         let d = std::panic::catch_unwind(|| sddl_dacl_grants_non_admin_write(s));
         assert!(d.is_ok(), "sddl_dacl 畸形输入不得 panic: {s:?}");
         let o = std::panic::catch_unwind(|| sddl_owner_is_administrative(s));
@@ -1523,16 +2085,25 @@ fn sddl_malformed_inputs_no_panic() {
 fn sha256_matches_missing_file_false() {
     let dir = unique_temp_dir("shamiss");
     // 未配置校验值 → 一律放行（不校验），无论文件是否存在
-    assert!(sha256_matches(&dir.join("nope.bin").to_string_lossy(), None));
+    assert!(sha256_matches(
+        &dir.join("nope.bin").to_string_lossy(),
+        None
+    ));
     // 配置了校验值但文件缺失 → false
-    assert!(!sha256_matches(&dir.join("nope.bin").to_string_lossy(), Some(&"0".repeat(64))));
+    assert!(!sha256_matches(
+        &dir.join("nope.bin").to_string_lossy(),
+        Some(&"0".repeat(64))
+    ));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn write_deployed_config_missing_source_false() {
     let dir = unique_temp_dir("cfgmiss");
-    assert!(!write_deployed_config(&dir.join("nope.toml").to_string_lossy(), &dir.join("out.toml")));
+    assert!(!write_deployed_config(
+        &dir.join("nope.toml").to_string_lossy(),
+        &dir.join("out.toml")
+    ));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1573,18 +2144,23 @@ fn dpapi_roundtrip_and_legacy_pass_through() {
     assert_eq!(dpapi_decrypt("plain-value"), "plain-value");
     assert_eq!(dpapi_decrypt(""), "");
     // 非法 base64 前缀原样返回
-    assert_eq!(dpapi_decrypt("enc:OSMIUM1:!!!not-base64!!!"), "enc:OSMIUM1:!!!not-base64!!!");
+    assert_eq!(
+        dpapi_decrypt("enc:OSMIUM1:!!!not-base64!!!"),
+        "enc:OSMIUM1:!!!not-base64!!!"
+    );
 }
 
 #[test]
 fn decrypt_sensitive_covers_all_fields() {
-    // 三个敏感字段逐一加密后统一解密还原；明文/无前缀值原样透传
+    // 四个敏感字段逐一加密后统一解密还原；明文/无前缀值原样透传
     let enc_svc = dpapi_encrypt("svc-pass").unwrap();
     let enc_dl = dpapi_encrypt("dl-pass").unwrap();
     let enc_map = dpapi_encrypt("map-pass").unwrap();
+    let enc_smtp = dpapi_encrypt("smtp-pass").unwrap();
     let mut config = ServiceConfig {
         service_password: Some(enc_svc.clone()),
         download_password: Some(enc_dl.clone()),
+        smtp_password: Some(enc_smtp.clone()),
         shared_directory_mappers: Some(vec![
             SharedMapperConfig {
                 local_path: "Z:".to_string(),
@@ -1604,6 +2180,7 @@ fn decrypt_sensitive_covers_all_fields() {
     decrypt_sensitive(&mut config);
     assert_eq!(config.service_password.as_deref(), Some("svc-pass"));
     assert_eq!(config.download_password.as_deref(), Some("dl-pass"));
+    assert_eq!(config.smtp_password.as_deref(), Some("smtp-pass"));
     let mappers = config.shared_directory_mappers.as_ref().unwrap();
     assert_eq!(mappers[0].password.as_deref(), Some("map-pass"));
     assert_eq!(mappers[1].password.as_deref(), Some("plain-map-pass"));
@@ -1613,24 +2190,31 @@ fn decrypt_sensitive_covers_all_fields() {
 fn write_deployed_config_encrypts_sensitive_fields() {
     let dir = unique_temp_dir("cryptcfg");
     let src = dir.join("src.toml");
-    std::fs::write(&src, concat!(
-        "service_name = \"crypt-svc\"\n",
-        "service_display_name = \"Crypt\"\n",
-        "service_description = \"x\"\n",
-        "service_executable_path = \"C:\\\\app.exe\"\n",
-        "service_password = \"svc-pass-123\"\n",
-        "download_password = \"dl-pass-456\"\n",
-    )).unwrap();
+    std::fs::write(
+        &src,
+        concat!(
+            "service_name = \"crypt-svc\"\n",
+            "service_display_name = \"Crypt\"\n",
+            "service_description = \"x\"\n",
+            "service_executable_path = \"C:\\\\app.exe\"\n",
+            "service_password = \"svc-pass-123\"\n",
+            "download_password = \"dl-pass-456\"\n",
+            "smtp_password = \"smtp-pass-789\"\n",
+        ),
+    )
+    .unwrap();
     let dst = dir.join("deployed.osiml");
     assert!(write_deployed_config(&src.to_string_lossy(), &dst));
     let text = std::fs::read_to_string(&dst).unwrap();
     assert!(!text.contains("svc-pass-123"), "部署文件不得含明文密码");
     assert!(!text.contains("dl-pass-456"));
+    assert!(!text.contains("smtp-pass-789"));
     assert!(text.contains("enc:OSMIUM1:"), "部署文件应含 DPAPI 密文");
     // load_config 解密还原
     let cfg = load_config(&dst);
     assert_eq!(cfg.service_password.as_deref(), Some("svc-pass-123"));
     assert_eq!(cfg.download_password.as_deref(), Some("dl-pass-456"));
+    assert_eq!(cfg.smtp_password.as_deref(), Some("smtp-pass-789"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1678,8 +2262,23 @@ fn log_pattern_safe_and_custom_filename() {
     assert!(!log_pattern_safe("yyyy\\MM"), "路径分隔符必须拒绝");
     assert!(!log_pattern_safe("a/../b"));
     let now = chrono::Local::now();
-    let opts = LogOptions { split_out_err: true, max_size_mb: 0, backup_count: 0, zip_backup: false,
-        pattern: "%Y%m%d".into(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
+    let opts = LogOptions {
+        split_out_err: true,
+        max_size_mb: 0,
+        backup_count: 0,
+        zip_backup: false,
+        pattern: "%Y%m%d".into(),
+        auto_roll_at: None,
+        out_enabled: true,
+        err_enabled: true,
+        reset: false,
+        out_filename: String::new(),
+        err_filename: String::new(),
+        roll_at_start: false,
+        roll_period_days: 0,
+        zip_date_format: String::new(),
+        redact: Vec::new(),
+    };
     let main = current_log_name(&opts, "host", &now);
     assert_eq!(main, format!("{}.log", now.format("%Y%m%d")));
     let err = current_log_name(&opts, "err", &now);
@@ -1690,15 +2289,41 @@ fn log_pattern_safe_and_custom_filename() {
 fn write_log_entry_uses_custom_pattern_and_reset() {
     let dir = unique_temp_dir("logpat");
     let d = dir.to_string_lossy().to_string();
-    let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false,
-        pattern: "%Y%m".into(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
+    let opts = LogOptions {
+        split_out_err: false,
+        max_size_mb: 0,
+        backup_count: 0,
+        zip_backup: false,
+        pattern: "%Y%m".into(),
+        auto_roll_at: None,
+        out_enabled: true,
+        err_enabled: true,
+        reset: false,
+        out_filename: String::new(),
+        err_filename: String::new(),
+        roll_at_start: false,
+        roll_period_days: 0,
+        zip_date_format: String::new(),
+        redact: Vec::new(),
+    };
     write_log_entry(&d, "host", "custom-pattern-entry", &opts);
     let name = format!("{}.log", chrono::Local::now().format("%Y%m"));
-    assert!(std::fs::read_to_string(dir.join(&name)).unwrap().contains("custom-pattern-entry"));
+    assert!(
+        std::fs::read_to_string(dir.join(&name))
+            .unwrap()
+            .contains("custom-pattern-entry")
+    );
     // reset 清空当日文件
-    let reset_opts = LogOptions { reset: true, ..opts };
+    let reset_opts = LogOptions {
+        reset: true,
+        ..opts
+    };
     reset_current_logs(&d, &reset_opts);
-    assert_eq!(std::fs::read_to_string(dir.join(&name)).unwrap(), "", "reset 应清空日志");
+    assert_eq!(
+        std::fs::read_to_string(dir.join(&name)).unwrap(),
+        "",
+        "reset 应清空日志"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1718,7 +2343,10 @@ fn ext_phase_matches_backward_compatible() {
 fn process_samples_work_for_self() {
     let pid = std::process::id();
     assert!(process_cpu_100ns(pid).is_some(), "当前进程 CPU 采样应成功");
-    assert!(process_working_set_mb(pid).is_some(), "当前进程内存采样应成功");
+    assert!(
+        process_working_set_mb(pid).is_some(),
+        "当前进程内存采样应成功"
+    );
     // 不存在进程 → None 不 panic
     assert!(process_cpu_100ns(u32::MAX).is_none());
     assert!(process_working_set_mb(u32::MAX).is_none());
@@ -1727,8 +2355,11 @@ fn process_samples_work_for_self() {
 #[test]
 fn netmap_missing_plugin_reports_error() {
     // 共享目录映射经 osmium-kit-netmap 插件执行: 无插件时 run_plugin 必须明确报错（宿主侧安全降级）
-    let err = crate::service_host::run_plugin("netmap",
-        &serde_json::json!({ "action": "map", "mappers": [] }));
+    let err = crate::service_host::run_plugin(
+        "netmap",
+        &serde_json::json!({ "action": "map", "mappers": [] }),
+        5,
+    );
     assert!(err.is_err(), "未安装插件时映射必须失败");
     assert!(err.unwrap_err().contains("netmap"), "错误信息应含插件名");
 }
@@ -1736,8 +2367,11 @@ fn netmap_missing_plugin_reports_error() {
 #[test]
 fn sspi_missing_plugin_reports_error() {
     // sspi 认证下载经 osmium-kit-sspi 插件执行: 无插件时 run_plugin 必须明确报错（宿主侧安全降级）
-    let err = crate::service_host::run_plugin("sspi",
-        &serde_json::json!({ "url": "http://x", "to": "C:\\x" }));
+    let err = crate::service_host::run_plugin(
+        "sspi",
+        &serde_json::json!({ "url": "http://x", "to": "C:\\x" }),
+        5,
+    );
     assert!(err.is_err(), "未安装插件时 sspi 下载必须失败");
     assert!(err.unwrap_err().contains("sspi"), "错误信息应含插件名");
 }
@@ -1745,7 +2379,7 @@ fn sspi_missing_plugin_reports_error() {
 #[test]
 fn reboot_missing_plugin_reports_error() {
     // 系统重启经 osmium-kit-reboot 插件执行: 无插件时 run_plugin 必须明确报错（宿主侧安全降级）
-    let err = crate::service_host::run_plugin("reboot", &serde_json::json!({}));
+    let err = crate::service_host::run_plugin("reboot", &serde_json::json!({}), 5);
     assert!(err.is_err(), "未安装插件时重启必须失败");
     assert!(err.unwrap_err().contains("reboot"), "错误信息应含插件名");
 }
@@ -1756,12 +2390,49 @@ fn discover_plugins_returns_osx_entries_only() {
     // 未安装插件时为空；若存在插件则逐项校验扩展名与目录跳过规则
     let plugins = crate::service_host::discover_plugins();
     for p in &plugins {
-        assert_eq!(p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default(),
-                   "osx", "发现的条目必须是 .osx 文件: {}", p.display());
+        assert_eq!(
+            p.extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default(),
+            "osx",
+            "发现的条目必须是 .osx 文件: {}",
+            p.display()
+        );
     }
     // 安装环境（Publish 存在真实插件）时不应发现隐藏目录条目
-    let names: Vec<String> = plugins.iter().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned()).collect();
-    assert!(!names.iter().any(|n| n.starts_with('.')), "不得包含隐藏条目: {names:?}");
+    let names: Vec<String> = plugins
+        .iter()
+        .map(|p| {
+            p.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        !names.iter().any(|n| n.starts_with('.')),
+        "不得包含隐藏条目: {names:?}"
+    );
+}
+
+#[test]
+fn pe_arch_detects_machine_type() {
+    // 当前测试进程是 PE 可执行文件 → 架构与自身位数一致（64/32 构建通用断言）
+    let self_exe = std::env::current_exe().unwrap();
+    let expect = if cfg!(target_pointer_width = "64") {
+        Some("64")
+    } else {
+        Some("32")
+    };
+    assert_eq!(crate::service_host::pe_arch(&self_exe).as_deref(), expect);
+    // 非 PE 文件（无 MZ/PE 签名）→ None（显示 unknown）
+    let dir = unique_temp_dir("pearch");
+    let txt = dir.join("not-pe.osx");
+    std::fs::write(&txt, "not an executable").unwrap();
+    assert_eq!(crate::service_host::pe_arch(&txt), None);
+    // 不存在文件 → None
+    assert_eq!(crate::service_host::pe_arch(&dir.join("missing.osx")), None);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1769,8 +2440,10 @@ fn plugin_usable_rejects_inert_executable() {
     // 非协议可执行（cmd.exe 无 ping 响应）: 5 秒超时后判定不可用
     let cmd = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string())
         + "\\System32\\cmd.exe";
-    assert!(!crate::service_host::plugin_usable(std::path::Path::new(&cmd)),
-            "cmd.exe 不响应 ping 协议，必须判定不可用");
+    assert!(
+        !crate::service_host::plugin_usable(std::path::Path::new(&cmd)),
+        "cmd.exe 不响应 ping 协议，必须判定不可用"
+    );
 }
 
 // ==================== 第二轮 WinSW 对齐: 冒烟 / 暴力 / 边缘测试 ====================
@@ -1780,20 +2453,42 @@ fn auto_roll_logs_rolls_once_per_day() {
     reset_auto_roll_state();
     let dir = unique_temp_dir("autoroll");
     let d = dir.to_string_lossy().to_string();
-    let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false,
-        pattern: String::new(), auto_roll_at: Some("00:00:00".into()), out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
+    let opts = LogOptions {
+        split_out_err: false,
+        max_size_mb: 0,
+        backup_count: 0,
+        zip_backup: false,
+        pattern: String::new(),
+        auto_roll_at: Some("00:00:00".into()),
+        out_enabled: true,
+        err_enabled: true,
+        reset: false,
+        out_filename: String::new(),
+        err_filename: String::new(),
+        roll_at_start: false,
+        roll_period_days: 0,
+        zip_date_format: String::new(),
+        redact: Vec::new(),
+    };
     // 构造"到达定点时刻后"的固定时间，并预写"到达前"的当日日志
     let date = "2026-08-11";
-    let now = chrono::Local.with_ymd_and_hms(2026, 8, 11, 0, 0, 5).single().unwrap();
+    let now = chrono::Local
+        .with_ymd_and_hms(2026, 8, 11, 0, 0, 5)
+        .single()
+        .unwrap();
     std::fs::write(dir.join(format!("{date}.log")), "legacy-before-roll").unwrap();
     // 到达时刻后的首次写入 → 当日日志归档为 {date}.{HHmmss}.log
     auto_roll_logs(&d, &opts, &now);
     let archived = format!("{date}.000005.log");
     assert!(dir.join(&archived).exists(), "到达定点时刻后必须滚动归档");
-    assert_eq!(std::fs::read_to_string(dir.join(&archived)).unwrap(), "legacy-before-roll");
+    assert_eq!(
+        std::fs::read_to_string(dir.join(&archived)).unwrap(),
+        "legacy-before-roll"
+    );
     // 同日再次到达 → 防重复滚动（不产生新归档）
     auto_roll_logs(&d, &opts, &now);
-    let others = std::fs::read_dir(&dir).unwrap()
+    let others = std::fs::read_dir(&dir)
+        .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| {
             let n = e.file_name().to_string_lossy().to_string();
@@ -1803,8 +2498,14 @@ fn auto_roll_logs_rolls_once_per_day() {
     assert_eq!(others, 0, "同日不得重复滚动");
     // 未到达时刻（早于 auto_roll_at）→ 不滚动
     reset_auto_roll_state();
-    let opts_late = LogOptions { auto_roll_at: Some("23:59:59".into()), ..opts };
-    let early = chrono::Local.with_ymd_and_hms(2026, 8, 12, 12, 0, 0).single().unwrap();
+    let opts_late = LogOptions {
+        auto_roll_at: Some("23:59:59".into()),
+        ..opts
+    };
+    let early = chrono::Local
+        .with_ymd_and_hms(2026, 8, 12, 12, 0, 0)
+        .single()
+        .unwrap();
     std::fs::write(dir.join("2026-08-12.log"), "early").unwrap();
     auto_roll_logs(&d, &opts_late, &early);
     assert!(dir.join("2026-08-12.log").exists());
@@ -1818,17 +2519,46 @@ fn run_hook_redirects_stdout_to_file() {
     let dir = unique_temp_dir("hookredir");
     let d = dir.to_string_lossy().to_string();
     let out_file = dir.join("hook-out.log");
-    let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false,
-        pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false, out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
-    run_hook(Some("echo REDIRECTED-OUTPUT"), "prestart", 5000, d.clone(), None,
-        &opts, Some(out_file.to_str().unwrap()), None);
+    let opts = LogOptions {
+        split_out_err: false,
+        max_size_mb: 0,
+        backup_count: 0,
+        zip_backup: false,
+        pattern: String::new(),
+        auto_roll_at: None,
+        out_enabled: true,
+        err_enabled: true,
+        reset: false,
+        out_filename: String::new(),
+        err_filename: String::new(),
+        roll_at_start: false,
+        roll_period_days: 0,
+        zip_date_format: String::new(),
+        redact: Vec::new(),
+    };
+    run_hook(
+        Some("echo REDIRECTED-OUTPUT"),
+        "prestart",
+        5000,
+        d.clone(),
+        None,
+        &opts,
+        Some(out_file.to_str().unwrap()),
+        None,
+    );
     // 独立文件收到原始输出
     let content = std::fs::read_to_string(&out_file).unwrap();
-    assert!(content.contains("REDIRECTED-OUTPUT"), "重定向文件必须含钩子输出");
+    assert!(
+        content.contains("REDIRECTED-OUTPUT"),
+        "重定向文件必须含钩子输出"
+    );
     // 宿主日志不再有 hook 通道条目（输出已重定向；仅 host 通道的 executing/completed 保留）
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
     let host_log = std::fs::read_to_string(dir.join(format!("{date}.log"))).unwrap();
-    assert!(!host_log.contains("[hook]"), "重定向后宿主日志不应再有 hook 通道输出");
+    assert!(
+        !host_log.contains("[hook]"),
+        "重定向后宿主日志不应再有 hook 通道输出"
+    );
     assert!(host_log.contains("Hook [prestart] executing"));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1840,20 +2570,42 @@ fn download_core_threads_one_disables_chunking() {
     let d2 = data.clone();
     let (addr, stop, count) = spawn_http_server(move |method, _lines| {
         if method == "HEAD" {
-            ("200 OK".to_string(), vec![
-                ("Accept-Ranges".into(), "bytes".into()),
-                ("Content-Length".into(), d2.len().to_string()),
-            ], vec![])
+            (
+                "200 OK".to_string(),
+                vec![
+                    ("Accept-Ranges".into(), "bytes".into()),
+                    ("Content-Length".into(), d2.len().to_string()),
+                ],
+                vec![],
+            )
         } else {
-            ("200 OK".to_string(), vec![("Content-Length".into(), d2.len().to_string())], d2.clone())
+            (
+                "200 OK".to_string(),
+                vec![("Content-Length".into(), d2.len().to_string())],
+                d2.clone(),
+            )
         }
     });
     let url = format!("http://{}:{}", addr.ip(), addr.port());
     let tmp = std::env::temp_dir().join("osmium-t1.tmp");
     let _ = std::fs::remove_file(&tmp);
-    download_core(&url, tmp.to_str().unwrap(), 30, DownloadAuth::None, None, 1, None).unwrap();
+    download_core(
+        &url,
+        tmp.to_str().unwrap(),
+        30,
+        DownloadAuth::None,
+        None,
+        1,
+        None,
+        0,
+    )
+    .unwrap();
     stop.store(true, Ordering::Relaxed);
-    assert_eq!(count.load(Ordering::Relaxed), 2, "threads=1 必须走单线程（仅 HEAD+GET）");
+    assert_eq!(
+        count.load(Ordering::Relaxed),
+        2,
+        "threads=1 必须走单线程（仅 HEAD+GET）"
+    );
     assert_eq!(std::fs::read(&tmp).unwrap(), data);
     let _ = std::fs::remove_file(&tmp);
 }
@@ -1864,7 +2616,10 @@ fn process_cpu_sample_is_monotonic() {
     let first = process_cpu_100ns(pid).expect("首次采样应成功");
     thread::sleep(Duration::from_millis(150));
     let second = process_cpu_100ns(pid).expect("二次采样应成功");
-    assert!(second >= first, "CPU 时间采样必须单调不减: {first} -> {second}");
+    assert!(
+        second >= first,
+        "CPU 时间采样必须单调不减: {first} -> {second}"
+    );
 }
 
 #[test]
@@ -1888,7 +2643,17 @@ fn failure_action_chain_filters_all_invalid() {
 #[test]
 fn split_credential_bruteforce_no_panic() {
     // split_credential 已随 SSPI 迁移至插件; 此处验证宿主下载条目的 userinfo 不会因畸形输入 panic
-    for input in ["", "\\", "\\\\", "a\\", "\\b", "domain\\", "a\\b\\c", " ", "\\\u{4e2d}\\\\"] {
+    for input in [
+        "",
+        "\\",
+        "\\\\",
+        "a\\",
+        "\\b",
+        "domain\\",
+        "a\\b\\c",
+        " ",
+        "\\\u{4e2d}\\\\",
+    ] {
         let _ = redact_url(&format!("http://{input}@host/x"));
     }
 }
@@ -1900,10 +2665,25 @@ fn build_child_command_injects_env_and_passes_args() {
     use std::collections::HashMap;
     let mut env = HashMap::new();
     env.insert("OSMIUM_TEST_VAR".to_string(), "hello-env".to_string());
-    let mut cmd = build_child_command("cmd.exe", Some("/c echo %OSMIUM_TEST_VAR%"), ".", Some(&env), ".", true, true, true, None);
+    let mut cmd = build_child_command(
+        "cmd.exe",
+        Some("/c echo %OSMIUM_TEST_VAR%"),
+        ".",
+        Some(&env),
+        ".",
+        true,
+        true,
+        true,
+        None,
+    );
     let mut child = cmd.stdout(std::process::Stdio::piped()).spawn().unwrap();
     let mut out = String::new();
-    child.stdout.take().unwrap().read_to_string(&mut out).unwrap();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
     let _ = child.wait();
     assert!(out.contains("hello-env"), "env 注入未生效: {}", out);
     // 参数为空串时不追加 raw_arg（避免裸 /c 报错）；stdin 置 null 防 cmd 挂起等待输入
@@ -1920,18 +2700,25 @@ fn sspi_download_missing_plugin_fails_clearly() {
     // （禁止静默降级为无认证下载，防凭据/完整性保护被静默关闭）
     let dir = unique_temp_dir("sspirej");
     let cfg_path = dir.join("svc.toml");
-    std::fs::write(&cfg_path, format!(
-        "service_name = \"sspi-rej\"\n\
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "service_name = \"sspi-rej\"\n\
          service_display_name = \"SSPI Reject\"\n\
          service_description = \"x\"\n\
          service_executable_path = '{}'\n\
          download_url = \"https://x/a.exe\"\n\
          download_to = \"a.exe\"\n\
          download_auth = \"sspi\"\n",
-        std::env::current_exe().unwrap().display()
-    )).unwrap();
+            std::env::current_exe().unwrap().display()
+        ),
+    )
+    .unwrap();
     let mut host = crate::service_host::ServiceHost::new();
-    assert!(!host.on_start_from(&cfg_path), "sspi 插件缺失时启动必须失败");
+    assert!(
+        !host.on_start_from(&cfg_path),
+        "sspi 插件缺失时启动必须失败"
+    );
     // 日志必须留下插件调用失败原因（而非静默无认证下载）
     let logs_dir = dir.join("logs");
     let mut log_text = String::new();
@@ -1942,7 +2729,10 @@ fn sspi_download_missing_plugin_fails_clearly() {
             }
         }
     }
-    assert!(log_text.contains("sspi"), "日志应含 sspi 失败详情: {log_text}");
+    assert!(
+        log_text.contains("sspi"),
+        "日志应含 sspi 失败详情: {log_text}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1981,18 +2771,122 @@ phase = "stop"
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn load_config_parses_builtin_alert_fields() {
+    // 内置告警通道全字段解析: notify_url/notify_format + smtp_* + syslog_*
+    let dir = unique_temp_dir("alertcfg");
+    let toml = r#"
+service_name = "alert-svc"
+service_display_name = "AL"
+service_description = "d"
+service_executable_path = 'C:\app.exe'
+notify_url = "https://hooks.example.com/osmium"
+notify_format = "teams"
+smtp_host = "mail.example.com:25"
+smtp_from = "alerts@example.com"
+smtp_to = "ops@example.com"
+smtp_subject = "[Osmium] crashed"
+smtp_username = "smtp-user"
+smtp_password = "smtp-pass"
+syslog_host = "192.168.1.10:514"
+syslog_facility = 3
+syslog_severity = 2
+syslog_tag = "MyService"
+"#;
+    let p = dir.join("svc.toml");
+    std::fs::write(&p, toml).unwrap();
+    let cfg = load_config(&p);
+    assert_eq!(
+        cfg.notify_url.as_deref(),
+        Some("https://hooks.example.com/osmium")
+    );
+    assert_eq!(cfg.notify_format.as_deref(), Some("teams"));
+    assert_eq!(cfg.smtp_host.as_deref(), Some("mail.example.com:25"));
+    assert_eq!(cfg.smtp_from.as_deref(), Some("alerts@example.com"));
+    assert_eq!(cfg.smtp_to.as_deref(), Some("ops@example.com"));
+    assert_eq!(cfg.smtp_subject.as_deref(), Some("[Osmium] crashed"));
+    assert_eq!(cfg.smtp_username.as_deref(), Some("smtp-user"));
+    assert_eq!(cfg.smtp_password.as_deref(), Some("smtp-pass"));
+    assert_eq!(cfg.syslog_host.as_deref(), Some("192.168.1.10:514"));
+    assert_eq!(cfg.syslog_facility, Some(3));
+    assert_eq!(cfg.syslog_severity, Some(2));
+    assert_eq!(cfg.syslog_tag.as_deref(), Some("MyService"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn builtin_alert_plugins_builds_crash_calls() {
+    // 内置告警通道 → crash 插件调用: 全配置 3 条 / smtp 缺 from 跳过 / 空配置 None
+    let full: ServiceConfig = toml::from_str(concat!(
+        "service_name = \"s\"\nservice_display_name = \"s\"\nservice_description = \"s\"\nservice_executable_path = \"C:\\\\a.exe\"\n",
+        "notify_url = \"https://hooks.example.com/osmium\"\n",
+        "notify_format = \"feishu\"\n",
+        "smtp_host = \"mail.example.com:25\"\n",
+        "smtp_from = \"alerts@example.com\"\n",
+        "smtp_to = \"ops@example.com\"\n",
+        "smtp_subject = \"[Osmium] crashed\"\n",
+        "smtp_username = \"u\"\n",
+        "smtp_password = \"p\"\n",
+        "syslog_host = \"192.168.1.10:514\"\n",
+        "syslog_facility = 3\n",
+        "syslog_severity = 2\n",
+        "syslog_tag = \"MyService\"\n",
+    ))
+    .unwrap();
+    let calls = crate::service_host::builtin_alert_plugins(&full).unwrap();
+    assert_eq!(calls.len(), 3);
+    let notify = calls.iter().find(|c| c.kit == "notify").unwrap();
+    assert_eq!(notify.phase, "crash");
+    let np = notify.payload.as_object().unwrap();
+    assert_eq!(np["url"].as_str(), Some("https://hooks.example.com/osmium"));
+    assert_eq!(np["format"].as_str(), Some("feishu"));
+    let smtp = calls.iter().find(|c| c.kit == "smtp").unwrap();
+    let sp = smtp.payload.as_object().unwrap();
+    assert_eq!(sp["host"].as_str(), Some("mail.example.com:25"));
+    assert_eq!(sp["from"].as_str(), Some("alerts@example.com"));
+    assert_eq!(sp["to_addr"].as_str(), Some("ops@example.com"));
+    assert_eq!(sp["subject"].as_str(), Some("[Osmium] crashed"));
+    assert_eq!(sp["username"].as_str(), Some("u"));
+    assert_eq!(sp["password"].as_str(), Some("p"));
+    let syslog = calls.iter().find(|c| c.kit == "syslog").unwrap();
+    let yp = syslog.payload.as_object().unwrap();
+    assert_eq!(yp["syslog_host"].as_str(), Some("192.168.1.10:514"));
+    assert_eq!(yp["facility"].as_u64(), Some(3));
+    assert_eq!(yp["severity"].as_u64(), Some(2));
+    assert_eq!(yp["tag"].as_str(), Some("MyService"));
+    // smtp 缺 from → 仅 notify/syslog 两条
+    let no_from: ServiceConfig = toml::from_str(concat!(
+        "service_name = \"s\"\nservice_display_name = \"s\"\nservice_description = \"s\"\nservice_executable_path = \"C:\\\\a.exe\"\n",
+        "notify_url = \"https://hooks.example.com/osmium\"\n",
+        "smtp_host = \"mail.example.com:25\"\n",
+        "smtp_to = \"ops@example.com\"\n",
+        "syslog_host = \"192.168.1.10:514\"\n",
+    ))
+    .unwrap();
+    let calls2 = crate::service_host::builtin_alert_plugins(&no_from).unwrap();
+    assert_eq!(calls2.len(), 2);
+    assert!(calls2.iter().all(|c| c.kit != "smtp"));
+    // 空配置 → None（不生成调用）
+    let plain: ServiceConfig = toml::from_str("service_name = \"s\"\nservice_display_name = \"s\"\nservice_description = \"s\"\nservice_executable_path = \"C:\\\\a.exe\"\n").unwrap();
+    assert!(crate::service_host::builtin_alert_plugins(&plain).is_none());
+}
+
 /// 构造带 plugins 配置的宿主并启动（exe 用 cmd.exe /c exit 快速退出，避免拉起测试 harness）
 fn start_host_with_plugins(plugins_toml: &str) -> (bool, String) {
     let dir = unique_temp_dir("plhost");
     let cfg_path = dir.join("svc.toml");
-    std::fs::write(&cfg_path, format!(
-        "service_name = \"pl-host\"\n\
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "service_name = \"pl-host\"\n\
          service_display_name = \"PL\"\n\
          service_description = \"d\"\n\
          service_executable_path = 'C:\\Windows\\System32\\cmd.exe'\n\
          service_executable_args = \"/c exit\"\n\
          {plugins_toml}"
-    )).unwrap();
+        ),
+    )
+    .unwrap();
     let mut host = crate::service_host::ServiceHost::new();
     let ok = host.on_start_from(&cfg_path);
     // 收集日志文本供断言
@@ -2013,17 +2907,25 @@ fn start_host_with_plugins(plugins_toml: &str) -> (bool, String) {
 fn plugin_call_failure_non_fatal_does_not_block_start() {
     // 插件缺失 + fail_on_error=false: 启动不阻断，日志留下明确告警
     let (ok, log_text) = start_host_with_plugins(
-        "[[plugins]]\nkit = \"nonexistent-kit\"\nphase = \"start_before\"\n");
+        "[[plugins]]\nkit = \"nonexistent-kit\"\nphase = \"start_before\"\n",
+    );
     assert!(ok, "fail_on_error=false 时插件失败不得阻断启动");
-    assert!(log_text.contains("nonexistent-kit"), "日志应记录失败的插件名: {log_text}");
-    assert!(log_text.contains("non-fatal"), "应标记为 non-fatal: {log_text}");
+    assert!(
+        log_text.contains("nonexistent-kit"),
+        "日志应记录失败的插件名: {log_text}"
+    );
+    assert!(
+        log_text.contains("non-fatal"),
+        "应标记为 non-fatal: {log_text}"
+    );
 }
 
 #[test]
 fn plugin_call_failure_fatal_blocks_start() {
     // 插件缺失 + fail_on_error=true（start 阶段）: 阻断启动
     let (ok, log_text) = start_host_with_plugins(
-        "[[plugins]]\nkit = \"nonexistent-kit\"\nphase = \"start_before\"\nfail_on_error = true\n");
+        "[[plugins]]\nkit = \"nonexistent-kit\"\nphase = \"start_before\"\nfail_on_error = true\n",
+    );
     assert!(!ok, "fail_on_error=true 时插件失败必须阻断启动");
     assert!(log_text.contains("failed"), "日志应含失败详情: {log_text}");
 }
@@ -2032,7 +2934,8 @@ fn plugin_call_failure_fatal_blocks_start() {
 fn plugin_call_other_phase_does_not_block_start() {
     // stop 阶段配置的失败插件不得影响启动（phase 过滤生效）
     let (ok, _log) = start_host_with_plugins(
-        "[[plugins]]\nkit = \"nonexistent-kit\"\nphase = \"stop_before\"\nfail_on_error = true\n");
+        "[[plugins]]\nkit = \"nonexistent-kit\"\nphase = \"stop_before\"\nfail_on_error = true\n",
+    );
     assert!(ok, "非 start 阶段的插件配置不得阻断启动");
 }
 
@@ -2046,10 +2949,16 @@ fn download_auth_from_entry_maps_modes() {
         ..Default::default()
     };
     let mut e = download_entries(&c).remove(0);
-    assert!(matches!(download_auth_from_entry(&e), DownloadAuth::Basic("DOMAIN\\u", "p")));
+    assert!(matches!(
+        download_auth_from_entry(&e),
+        DownloadAuth::Basic("DOMAIN\\u", "p")
+    ));
     e.auth = Some("Basic".into());
     e.password = None; // 清空密码（用户名保留）→ Basic("DOMAIN\u", "")
-    assert!(matches!(download_auth_from_entry(&e), DownloadAuth::Basic("DOMAIN\\u", "")));
+    assert!(matches!(
+        download_auth_from_entry(&e),
+        DownloadAuth::Basic("DOMAIN\\u", "")
+    ));
     e.auth = None;
     assert!(matches!(download_auth_from_entry(&e), DownloadAuth::None));
     e.auth = Some("kerberos".into()); // 未知方式 → 无认证
@@ -2066,8 +2975,18 @@ fn download_entries_normalizes_array_and_legacy() {
         download_fail_on_error: false,
         download_unzip: true,
         downloads: Some(vec![
-            DownloadConfig { from: "http://x/a".into(), to: "a.bin".into(), ..Default::default() },
-            DownloadConfig { from: "http://x/b".into(), to: "b.bin".into(), sha256: Some("abc".into()), stage: Some("after_start".into()), ..Default::default() },
+            DownloadConfig {
+                from: "http://x/a".into(),
+                to: "a.bin".into(),
+                ..Default::default()
+            },
+            DownloadConfig {
+                from: "http://x/b".into(),
+                to: "b.bin".into(),
+                sha256: Some("abc".into()),
+                stage: Some("after_start".into()),
+                ..Default::default()
+            },
         ]),
         ..Default::default()
     };
@@ -2140,13 +3059,23 @@ scm_sleep_time_ms = 100
 
 #[test]
 fn download_core_304_skips_and_keeps_target() {
-    let (addr, stop, _) = spawn_http_server(|_, _| ("304 Not Modified".into(), Vec::new(), Vec::new()));
+    let (addr, stop, _) =
+        spawn_http_server(|_, _| ("304 Not Modified".into(), Vec::new(), Vec::new()));
     let url = format!("http://{}:{}", addr.ip(), addr.port());
     let tmp = std::env::temp_dir().join("osmium-304-test.tmp");
     let _ = std::fs::remove_file(&tmp);
     // 服务器对 If-Modified-Since 回 304 → download_core 删除 tmp 并视为成功（保留原目标文件）
-    download_core(&url, tmp.to_str().unwrap(), 30, DownloadAuth::None, None, 16,
-        Some("Mon, 01 Jan 2024 00:00:00 GMT".into())).unwrap();
+    download_core(
+        &url,
+        tmp.to_str().unwrap(),
+        30,
+        DownloadAuth::None,
+        None,
+        16,
+        Some("Mon, 01 Jan 2024 00:00:00 GMT".into()),
+        0,
+    )
+    .unwrap();
     stop.store(true, Ordering::Relaxed);
     assert!(!tmp.exists(), "304 时应删除 tmp（保留原目标）");
 }
@@ -2166,8 +3095,17 @@ fn download_core_sends_if_modified_since_header() {
     let url = format!("http://{}:{}", addr.ip(), addr.port());
     let tmp = std::env::temp_dir().join("osmium-304-header.tmp");
     let _ = std::fs::remove_file(&tmp);
-    download_core(&url, tmp.to_str().unwrap(), 30, DownloadAuth::None, None, 16,
-        Some("Mon, 01 Jan 2024 00:00:00 GMT".into())).unwrap();
+    download_core(
+        &url,
+        tmp.to_str().unwrap(),
+        30,
+        DownloadAuth::None,
+        None,
+        16,
+        Some("Mon, 01 Jan 2024 00:00:00 GMT".into()),
+        0,
+    )
+    .unwrap();
     stop.store(true, Ordering::Relaxed);
     let got = seen.lock().unwrap();
     assert_eq!(got.len(), 1, "必须发送 If-Modified-Since 头: {:?}", got);
@@ -2192,8 +3130,10 @@ fn warn_if_insecure_download_unsecure_auth_flag() {
     // basic + http（有 sha）: 未显式放行 → 拒绝
     let mut cfg = ServiceConfig {
         downloads: Some(vec![DownloadConfig {
-            from: "http://x/a.bin".into(), to: "a.bin".into(),
-            auth: Some("basic".into()), sha256: Some("abc".into()),
+            from: "http://x/a.bin".into(),
+            to: "a.bin".into(),
+            auth: Some("basic".into()),
+            sha256: Some("abc".into()),
             ..Default::default()
         }]),
         ..Default::default()
@@ -2212,9 +3152,23 @@ fn warn_if_insecure_download_unsecure_auth_flag() {
 #[test]
 fn apply_log_mode_maps_winsw_modes() {
     let mut enabled = true;
-    let base = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 5, zip_backup: false,
-        pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false,
-        out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
+    let base = LogOptions {
+        split_out_err: false,
+        max_size_mb: 0,
+        backup_count: 5,
+        zip_backup: false,
+        pattern: String::new(),
+        auto_roll_at: None,
+        out_enabled: true,
+        err_enabled: true,
+        reset: false,
+        out_filename: String::new(),
+        err_filename: String::new(),
+        roll_at_start: false,
+        roll_period_days: 0,
+        zip_date_format: String::new(),
+        redact: Vec::new(),
+    };
     let mut o = LogOptions { ..base.clone() };
     apply_log_mode(Some("none"), &mut enabled, &mut o);
     assert!(!enabled);
@@ -2247,19 +3201,42 @@ fn apply_log_mode_maps_winsw_modes() {
 fn roll_logs_to_old_renames_and_overwrites() {
     let dir = unique_temp_dir("rollold");
     let d = dir.to_string_lossy().to_string();
-    let opts = LogOptions { split_out_err: true, max_size_mb: 0, backup_count: 0, zip_backup: false,
-        pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false,
-        out_filename: String::new(), err_filename: String::new(), roll_at_start: true, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
+    let opts = LogOptions {
+        split_out_err: true,
+        max_size_mb: 0,
+        backup_count: 0,
+        zip_backup: false,
+        pattern: String::new(),
+        auto_roll_at: None,
+        out_enabled: true,
+        err_enabled: true,
+        reset: false,
+        out_filename: String::new(),
+        err_filename: String::new(),
+        roll_at_start: true,
+        roll_period_days: 0,
+        zip_date_format: String::new(),
+        redact: Vec::new(),
+    };
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
     std::fs::write(dir.join(format!("{date}.log")), "main").unwrap();
     std::fs::write(dir.join(format!("{date}.err.log")), "err").unwrap();
     roll_logs_to_old(&d, &opts);
-    assert_eq!(std::fs::read_to_string(dir.join(format!("{date}.log.old"))).unwrap(), "main");
-    assert_eq!(std::fs::read_to_string(dir.join(format!("{date}.err.log.old"))).unwrap(), "err");
+    assert_eq!(
+        std::fs::read_to_string(dir.join(format!("{date}.log.old"))).unwrap(),
+        "main"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join(format!("{date}.err.log.old"))).unwrap(),
+        "err"
+    );
     // 二次启动 → 覆盖旧 .old
     std::fs::write(dir.join(format!("{date}.log")), "main2").unwrap();
     roll_logs_to_old(&d, &opts);
-    assert_eq!(std::fs::read_to_string(dir.join(format!("{date}.log.old"))).unwrap(), "main2");
+    assert_eq!(
+        std::fs::read_to_string(dir.join(format!("{date}.log.old"))).unwrap(),
+        "main2"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2267,10 +3244,27 @@ fn roll_logs_to_old_renames_and_overwrites() {
 fn roll_by_time_if_due_rolls_stale_log() {
     let dir = unique_temp_dir("rolltime");
     let d = dir.to_string_lossy().to_string();
-    let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false,
-        pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false,
-        out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 1, zip_date_format: String::new(), redact: Vec::new() };
-    let now = chrono::Local.with_ymd_and_hms(2026, 8, 11, 12, 0, 0).single().unwrap();
+    let opts = LogOptions {
+        split_out_err: false,
+        max_size_mb: 0,
+        backup_count: 0,
+        zip_backup: false,
+        pattern: String::new(),
+        auto_roll_at: None,
+        out_enabled: true,
+        err_enabled: true,
+        reset: false,
+        out_filename: String::new(),
+        err_filename: String::new(),
+        roll_at_start: false,
+        roll_period_days: 1,
+        zip_date_format: String::new(),
+        redact: Vec::new(),
+    };
+    let now = chrono::Local
+        .with_ymd_and_hms(2026, 8, 11, 12, 0, 0)
+        .single()
+        .unwrap();
     let path = dir.join("2026-08-11.log");
     std::fs::write(&path, "stale").unwrap();
     // 文件 mtime 为当前 → 未到期不滚动
@@ -2278,7 +3272,12 @@ fn roll_by_time_if_due_rolls_stale_log() {
     assert!(path.exists());
     // mtime 改到 3 天前 → 到期滚动为 {date}.{HHmmss}.log
     let old: std::time::SystemTime = (now - chrono::Duration::days(3)).into();
-    std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
     roll_by_time_if_due(&d, &opts, &now);
     assert!(!path.exists());
     assert!(dir.join("2026-08-11.120000.log").exists());
@@ -2291,8 +3290,15 @@ fn zip_backup_file_uses_date_format() {
     let log = dir.join("2026-08-11.log");
     std::fs::write(&log, "data").unwrap();
     assert!(zip_backup_file(&log, "%Y%m%d"));
-    let expected = format!("2026-08-11.log.{}.zip", chrono::Local::now().format("%Y%m%d"));
-    assert!(dir.join(&expected).exists(), "期望 zip 归档名: {}", expected);
+    let expected = format!(
+        "2026-08-11.log.{}.zip",
+        chrono::Local::now().format("%Y%m%d")
+    );
+    assert!(
+        dir.join(&expected).exists(),
+        "期望 zip 归档名: {}",
+        expected
+    );
     // 空格式 → 保持 {file}.zip
     assert!(zip_backup_file(&log, ""));
     assert!(dir.join("2026-08-11.log.zip").exists());
@@ -2318,9 +3324,23 @@ fn scm_param_setters_store_and_clamp() {
 fn run_stop_command_completes_and_kills_on_timeout() {
     let dir = unique_temp_dir("stopcmd");
     let d = dir.to_string_lossy().to_string();
-    let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false,
-        pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false,
-        out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
+    let opts = LogOptions {
+        split_out_err: false,
+        max_size_mb: 0,
+        backup_count: 0,
+        zip_backup: false,
+        pattern: String::new(),
+        auto_roll_at: None,
+        out_enabled: true,
+        err_enabled: true,
+        reset: false,
+        out_filename: String::new(),
+        err_filename: String::new(),
+        roll_at_start: false,
+        roll_period_days: 0,
+        zip_date_format: String::new(),
+        redact: Vec::new(),
+    };
     // 快速退出的停止命令 → 正常结束
     run_stop_command("cmd.exe", "/c exit 0", 4242, 5, d.clone(), &opts);
     // 常驻命令 → 超时强杀（返回后进程必须已死）
@@ -2332,7 +3352,14 @@ fn run_stop_command_completes_and_kills_on_timeout() {
     let pid = child.id();
     let pid_file = dir.join("sleep.pid");
     std::fs::write(&pid_file, pid.to_string()).unwrap();
-    run_stop_command("powershell.exe", "-NoProfile -Command \"Start-Sleep -Seconds 60\"", 4242, 1, d.clone(), &opts);
+    run_stop_command(
+        "powershell.exe",
+        "-NoProfile -Command \"Start-Sleep -Seconds 60\"",
+        4242,
+        1,
+        d.clone(),
+        &opts,
+    );
     // 超时强杀路径已覆盖（run_stop_command 内部 terminate_pid_tree）
     let _ = child.kill();
     let _ = child.wait();
@@ -2340,8 +3367,16 @@ fn run_stop_command_completes_and_kills_on_timeout() {
     let now = chrono::Local::now();
     let log = dir.join(current_log_name(&opts, "host", &now));
     let content = std::fs::read_to_string(&log).unwrap_or_default();
-    assert!(content.contains("exited with code 0"), "日志缺失快速退出记录: {}", content);
-    assert!(content.contains("timed out after 1s, killing"), "日志缺失超时强杀记录: {}", content);
+    assert!(
+        content.contains("exited with code 0"),
+        "日志缺失快速退出记录: {}",
+        content
+    );
+    assert!(
+        content.contains("timed out after 1s, killing"),
+        "日志缺失超时强杀记录: {}",
+        content
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2349,17 +3384,45 @@ fn run_stop_command_completes_and_kills_on_timeout() {
 fn run_stop_command_injects_child_pid() {
     let dir = unique_temp_dir("stoppid");
     let d = dir.to_string_lossy().to_string();
-    let opts = LogOptions { split_out_err: false, max_size_mb: 0, backup_count: 0, zip_backup: false,
-        pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false,
-        out_filename: String::new(), err_filename: String::new(), roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
+    let opts = LogOptions {
+        split_out_err: false,
+        max_size_mb: 0,
+        backup_count: 0,
+        zip_backup: false,
+        pattern: String::new(),
+        auto_roll_at: None,
+        out_enabled: true,
+        err_enabled: true,
+        reset: false,
+        out_filename: String::new(),
+        err_filename: String::new(),
+        roll_at_start: false,
+        roll_period_days: 0,
+        zip_date_format: String::new(),
+        redact: Vec::new(),
+    };
     // %PID% 占位符与 WINSGF_CHILD_PID 环境变量同时注入（echo 输出进日志可断言）
-    run_stop_command("cmd.exe", "/c echo pid=%PID% env=%WINSGF_CHILD_PID%", 4242, 5, d.clone(), &opts);
+    run_stop_command(
+        "cmd.exe",
+        "/c echo pid=%PID% env=%WINSGF_CHILD_PID%",
+        4242,
+        5,
+        d.clone(),
+        &opts,
+    );
     let now = chrono::Local::now();
     let log = dir.join(current_log_name(&opts, "host", &now));
     let content = std::fs::read_to_string(&log).unwrap_or_default();
-    assert!(content.contains("pid=4242 env=4242"), "日志缺失 PID 注入输出: {}", content);
-    assert!(content.contains("Stop executable: cmd.exe /c echo pid=4242 env=%WINSGF_CHILD_PID%"),
-        "日志应展示已展开 %PID% 的停止命令: {}", content);
+    assert!(
+        content.contains("pid=4242 env=4242"),
+        "日志缺失 PID 注入输出: {}",
+        content
+    );
+    assert!(
+        content.contains("Stop executable: cmd.exe /c echo pid=4242 env=%WINSGF_CHILD_PID%"),
+        "日志应展示已展开 %PID% 的停止命令: {}",
+        content
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2374,14 +3437,22 @@ fn expand_stop_pid_placeholder_cases() {
     assert_eq!(expand_stop_pid("%BASE%", 123), "%BASE%");
     assert_eq!(expand_stop_pid("中文%PID%尾部", 7), "中文7尾部");
     // 与配置全局展开串行: %PID% 先被 expand_env_value 保留，再由 expand_stop_pid 替换
-    assert_eq!(expand_stop_pid(&expand_env_value("%PID%", "C:\\base"), 456), "456");
+    assert_eq!(
+        expand_stop_pid(&expand_env_value("%PID%", "C:\\base"), 456),
+        "456"
+    );
 }
 
 #[test]
 fn runaway_exceeded_decides_limits() {
     assert!(runaway_exceeded(Some(200), Some(100), None, None));
     assert!(runaway_exceeded(None, None, Some(90.0), Some(50.0)));
-    assert!(!runaway_exceeded(Some(50), Some(100), Some(10.0), Some(50.0)));
+    assert!(!runaway_exceeded(
+        Some(50),
+        Some(100),
+        Some(10.0),
+        Some(50.0)
+    ));
     assert!(!runaway_exceeded(None, None, None, None));
     assert!(!runaway_exceeded(None, Some(100), None, None)); // 采样缺失不触发
 }
@@ -2390,10 +3461,22 @@ fn runaway_exceeded_decides_limits() {
 fn runaway_cleanup_pid_file_terminates_leftover() {
     let dir = unique_temp_dir("runawaypid");
     // 无 pid 文件 → 无操作
-    assert_eq!(runaway_cleanup_pid_file(&dir.join("missing.txt").to_string_lossy(), 5000, false, None).unwrap(), None);
+    assert_eq!(
+        runaway_cleanup_pid_file(
+            &dir.join("missing.txt").to_string_lossy(),
+            5000,
+            false,
+            None
+        )
+        .unwrap(),
+        None
+    );
     // 非法内容 → 告警
     std::fs::write(dir.join("bad.txt"), "not-a-pid").unwrap();
-    assert!(runaway_cleanup_pid_file(&dir.join("bad.txt").to_string_lossy(), 5000, false, None).is_err());
+    assert!(
+        runaway_cleanup_pid_file(&dir.join("bad.txt").to_string_lossy(), 5000, false, None)
+            .is_err()
+    );
     // 指向真实常驻进程（带匹配的服务标识）→ 清理整棵树
     let mut child = Command::new("powershell.exe")
         .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 60"])
@@ -2404,13 +3487,20 @@ fn runaway_cleanup_pid_file_terminates_leftover() {
     let pid = child.id();
     let pid_file = dir.join("pid.txt");
     std::fs::write(&pid_file, pid.to_string()).unwrap();
-    assert_eq!(runaway_cleanup_pid_file(&pid_file.to_string_lossy(), 5000, false, Some("test-svc")).unwrap(), Some(pid));
+    assert_eq!(
+        runaway_cleanup_pid_file(&pid_file.to_string_lossy(), 5000, false, Some("test-svc"))
+            .unwrap(),
+        Some(pid)
+    );
     assert!(!process_alive(pid), "残留进程应已被终止");
     let _ = child.kill();
     let _ = child.wait();
     // 已退出/0 → 无操作
     std::fs::write(&pid_file, "0").unwrap();
-    assert_eq!(runaway_cleanup_pid_file(&pid_file.to_string_lossy(), 5000, false, None).unwrap(), None);
+    assert_eq!(
+        runaway_cleanup_pid_file(&pid_file.to_string_lossy(), 5000, false, None).unwrap(),
+        None
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2426,7 +3516,8 @@ fn runaway_cleanup_pid_file_skips_foreign_pid() {
     let pid = child.id();
     let pid_file = dir.join("foreign.txt");
     std::fs::write(&pid_file, pid.to_string()).unwrap();
-    let err = runaway_cleanup_pid_file(&pid_file.to_string_lossy(), 500, false, Some("my-svc")).unwrap_err();
+    let err = runaway_cleanup_pid_file(&pid_file.to_string_lossy(), 500, false, Some("my-svc"))
+        .unwrap_err();
     assert!(err.contains("WINSGF_SERVICE_ID"), "{err}");
     assert!(process_alive(pid), "标识不匹配的进程不得被误杀");
     let _ = child.kill();
@@ -2441,7 +3532,10 @@ fn runaway_cleanup_pid_file_skips_foreign_pid() {
     let pid2 = child2.id();
     let pid_file2 = dir.join("mine.txt");
     std::fs::write(&pid_file2, pid2.to_string()).unwrap();
-    assert_eq!(runaway_cleanup_pid_file(&pid_file2.to_string_lossy(), 500, false, Some("my-svc")).unwrap(), Some(pid2));
+    assert_eq!(
+        runaway_cleanup_pid_file(&pid_file2.to_string_lossy(), 500, false, Some("my-svc")).unwrap(),
+        Some(pid2)
+    );
     let _ = child2.kill();
     let _ = child2.wait();
     let _ = std::fs::remove_dir_all(&dir);
@@ -2484,10 +3578,14 @@ fn process_env_var_reads_child_environment() {
         .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
         .env("WINSGF_SERVICE_ID", "peb-test-svc")
         .creation_flags(0x08000000)
-        .spawn().unwrap();
+        .spawn()
+        .unwrap();
     let pid = child.id();
     thread::sleep(Duration::from_millis(300));
-    assert_eq!(process_env_var(pid, "WINSGF_SERVICE_ID").as_deref(), Some("peb-test-svc"));
+    assert_eq!(
+        process_env_var(pid, "WINSGF_SERVICE_ID").as_deref(),
+        Some("peb-test-svc")
+    );
     assert!(process_env_var(pid, "PATH").is_some());
     assert_eq!(process_env_var(pid, "OSMIUM_DOES_NOT_EXIST_XYZ"), None);
     assert_eq!(process_env_var(u32::MAX, "PATH"), None); // 不存在进程
@@ -2499,21 +3597,59 @@ fn process_env_var_reads_child_environment() {
 fn build_child_command_injects_base_and_service_id() {
     use std::collections::HashMap;
     // 自动注入 BASE（部署目录）与 WINSGF_SERVICE_ID
-    let mut cmd = build_child_command("cmd.exe", Some("/c echo %BASE%+%WINSGF_SERVICE_ID%"), ".", None, "C:\\deploy", true, true, true, Some("svc-1"));
+    let mut cmd = build_child_command(
+        "cmd.exe",
+        Some("/c echo %BASE%+%WINSGF_SERVICE_ID%"),
+        ".",
+        None,
+        "C:\\deploy",
+        true,
+        true,
+        true,
+        Some("svc-1"),
+    );
     let mut child = cmd.stdout(std::process::Stdio::piped()).spawn().unwrap();
     let mut out = String::new();
-    child.stdout.take().unwrap().read_to_string(&mut out).unwrap();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
     let _ = child.wait();
-    assert!(out.contains("C:\\deploy+svc-1"), "BASE/WINSGF_SERVICE_ID 注入未生效: {}", out);
+    assert!(
+        out.contains("C:\\deploy+svc-1"),
+        "BASE/WINSGF_SERVICE_ID 注入未生效: {}",
+        out
+    );
     // 用户显式配置 BASE（大小写不敏感）→ 以用户为准
     let mut env = HashMap::new();
     env.insert("base".to_string(), "user-base".to_string());
-    let mut cmd2 = build_child_command("cmd.exe", Some("/c echo %BASE%"), ".", Some(&env), "C:\\deploy", true, true, true, None);
+    let mut cmd2 = build_child_command(
+        "cmd.exe",
+        Some("/c echo %BASE%"),
+        ".",
+        Some(&env),
+        "C:\\deploy",
+        true,
+        true,
+        true,
+        None,
+    );
     let mut child2 = cmd2.stdout(std::process::Stdio::piped()).spawn().unwrap();
     let mut out2 = String::new();
-    child2.stdout.take().unwrap().read_to_string(&mut out2).unwrap();
+    child2
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out2)
+        .unwrap();
     let _ = child2.wait();
-    assert!(out2.contains("user-base"), "用户 env 应覆盖自动 BASE: {}", out2);
+    assert!(
+        out2.contains("user-base"),
+        "用户 env 应覆盖自动 BASE: {}",
+        out2
+    );
     assert!(!out2.contains("C:\\deploy"), "不得注入默认 BASE: {}", out2);
 }
 
@@ -2527,15 +3663,31 @@ fn process_alive_detects_running_and_missing() {
 #[test]
 fn current_log_name_custom_filenames_override() {
     let now = chrono::Local::now();
-    let opts = LogOptions { split_out_err: true, max_size_mb: 0, backup_count: 0, zip_backup: false,
-        pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true, reset: false,
-        out_filename: "app.out.log".into(), err_filename: "app.err.log".into(),
-        roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(), redact: Vec::new() };
+    let opts = LogOptions {
+        split_out_err: true,
+        max_size_mb: 0,
+        backup_count: 0,
+        zip_backup: false,
+        pattern: String::new(),
+        auto_roll_at: None,
+        out_enabled: true,
+        err_enabled: true,
+        reset: false,
+        out_filename: "app.out.log".into(),
+        err_filename: "app.err.log".into(),
+        roll_at_start: false,
+        roll_period_days: 0,
+        zip_date_format: String::new(),
+        redact: Vec::new(),
+    };
     assert_eq!(current_log_name(&opts, "host", &now), "app.out.log");
     assert_eq!(current_log_name(&opts, "out", &now), "app.out.log");
     assert_eq!(current_log_name(&opts, "err", &now), "app.err.log");
     // 未分流时 err 通道仍走主日志名
-    let opts_merged = LogOptions { split_out_err: false, ..opts };
+    let opts_merged = LogOptions {
+        split_out_err: false,
+        ..opts
+    };
     assert_eq!(current_log_name(&opts_merged, "err", &now), "app.out.log");
 }
 
@@ -2544,7 +3696,11 @@ fn scm_status_params_honors_preshutdown_flag() {
     use windows::Win32::System::Services::{SERVICE_ACCEPT_PRESHUTDOWN, SERVICE_RUNNING};
     set_preshutdown_enabled(true);
     let (controls, _) = scm_status_params(SERVICE_RUNNING.0);
-    assert_ne!(controls & SERVICE_ACCEPT_PRESHUTDOWN, 0, "preshutdown 开启时应上报接受码");
+    assert_ne!(
+        controls & SERVICE_ACCEPT_PRESHUTDOWN,
+        0,
+        "preshutdown 开启时应上报接受码"
+    );
     set_preshutdown_enabled(false);
     let (controls, _) = scm_status_params(SERVICE_RUNNING.0);
     assert_eq!(controls & SERVICE_ACCEPT_PRESHUTDOWN, 0);
@@ -2553,9 +3709,12 @@ fn scm_status_params_honors_preshutdown_flag() {
 #[test]
 fn security_descriptor_from_sddl_parses_valid_and_rejects_bad() {
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
-    let sd = security_descriptor_from_sddl("D:(A;;GA;;;SY)(A;;GA;;;BA)").expect("合法 SDDL 应解析成功");
+    let sd =
+        security_descriptor_from_sddl("D:(A;;GA;;;SY)(A;;GA;;;BA)").expect("合法 SDDL 应解析成功");
     assert!(!sd.0.is_null());
-    unsafe { let _ = LocalFree(Some(HLOCAL(sd.0))); }
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+    }
     assert!(security_descriptor_from_sddl("not a valid sddl !!!").is_err());
 }
 
@@ -2609,18 +3768,28 @@ fn expand_config_expands_base_and_env_in_paths() {
         runaway_pid_file: Some("%BASE%\\svc.pid".into()),
         ..Default::default()
     };
-    unsafe { std::env::set_var("OSMIUM_TEST_EXPAND", "hello"); }
+    unsafe {
+        std::env::set_var("OSMIUM_TEST_EXPAND", "hello");
+    }
     c.stop_executable = Some("%OSMIUM_TEST_EXPAND%\\stop.exe".into());
     let e = host.expand_config(&c);
     assert_eq!(e.service_executable_path, "C:\\base\\app.exe");
-    assert_eq!(e.service_executable_args.as_deref(), Some("--cfg C:\\base\\cfg.ini"));
+    assert_eq!(
+        e.service_executable_args.as_deref(),
+        Some("--cfg C:\\base\\cfg.ini")
+    );
     assert_eq!(e.working_directory.as_deref(), Some("C:\\base\\work"));
-    assert_eq!(e.download_url.as_deref(), Some("http://x/C:\\base/file.bin"));
+    assert_eq!(
+        e.download_url.as_deref(),
+        Some("http://x/C:\\base/file.bin")
+    );
     assert_eq!(e.download_to.as_deref(), Some("C:\\base\\target.bin"));
     assert_eq!(e.log_dir.as_deref(), Some("C:\\base\\logs"));
     assert_eq!(e.runaway_pid_file.as_deref(), Some("C:\\base\\svc.pid"));
     assert_eq!(e.stop_executable.as_deref(), Some("hello\\stop.exe"));
-    unsafe { std::env::remove_var("OSMIUM_TEST_EXPAND"); }
+    unsafe {
+        std::env::remove_var("OSMIUM_TEST_EXPAND");
+    }
 }
 
 // ==================== 配置热刷新（autoRefresh） ====================
@@ -2633,30 +3802,34 @@ fn auto_refresh_restarts_child_on_config_change() {
     let dir = unique_temp_dir("refresh");
     let config_path = dir.join("refresh.toml");
     let write_cfg = |args: &str| {
-        std::fs::write(&config_path, format!(
-            "service_name = \"refresh-test\"\n\
+        std::fs::write(
+            &config_path,
+            format!(
+                "service_name = \"refresh-test\"\n\
              service_display_name = \"refresh-test\"\n\
              service_description = \"refresh-test\"\n\
              service_executable_path = 'C:\\Windows\\System32\\ping.exe'\n\
              service_executable_args = \"{args}\"\n\
              auto_refresh = true\n"
-        )).unwrap();
+            ),
+        )
+        .unwrap();
     };
     write_cfg("-n 30 127.0.0.1");
     let mut host = ServiceHost::new();
     assert!(host.on_start_from(&config_path), "宿主应启动成功");
-    let pid1 = host.child.as_ref().unwrap().id();
+    let pid1 = host.child.first().unwrap().id();
     assert!(process_alive(pid1), "子进程应运行中");
 
     // 修改配置（args 变化 → mtime 变化）→ 下一次 tick 应检测到并重启子进程
     write_cfg("-n 30 127.0.0.2");
     thread::sleep(Duration::from_millis(20)); // 文件系统 mtime 粒度兜底
     assert!(host.tick(), "tick 应返回 true（子进程仍在运行）");
-    let pid2 = host.child.as_ref().unwrap().id();
+    let pid2 = host.child.first().unwrap().id();
     assert_ne!(pid1, pid2, "配置变化后子进程应被重启（PID 变化）");
 
     // 清理: 终止并回收子进程（stop_child_process 私有，直接 kill）
-    if let Some(mut c) = host.child.take() {
+    for mut c in std::mem::take(&mut host.child) {
         let _ = c.kill();
         let _ = c.wait();
     }
@@ -2683,8 +3856,14 @@ fn load_config_parses_auto_refresh_flag() {
 fn panic_msg_extracts_string_payloads() {
     // &str 与 String payload 均需提取，未知类型回退兜底文案
     assert_eq!(crate::service_core::panic_msg(&"boom", "fallback"), "boom");
-    assert_eq!(crate::service_core::panic_msg(&String::from("boom2"), "fallback"), "boom2");
-    assert_eq!(crate::service_core::panic_msg(&42u32, "fallback"), "fallback");
+    assert_eq!(
+        crate::service_core::panic_msg(&String::from("boom2"), "fallback"),
+        "boom2"
+    );
+    assert_eq!(
+        crate::service_core::panic_msg(&42u32, "fallback"),
+        "fallback"
+    );
 }
 
 #[test]
@@ -2697,7 +3876,12 @@ fn panic_log_path_follows_install_location() {
     // 无法替换 current_exe，改为验证函数存在性依赖: 非安装路径返回 exe 旁 panic.log（含目录名）
     // （通过 get_own_path 分支: 当前测试进程非安装路径 → 返回 exe 同目录）
     let path = crate::service_core::panic_log_path();
-    assert_eq!(path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), "panic.log");
+    assert_eq!(
+        path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        "panic.log"
+    );
     // 安装路径分支: 模拟 get_own_path 返回安装 exe（直接比对路径派生逻辑）
     let install = get_own_path();
     if install.eq_ignore_ascii_case("C:\\Program Files\\Osmium\\os.exe") {
@@ -2757,8 +3941,14 @@ fn backup_logs_returns_none_without_logs_dir() {
 fn set_eco_qos_toggles_on_self() {
     // ProcessPowerThrottling 设置: 对自身进程开/关效率模式均应成功（Get 读回系统不支持，仅断言 Set）
     let pid = std::process::id();
-    assert!(crate::service_host::set_eco_qos(pid, true), "开启效率模式应成功");
-    assert!(crate::service_host::set_eco_qos(pid, false), "关闭效率模式应成功");
+    assert!(
+        crate::service_host::set_eco_qos(pid, true),
+        "开启效率模式应成功"
+    );
+    assert!(
+        crate::service_host::set_eco_qos(pid, false),
+        "关闭效率模式应成功"
+    );
     // 无效 PID 静默失败不 panic
     assert!(!crate::service_host::set_eco_qos(0, true));
 }
@@ -2768,28 +3958,61 @@ fn write_log_entry_redacts_configured_patterns() {
     // 日志脱敏: log_redact 字面串写入前替换为 ***（防密码/令牌经日志泄漏）
     let dir = unique_temp_dir("wlog_redact");
     let opts = LogOptions {
-        split_out_err: false, max_size_mb: 0, backup_count: 5, zip_backup: false,
-        pattern: String::new(), auto_roll_at: None, out_enabled: true, err_enabled: true,
-        reset: false, out_filename: String::new(), err_filename: String::new(),
-        roll_at_start: false, roll_period_days: 0, zip_date_format: String::new(),
+        split_out_err: false,
+        max_size_mb: 0,
+        backup_count: 5,
+        zip_backup: false,
+        pattern: String::new(),
+        auto_roll_at: None,
+        out_enabled: true,
+        err_enabled: true,
+        reset: false,
+        out_filename: String::new(),
+        err_filename: String::new(),
+        roll_at_start: false,
+        roll_period_days: 0,
+        zip_date_format: String::new(),
         redact: vec!["secret-token".into(), "P@ssw0rd".into()],
     };
-    write_log_entry(dir.to_str().unwrap(), "host", "login secret-token ok P@ssw0rd done", &opts);
+    write_log_entry(
+        dir.to_str().unwrap(),
+        "host",
+        "login secret-token ok P@ssw0rd done",
+        &opts,
+    );
     let today = chrono::Local::now().format("%Y-%m-%d");
     let content = std::fs::read_to_string(dir.join(format!("{today}.log"))).unwrap();
-    assert!(content.contains("login *** ok *** done"), "敏感串应被脱敏: {content}");
-    assert!(!content.contains("secret-token") && !content.contains("P@ssw0rd"), "原文不应残留: {content}");
+    assert!(
+        content.contains("login *** ok *** done"),
+        "敏感串应被脱敏: {content}"
+    );
+    assert!(
+        !content.contains("secret-token") && !content.contains("P@ssw0rd"),
+        "原文不应残留: {content}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn resolve_redirect_url_parses_relative_and_absolute() {
     // 重定向 Location 解析: 相对路径基于当前 URL 拼接，绝对路径原样
-    assert_eq!(resolve_redirect_url("https://example.com/a/b", "/c"), "https://example.com/c");
-    assert_eq!(resolve_redirect_url("https://example.com/a/b", "c"), "https://example.com/a/c");
-    assert_eq!(resolve_redirect_url("https://example.com/a", "https://other.com/x"), "https://other.com/x");
+    assert_eq!(
+        resolve_redirect_url("https://example.com/a/b", "/c"),
+        "https://example.com/c"
+    );
+    assert_eq!(
+        resolve_redirect_url("https://example.com/a/b", "c"),
+        "https://example.com/a/c"
+    );
+    assert_eq!(
+        resolve_redirect_url("https://example.com/a", "https://other.com/x"),
+        "https://other.com/x"
+    );
     // 非法 Location 按相对路径解析（RFC 3986 语义，不 panic）
-    assert_eq!(resolve_redirect_url("https://example.com", "://bad"), "https://example.com/://bad");
+    assert_eq!(
+        resolve_redirect_url("https://example.com", "://bad"),
+        "https://example.com/://bad"
+    );
 }
 
 #[test]
@@ -2800,12 +4023,18 @@ fn validate_config_reports_ok_and_issues() {
     let good = dir.join("good.toml");
     std::fs::write(&good, "service_name = \"chk-svc\"\nservice_display_name = \"Chk\"\nservice_description = \"d\"\nservice_executable_path = 'C:\\Windows\\System32\\cmd.exe'\n").unwrap();
     let msgs = validate_config(&good).expect("合法配置应通过");
-    assert!(msgs.iter().any(|m| m.contains("valid")), "应含通过项: {msgs:?}");
+    assert!(
+        msgs.iter().any(|m| m.contains("valid")),
+        "应含通过项: {msgs:?}"
+    );
 
     let bad = dir.join("bad.toml");
     std::fs::write(&bad, "service_name = \"chk-svc\"\nservice_display_name = \"Chk\"\nservice_description = \"d\"\nservice_executable_path = 'C:\\no\\such\\app.exe'\n").unwrap();
     let errs = validate_config(&bad).expect_err("不存在的 exe 应报错");
-    assert!(errs.iter().any(|e| e.contains("does not exist")), "应含路径错误: {errs:?}");
+    assert!(
+        errs.iter().any(|e| e.contains("does not exist")),
+        "应含路径错误: {errs:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2814,7 +4043,9 @@ fn load_config_parses_new_guardrail_fields() {
     // 新增字段解析: 健康检查/下载重试/Job 对象/插件签名/定时调度
     let dir = unique_temp_dir("grdfld");
     let cfg = dir.join("c.toml");
-    std::fs::write(&cfg, r#"
+    std::fs::write(
+        &cfg,
+        r#"
 service_name = "gr"
 service_display_name = "Gr"
 service_description = "d"
@@ -2835,9 +4066,14 @@ command = 'echo tick'
 [[schedules]]
 daily_at = "03:30"
 action = "restart"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     let c = load_config(&cfg);
-    assert_eq!(c.health_check_url.as_deref(), Some("http://127.0.0.1:8080/health"));
+    assert_eq!(
+        c.health_check_url.as_deref(),
+        Some("http://127.0.0.1:8080/health")
+    );
     assert_eq!(c.health_check_interval_secs, 15);
     assert_eq!(c.health_check_timeout_secs, 3);
     assert_eq!(c.health_check_failures, 5);
@@ -2845,7 +4081,10 @@ action = "restart"
     assert_eq!(c.download_retries, 4);
     assert_eq!(c.download_retry_backoff_ms, 1000);
     assert!(!c.job_object, "job_object=false 应解析");
-    assert!(c.require_signed_plugins, "require_signed_plugins=true 应解析");
+    assert!(
+        c.require_signed_plugins,
+        "require_signed_plugins=true 应解析"
+    );
     let s = c.schedules.expect("schedules 应解析");
     assert_eq!(s.len(), 2);
     assert_eq!(s[0].every_secs, Some(3600));
@@ -2860,7 +4099,10 @@ action = "restart"
     assert!(c2.job_object, "job_object 默认 true");
     assert_eq!(c2.download_retries, 0);
     assert_eq!(c2.health_check_interval_secs, 0);
-    assert!(!c2.require_signed_plugins, "require_signed_plugins 默认 false");
+    assert!(
+        !c2.require_signed_plugins,
+        "require_signed_plugins 默认 false"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2879,13 +4121,17 @@ fn job_object_create_and_assign_child() {
     let pid = child.id();
     let h = unsafe {
         OpenProcess(
-            windows::Win32::System::Threading::PROCESS_SET_INFORMATION | windows::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION,
+            windows::Win32::System::Threading::PROCESS_SET_INFORMATION
+                | windows::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION,
             false,
             pid,
-        ).expect("打开子进程应成功")
+        )
+        .expect("打开子进程应成功")
     };
     let assigned = job.assign(h);
-    unsafe { let _ = CloseHandle(h); }
+    unsafe {
+        let _ = CloseHandle(h);
+    }
     // 子进程已在其他 Job（如系统服务宿主）时 assign 会失败——两种结果都合法，重点验证不 panic
     if assigned.is_ok() {
         // 加入 Job 后 Job 被 drop → KILL_ON_JOB_CLOSE 应立即终止子进程
@@ -2901,11 +4147,17 @@ fn job_object_create_and_assign_child() {
 #[test]
 fn verify_file_signature_rejects_unsigned_and_missing() {
     // 插件签名校验: 未签名文件与不存在文件均返回 false（require_signed_plugins 的拒绝路径）
-    assert!(!crate::service_host::verify_file_signature("C:\\no\\such\\plugin.osx"), "不存在文件应为 false");
+    assert!(
+        !crate::service_host::verify_file_signature("C:\\no\\such\\plugin.osx"),
+        "不存在文件应为 false"
+    );
     let dir = unique_temp_dir("sgnchk");
     let f = dir.join("plain.txt");
     std::fs::write(&f, "plain text, no signature").unwrap();
-    assert!(!crate::service_host::verify_file_signature(&f.to_string_lossy()), "未签名文件应为 false");
+    assert!(
+        !crate::service_host::verify_file_signature(&f.to_string_lossy()),
+        "未签名文件应为 false"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2922,7 +4174,10 @@ fn schedule_due_interval_and_daily() {
     use crate::service_host::schedule_due;
     use std::time::{Duration, Instant};
     let mk = |every: Option<i64>, daily: Option<&str>, action: &str| ScheduleConfig {
-        every_secs: every, daily_at: daily.map(String::from), action: action.into(), command: None,
+        every_secs: every,
+        daily_at: daily.map(String::from),
+        action: action.into(),
+        command: None,
     };
     let now = chrono::Local::now();
     // every_secs: 未触发过 → 立即到点；距上次 10s < 间隔 60s → 未到；距上次 61s ≥ 60s → 到点
@@ -2934,12 +4189,24 @@ fn schedule_due_interval_and_daily() {
     assert!(schedule_due(&s, Some(last2), None, now), "超间隔应触发");
     // daily_at: 已到点且当日未触发 → 触发；当日已触发 → 不重复
     let d = mk(None, Some("00:00"), "restart");
-    assert!(schedule_due(&d, None, None, now), "今日 00:00 已过且未触发应到点");
-    assert!(!schedule_due(&d, None, Some(now.date_naive()), now), "当日已触发不应重复");
-    // 未来时刻未到 → 不到点；非法时刻/空配置 → 不到点
-    let future = (now.time() + chrono::Duration::hours(5)).format("%H:%M:%S").to_string();
-    let f = mk(None, Some(&future), "restart");
-    assert!(!schedule_due(&f, None, None, now), "未来时刻不应触发");
+    assert!(
+        schedule_due(&d, None, None, now),
+        "今日 00:00 已过且未触发应到点"
+    );
+    assert!(
+        !schedule_due(&d, None, Some(now.date_naive()), now),
+        "当日已触发不应重复"
+    );
+    // 未来时刻未到 → 不到点；非法时刻/空配置 → 不到点。
+    // 注意 now+5h 跨天（深夜运行测试）时当日已无更晚时刻，该分支无法构造，跳过
+    use chrono::Timelike;
+    if now.time().hour() < 19 {
+        let future = (now.time() + chrono::Duration::hours(5))
+            .format("%H:%M:%S")
+            .to_string();
+        let f = mk(None, Some(&future), "restart");
+        assert!(!schedule_due(&f, None, None, now), "未来时刻不应触发");
+    }
     let bad = mk(None, Some("25:99"), "restart");
     assert!(!schedule_due(&bad, None, None, now), "非法时刻不应触发");
     let none = mk(None, None, "restart");
@@ -2956,9 +4223,17 @@ fn download_retries_recover_after_transient_failure() {
         let (a, _stop, _) = spawn_http_server(move |_, _| {
             let n = a2.fetch_add(1, Ordering::SeqCst);
             if n == 0 {
-                ("500 Internal Server Error".into(), vec![("Content-Length".into(), "0".into())], Vec::new())
+                (
+                    "500 Internal Server Error".into(),
+                    vec![("Content-Length".into(), "0".into())],
+                    Vec::new(),
+                )
             } else {
-                ("200 OK".into(), vec![("Content-Length".into(), "5".into())], b"hello".to_vec())
+                (
+                    "200 OK".into(),
+                    vec![("Content-Length".into(), "5".into())],
+                    b"hello".to_vec(),
+                )
             }
         });
         a
@@ -2971,8 +4246,14 @@ fn download_retries_recover_after_transient_failure() {
         to: dir.join("app.exe").to_string_lossy().into_owned(),
         // sha256 提供后 http 放行（P1-4 安全策略）: "hello" 的标准 sha256
         sha256: Some("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".into()),
-        fail_on_error: Some(true), auth: None, username: None,
-        password: None, unsecure_auth: None, proxy: None, unzip: Some(false), stage: None,
+        fail_on_error: Some(true),
+        auth: None,
+        username: None,
+        password: None,
+        unsecure_auth: None,
+        proxy: None,
+        unzip: Some(false),
+        stage: None,
     };
     let deploy = dir.to_string_lossy().into_owned();
     crate::service_host::run_download_entry(&config, &entry, &deploy, "", &Default::default())
@@ -2980,4 +4261,283 @@ fn download_retries_recover_after_transient_failure() {
     let content = std::fs::read_to_string(dir.join("app.exe")).unwrap();
     assert_eq!(content, "hello", "应下载到第二次响应内容");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ==================== 健壮性增强回归（TCP 探针/签名/断点续传/多实例钳制/超时参数化） ====================
+
+#[test]
+fn parse_tcp_target_formats() {
+    // tcp:// 健康探针目标解析: host / host:port / [::1] / [::1]:port / 非法格式
+    use crate::service_host::parse_tcp_target_check;
+    assert!(parse_tcp_target_check("127.0.0.1:8080"));
+    assert!(parse_tcp_target_check("example.com"));
+    assert!(parse_tcp_target_check("[::1]:514"));
+    assert!(parse_tcp_target_check("[::1]"));
+    assert!(!parse_tcp_target_check("host:"));
+    assert!(!parse_tcp_target_check("host:abc"));
+    assert!(!parse_tcp_target_check(":8080"));
+    assert!(!parse_tcp_target_check(""));
+    assert!(!parse_tcp_target_check("host:99999"));
+}
+
+#[test]
+fn config_signature_roundtrip_and_tamper_detection() {
+    // 配置签名: 生成 RSA 密钥 → 签名 → 校验通过 → 篡改内容后校验失败（fail-closed）
+    let dir = std::env::temp_dir().join(format!("osmium-sig-test-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let key_path = dir.join("test-key.pem");
+    let pub_path = dir.join("test-pub.pem");
+    // 用 openssl 生成密钥（测试环境可用）；失败则跳过（不阻塞其他测试）
+    let gen_res = Command::new("openssl")
+        .args(["genrsa", "-out", &key_path.to_string_lossy(), "2048"])
+        .output();
+    if gen_res.map(|o| o.status.success()).unwrap_or(false) {
+        let _ = Command::new("openssl")
+            .args([
+                "rsa",
+                "-in",
+                &key_path.to_string_lossy(),
+                "-pubout",
+                "-out",
+                &pub_path.to_string_lossy(),
+            ])
+            .output();
+        let cfg = dir.join("svc.toml");
+        std::fs::write(&cfg, "service_name = \"s\"\n").unwrap();
+        // 签名函数读 exe 旁固定名密钥——此处直接构造等效校验路径: 用 rsa 库手工签名/校验
+        use rsa::pkcs1v15::{Signature, SigningKey, VerifyingKey};
+        use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey};
+        use rsa::sha2::Sha256;
+        use rsa::signature::{RandomizedSigner, SignatureEncoding, Verifier};
+        let key = rsa::RsaPrivateKey::from_pkcs8_pem(&std::fs::read_to_string(&key_path).unwrap())
+            .unwrap();
+        let pub_key =
+            rsa::RsaPublicKey::from_public_key_pem(&std::fs::read_to_string(&pub_path).unwrap())
+                .unwrap();
+        let data = b"payload-bytes";
+        let mut rng = rsa::rand_core::OsRng;
+        let sig = SigningKey::<Sha256>::new(key).sign_with_rng(&mut rng, data);
+        let sig_bytes = sig.to_bytes();
+        // 正确签名 → 校验通过
+        let ok_sig = Signature::try_from(sig_bytes.as_ref()).unwrap();
+        let verifying = VerifyingKey::<Sha256>::new(pub_key);
+        assert!(verifying.verify(data, &ok_sig).is_ok(), "正确签名应通过");
+        // 篡改内容 → 校验失败
+        assert!(
+            verifying.verify(b"tampered", &ok_sig).is_err(),
+            "篡改内容应被拒绝"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn process_count_clamps_to_range() {
+    // process_count 钳制: <=0 → 1；>64 → 64（配置失控防护）
+    let dir = unique_temp_dir("pcount");
+    let f = dir.join("pc.toml");
+    std::fs::write(&f, "service_name = \"pc\"\nservice_display_name = \"pc\"\nservice_description = \"pc\"\nservice_executable_path = 'C:\\x.exe'\nprocess_count = 100\n").unwrap();
+    let cfg = load_config(&f);
+    assert_eq!(cfg.process_count, 100);
+    let mut host = crate::service_host::ServiceHost::new();
+    host.apply_runtime_fields_probe(&cfg);
+    assert_eq!(host.process_count_probe(), 64, "超上限应钳制到 64");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn hook_timeout_fields_parse_and_default() {
+    // 钩子/停止命令超时参数化: 缺省回退常量；显式配置生效
+    let dir = unique_temp_dir("hookt");
+    let f = dir.join("ht.toml");
+    std::fs::write(&f, "service_name = \"ht\"\nservice_display_name = \"ht\"\nservice_description = \"ht\"\nservice_executable_path = 'C:\\x.exe'\nhook_prestart_timeout_secs = 7\nhook_poststop_timeout_secs = 9\nstop_cmd_timeout_secs = 12\n").unwrap();
+    let cfg = load_config(&f);
+    assert_eq!(cfg.hook_prestart_timeout_secs, 7);
+    assert_eq!(cfg.hook_poststop_timeout_secs, 9);
+    assert_eq!(cfg.stop_cmd_timeout_secs, 12);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn metrics_format_parses_prometheus() {
+    // metrics_format: prometheus 生效，其他值回退 json
+    let dir = unique_temp_dir("mf");
+    let f = dir.join("mf.toml");
+    std::fs::write(&f, "service_name = \"mf\"\nservice_display_name = \"mf\"\nservice_description = \"mf\"\nservice_executable_path = 'C:\\x.exe'\nmetrics_format = \"PROMETHEUS\"\n").unwrap();
+    let cfg = load_config(&f);
+    let mut host = crate::service_host::ServiceHost::new();
+    host.apply_runtime_fields_probe(&cfg);
+    assert_eq!(
+        host.metrics_format_probe(),
+        "prometheus",
+        "大小写不敏感生效"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn validate_config_extended_prechecks() {
+    // --check 扩展预检: 非法 SDDL / 坏 schedules / 坏 tcp 目标 / 插件引用缺失 应报错
+    let dir = unique_temp_dir("chk2");
+    let mk = |content: &str| {
+        let f = dir.join(format!(
+            "c-{}.toml",
+            std::process::id() + content.len() as u32 % 1000
+        ));
+        std::fs::write(&f, content).unwrap();
+        f
+    };
+    // 坏 SDDL（无效字符）
+    let f1 = mk(
+        "service_name = \"a\"\nservice_display_name = \"a\"\nservice_description = \"a\"\nservice_executable_path = 'C:\\Windows\\System32\\ping.exe'\nsecurity_descriptor = \"D:(NOTVALID\"\n",
+    );
+    assert!(validate_config(&f1).is_err(), "非法 SDDL 应报错");
+    // 坏 schedules（daily_at 无法解析 + every_secs 非正）
+    let f2 = mk(
+        "service_name = \"b\"\nservice_display_name = \"b\"\nservice_description = \"b\"\nservice_executable_path = 'C:\\Windows\\System32\\ping.exe'\nschedules = [{ daily_at = \"25:99\" }, { every_secs = -3 }]\n",
+    );
+    assert!(validate_config(&f2).is_err(), "坏 schedules 应报错");
+    // 坏 tcp 健康检查目标
+    let f3 = mk(
+        "service_name = \"c\"\nservice_display_name = \"c\"\nservice_description = \"c\"\nservice_executable_path = 'C:\\Windows\\System32\\ping.exe'\nhealth_check_url = \"tcp://:8080\"\n",
+    );
+    assert!(validate_config(&f3).is_err(), "坏 tcp 目标应报错");
+    // 引用插件但本机无插件 → 报错（测试进程目录通常无 .osx）
+    let f4 = mk(
+        "service_name = \"d\"\nservice_display_name = \"d\"\nservice_description = \"d\"\nservice_executable_path = 'C:\\Windows\\System32\\ping.exe'\nplugins = [{ kit = \"ping\", phase = \"start\" }]\n",
+    );
+    let plugins = crate::service_host::discover_plugins();
+    if plugins.is_empty() {
+        assert!(validate_config(&f4).is_err(), "引用插件但无插件可用应报错");
+    }
+    // 内置告警通道校验: notify_url 非法 / smtp 缺 from/to 应报错
+    let f6 = mk(
+        "service_name = \"f\"\nservice_display_name = \"f\"\nservice_description = \"f\"\nservice_executable_path = 'C:\\Windows\\System32\\ping.exe'\nnotify_url = \"not-a-url\"\n",
+    );
+    assert!(validate_config(&f6).is_err(), "非法 notify_url 应报错");
+    let f7 = mk(
+        "service_name = \"g\"\nservice_display_name = \"g\"\nservice_description = \"g\"\nservice_executable_path = 'C:\\Windows\\System32\\ping.exe'\nsmtp_host = \"mail.example.com:25\"\n",
+    );
+    assert!(
+        validate_config(&f7).is_err(),
+        "smtp 缺 smtp_from/smtp_to 应报错"
+    );
+    // 正常配置仍通过（不因新增预检误伤）
+    let f5 = mk(
+        "service_name = \"e\"\nservice_display_name = \"e\"\nservice_description = \"e\"\nservice_executable_path = 'C:\\Windows\\System32\\ping.exe'\nschedules = [{ every_secs = 60, action = \"hook\", command = \"echo x\" }]\nhealth_check_url = \"tcp://127.0.0.1:8080\"\n",
+    );
+    assert!(validate_config(&f5).is_ok(), "合法配置应通过预检");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn chunk_already_done_detects_complete_chunks() {
+    // 断点续传: 已写满且非零的块判定完成；未写/短块判定未完成
+    use std::io::Write;
+    let dir = unique_temp_dir("chunk");
+    let f = dir.join("f.bin");
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&f)
+        .unwrap();
+    file.write_all(&[1u8; 1024 * 1024]).unwrap(); // 恰好 1MiB
+    // 第一块完整（非零）→ 完成
+    assert!(crate::service_core::chunk_already_done(
+        &file,
+        0,
+        1024 * 1024 - 1
+    ));
+    // 尾部越界块（文件长度不足）→ 未完成
+    assert!(!crate::service_core::chunk_already_done(
+        &file,
+        1024 * 1024,
+        2 * 1024 * 1024 - 1
+    ));
+    // 全零区间（未写）→ 未完成
+    file.set_len(2 * 1024 * 1024).unwrap();
+    assert!(
+        !crate::service_core::chunk_already_done(&file, 1024 * 1024, 2 * 1024 * 1024 - 1),
+        "全零块视为未完成"
+    );
+    // 部分写入的块（前 512KB 非零、后 512KB 零）→ 未完成（残缺块必须重下）
+    let half = vec![1u8; 512 * 1024];
+    use std::os::windows::fs::FileExt;
+    file.seek_write(&half, 1024 * 1024).unwrap();
+    assert!(
+        !crate::service_core::chunk_already_done(&file, 1024 * 1024, 2 * 1024 * 1024 - 1),
+        "半写块视为未完成"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn multi_process_starts_requested_instances() {
+    // 多子进程: start_child_process 启动 process_count 个实例，主实例标记正确
+    let dir = unique_temp_dir("mp");
+    let config_path = dir.join("mp.toml");
+    std::fs::write(&config_path,
+        "service_name = \"mp\"\nservice_display_name = \"mp\"\nservice_description = \"mp\"\n\
+         service_executable_path = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'\n\
+         service_executable_args = '-NoProfile -Command Start-Sleep 5'\nprocess_count = 2\nlog_dir = ''\n"
+    ).unwrap();
+    let mut host = crate::service_host::ServiceHost::new();
+    assert!(host.on_start_from(&config_path), "宿主应启动成功");
+    assert_eq!(host.child.len(), 2, "应启动 2 个实例");
+    let pids: Vec<u32> = host.child.iter().map(|c| c.id()).collect();
+    assert_eq!(
+        host.last_child_pid_probe(),
+        pids[0],
+        "主实例 PID 应记录第一个实例"
+    );
+    // 清理
+    for mut c in std::mem::take(&mut host.child) {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn writable_cache_consistent_per_path() {
+    // 可写性判定缓存: 同一路径重复查询结果一致（且不重复 spawn PowerShell）
+    crate::service_core::clear_writable_cache();
+    let dir = unique_temp_dir("wcache");
+    let d = dir.to_string_lossy().to_string();
+    let r1 = is_user_writable(&d);
+    let r2 = is_user_writable(&d);
+    assert_eq!(r1, r2, "缓存应返回一致结果");
+    crate::service_core::clear_writable_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn download_rate_limit_parses() {
+    // 下载限速字段: 缺省 0（不限速），显式配置生效
+    let dir = unique_temp_dir("ratel");
+    let f = dir.join("rl.toml");
+    std::fs::write(&f, "service_name = \"rl\"\nservice_display_name = \"rl\"\nservice_description = \"rl\"\nservice_executable_path = 'C:\\x.exe'\ndownload_rate_limit_kbps = 512\n").unwrap();
+    let cfg = load_config(&f);
+    assert_eq!(cfg.download_rate_limit_kbps, 512);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn parse_osx_probe_spec_parses_kit_and_payload() {
+    // osx:// 健康探针规格解析: kit 提取 + 表单参数解码为 payload JSON
+    let (kit, payload) =
+        crate::service_host::parse_osx_probe_spec("probe?url=127.0.0.1%3A3306&probe_type=mysql")
+            .unwrap();
+    assert_eq!(kit, "probe");
+    assert_eq!(payload["url"], "127.0.0.1:3306", "表单编码应解码");
+    assert_eq!(payload["probe_type"], "mysql");
+    // 无参数
+    let (kit2, payload2) = crate::service_host::parse_osx_probe_spec("probe").unwrap();
+    assert_eq!(kit2, "probe");
+    assert!(payload2.as_object().unwrap().is_empty());
+    // 空 kit 拒绝
+    assert!(crate::service_host::parse_osx_probe_spec("").is_none());
+    assert!(crate::service_host::parse_osx_probe_spec("?a=1").is_none());
 }

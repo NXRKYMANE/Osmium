@@ -7,10 +7,10 @@ mod kits_tests;
 
 use serde::{Deserialize, Serialize};
 
-use kits_core::{MapperSpec,
-                map_shared_directories, notify_webhook, reboot_system, send_email_smtp, send_syslog_udp,
-                sspi_download_to_file, unmap_shared_directories,
-                unzip_to_dir,
+use kits_core::{
+    MapperSpec, map_shared_directories, notify_payload, notify_webhook, parse_host_port,
+    probe_target, reboot_system, send_email_smtp, send_syslog_udp, sspi_download_to_file,
+    unmap_shared_directories, unzip_to_dir,
 };
 
 /// 插件请求: 按 kit 字段分发到 SSPI / netmap / unzip / reboot / notify / smtp / syslog 功能
@@ -40,6 +40,12 @@ struct Request {
     dest: Option<String>,
     /// notify/smtp/syslog: 通知文本（notify 为 POST JSON 的 text 字段）；缺省用注入的崩溃上下文组装
     text: Option<String>,
+    /// notify: webhook 平台格式（generic 默认 | teams | discord | feishu）
+    format: Option<String>,
+    /// probe: 探针类型（tcp 默认 | redis | mysql）
+    probe_type: Option<String>,
+    /// probe: 目标端口（缺省按类型: redis 6379 / mysql 3306 / tcp 80）
+    port: Option<u16>,
     /// crash 阶段宿主自动注入: 服务名
     service_name: Option<String>,
     /// crash 阶段宿主自动注入: 子进程退出码
@@ -97,6 +103,7 @@ fn main() {
         "unzip" => dispatch_unzip(&req),
         "reboot" => dispatch_reboot(),
         "notify" => dispatch_notify(&req),
+        "probe" => dispatch_probe(&req),
         "smtp" => dispatch_smtp(&req),
         "syslog" => dispatch_syslog(&req),
         other => fail(&format!("unknown kit: {other}")),
@@ -105,8 +112,12 @@ fn main() {
 
 /// SSPI 认证下载: 完成一次完整 401 挑战-响应循环并落盘
 fn dispatch_sspi(req: &Request) {
-    let Some(url) = req.url.as_deref() else { fail("sspi: missing 'url'") };
-    let Some(to) = req.to.as_deref() else { fail("sspi: missing 'to'") };
+    let Some(url) = req.url.as_deref() else {
+        fail("sspi: missing 'url'")
+    };
+    let Some(to) = req.to.as_deref() else {
+        fail("sspi: missing 'to'")
+    };
     match sspi_download_to_file(
         url,
         to,
@@ -122,7 +133,9 @@ fn dispatch_sspi(req: &Request) {
 
 /// 共享目录映射: 全部条目执行后汇总失败列表
 fn dispatch_netmap(req: &Request) {
-    let Some(action) = req.action.as_deref() else { fail("netmap: missing 'action'") };
+    let Some(action) = req.action.as_deref() else {
+        fail("netmap: missing 'action'")
+    };
     let mappers = req.mappers.as_deref().unwrap_or(&[]);
     if mappers.is_empty() {
         fail("netmap: no mappers provided (empty mappers list)");
@@ -147,8 +160,12 @@ fn dispatch_netmap(req: &Request) {
 
 /// zip 解压: 解压 src 到 dest（防 zip-slip 穿越）
 fn dispatch_unzip(req: &Request) {
-    let Some(src) = req.src.as_deref() else { fail("unzip: missing 'src'") };
-    let Some(dest) = req.dest.as_deref() else { fail("unzip: missing 'dest'") };
+    let Some(src) = req.src.as_deref() else {
+        fail("unzip: missing 'src'")
+    };
+    let Some(dest) = req.dest.as_deref() else {
+        fail("unzip: missing 'dest'")
+    };
     match unzip_to_dir(src, dest) {
         Ok(()) => ok(),
         Err(e) => fail(&e),
@@ -163,16 +180,46 @@ fn dispatch_reboot() {
     }
 }
 
-/// Webhook 通知: 向 url POST {"text": text}（服务事件推送，2xx 视为成功）
+/// Webhook 通知: 向 url POST 按 format 构造的 JSON（服务事件推送，2xx 视为成功）
 fn dispatch_notify(req: &Request) {
-    let Some(url) = req.url.as_deref() else { fail("notify: missing 'url'") };
-    match notify_webhook(url, &alert_text(req), req.timeout_secs.unwrap_or(30)) {
+    let Some(url) = req.url.as_deref() else {
+        fail("notify: missing 'url'")
+    };
+    let body = notify_payload(&alert_text(req), req.format.as_deref().unwrap_or("generic"));
+    match notify_webhook(
+        url,
+        &body,
+        req.timeout_secs.unwrap_or(30),
+        req.proxy.as_deref(),
+    ) {
         Ok(()) => ok(),
         Err(e) => fail(&e),
     }
 }
 
-/// 告警文本: 显式 text 优先；缺省用宿主 crash 阶段注入的上下文组装（[服务名] crashed, exit code X, failure #N）
+/// 协议健康探针: 连接目标并验证协议握手（redis PING / mysql 握手包 / tcp 连接）
+fn dispatch_probe(req: &Request) {
+    let Some(host) = req.url.as_deref() else {
+        fail("probe: missing 'url' (host)")
+    };
+    let probe_type = req.probe_type.as_deref().unwrap_or("tcp");
+    let default_port = match probe_type.to_ascii_lowercase().as_str() {
+        "redis" => 6379,
+        "mysql" => 3306,
+        _ => 80,
+    };
+    let (addr, port) = match parse_host_port(host, default_port, "probe") {
+        Ok(v) => v,
+        Err(e) => fail(&e),
+    };
+    let port = req.port.unwrap_or(port);
+    match probe_target(probe_type, addr, port, req.timeout_secs.unwrap_or(5)) {
+        Ok(()) => ok(),
+        Err(e) => fail(&e),
+    }
+}
+
+/// 告警文本: 显式 text 优先；缺省用宿主 crash 阶段注入的上下文组装（`[服务名]` crashed, exit code X, failure #N）
 fn alert_text(req: &Request) -> String {
     if let Some(t) = req.text.as_deref()
         && !t.trim().is_empty()
@@ -180,21 +227,35 @@ fn alert_text(req: &Request) -> String {
         return t.to_string();
     }
     let name = req.service_name.as_deref().unwrap_or("service");
-    let code = req.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "?".into());
-    let failures = req.failures.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+    let code = req
+        .exit_code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "?".into());
+    let failures = req
+        .failures
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "?".into());
     format!("[{name}] crashed (exit code {code}, failure #{failures})")
 }
 
 /// SMTP 邮件告警: 发一封带认证（可选）的邮件（AUTH PLAIN，仅单封，用于服务事件通知）
 fn dispatch_smtp(req: &Request) {
-    let Some(host) = req.host.as_deref() else { fail("smtp: missing 'host'") };
-    let Some(from) = req.from.as_deref() else { fail("smtp: missing 'from'") };
-    let Some(to_addr) = req.to_addr.as_deref() else { fail("smtp: missing 'to'") };
+    let Some(host) = req.host.as_deref() else {
+        fail("smtp: missing 'host'")
+    };
+    let Some(from) = req.from.as_deref() else {
+        fail("smtp: missing 'from'")
+    };
+    let Some(to_addr) = req.to_addr.as_deref() else {
+        fail("smtp: missing 'to'")
+    };
     match send_email_smtp(
         host,
         from,
         to_addr,
-        req.subject.as_deref().unwrap_or("Osmium service notification"),
+        req.subject
+            .as_deref()
+            .unwrap_or("Osmium service notification"),
         &alert_text(req),
         req.username.as_deref(),
         req.password.as_deref(),
@@ -207,12 +268,14 @@ fn dispatch_smtp(req: &Request) {
 
 /// Syslog 告警: UDP 发送 RFC 5424 消息（facility/severity 可配）
 fn dispatch_syslog(req: &Request) {
-    let Some(host) = req.syslog_host.as_deref() else { fail("syslog: missing 'host'") };
+    let Some(host) = req.syslog_host.as_deref() else {
+        fail("syslog: missing 'host'")
+    };
     match send_syslog_udp(
         host,
         &alert_text(req),
-        req.facility.unwrap_or(3),   // 默认 daemon
-        req.severity.unwrap_or(5),   // 默认 notice
+        req.facility.unwrap_or(3), // 默认 daemon
+        req.severity.unwrap_or(5), // 默认 notice
         req.tag.as_deref().unwrap_or("Osmium"),
         req.timeout_secs.unwrap_or(5),
     ) {
@@ -223,7 +286,11 @@ fn dispatch_syslog(req: &Request) {
 
 /// 输出成功响应
 fn ok() {
-    let resp = Response { ok: true, error: None, details: None };
+    let resp = Response {
+        ok: true,
+        error: None,
+        details: None,
+    };
     println!("{}", serde_json::to_string(&resp).unwrap());
 }
 
@@ -231,7 +298,11 @@ fn ok() {
 /// 同时向 stderr 抛出错误详情（宿主调用时丢弃、手动运行/调试时可见）
 fn fail(msg: &str) -> ! {
     eprintln!("osmium-kit error: {msg}");
-    let resp = Response { ok: false, error: Some(msg.to_string()), details: None };
+    let resp = Response {
+        ok: false,
+        error: Some(msg.to_string()),
+        details: None,
+    };
     println!("{}", serde_json::to_string(&resp).unwrap());
     std::process::exit(1);
 }

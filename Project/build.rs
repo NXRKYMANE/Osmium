@@ -13,7 +13,10 @@ fn main() {
     let build = parts.get(2).copied().unwrap_or(0);
     let revision = parts.get(3).copied().unwrap_or(0);
     // FILEVERSION/PRODUCTVERSION 需要打包为 64 位: major.minor.build.revision
-    let packed = (u64::from(major) << 48) | (u64::from(minor) << 32) | (u64::from(build) << 16) | u64::from(revision);
+    let packed = (u64::from(major) << 48)
+        | (u64::from(minor) << 32)
+        | (u64::from(build) << 16)
+        | u64::from(revision);
 
     // FileVersion 为 4 段（缺省补 0），ProductVersion 为版本号本身
     let file_version = format!("{}.{}.{}.{}", major, minor, build, revision);
@@ -29,7 +32,10 @@ fn main() {
     res.set("CompanyName", "NXRKYMANE SOFTWARE");
     res.set("ProductName", "Osmium");
     res.set("FileDescription", "osmium64");
-    res.set("LegalCopyright", &format!("Copyright (C) {} NXRKYMANE SOFTWARE", year));
+    res.set(
+        "LegalCopyright",
+        &format!("Copyright (C) {} NXRKYMANE SOFTWARE", year),
+    );
     // 语言元数据固定为英文（en-US），避免随编译环境变化
     res.set_language(0x0409);
     res.set_icon("../Misc/Osmium.ico");

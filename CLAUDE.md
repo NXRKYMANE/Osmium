@@ -19,6 +19,192 @@
 - 重大修改和调优前记得备份一个,已经多次发生翻车事故造成项目从头来的情况
 # 项目记录
 
+## v26.11.0（2026-08-23）· BUILD.ps1 提速重构（53s 全流程，原 5-10 分钟级）
+- **根因**：①第 7 段 UPX 为切 opt-level=z 改根 Cargo.toml → 触发**整个依赖树重编译**（64+32 位各 1-2 次全量）+ 改回 3 下次普通构建又全量重编；②插件压缩用 `--ultra-brute --lzma`（40s/文件）实际与 `--lzma`（1s）体积几乎一致
+- **改动 1（最大提速）**：第 7 段不再 opt-level=z 重建，直接用已构建产物 `--lzma` 压缩（实测普通版 4.3MB→1.43MB，与 z 版 1.19MB 差异很小）；删除根 Cargo.toml opt-level 切换/恢复逻辑
+- **改动 2**：插件 opt-level=z 改为**per-package profile 固化**在根 Cargo.toml（`[profile.release.package.osmium-official-kits] opt-level="z"`）——依赖与主程序共享 opt-3 缓存，插件增量构建 0.2s（原 13s），且 UPX 后 0.88MB 比全 z 的 0.93MB 更小；删除两处临时 profile 文件逻辑（--config 已不需要）
+- **改动 3**：64 位/32 位均改为**一次 workspace 构建**（`cargo build --release --workspace`），依赖树只编译一次（原分开构建 40+13s → 40s）
+- **改动 4**：新增 `Compress-Upx` 辅助函数（临时副本压缩→落盘，统一 --lzma），插件 64/32 + exe UPX 64/32 全部复用，消除 4 处重复代码；签名统一在 4.5/6.5 段
+- **实测**：`.\BUILD.ps1 -SkipTests -SkipSign -Upx` 全流程 **53s**（含 32 位全量重编 47.9s + ISCC + 4 个 UPX），此前 UPX 段单独就要几分钟
+- 产物实测：osmium64-upx 1.43MB / osmium32-upx 1.18MB / 插件 UPX 后 0.88MB / 0.67MB；2 README 的 UPX 行大小与构建说明同步（注明不再 z 重建的原因）
+- 注意：BUILD.ps1.bak 为本次重构前备份
+
+## v26.11.0（2026-08-23）· 构建/安装包部署章节移到测试下面 + 英文版表格修复
+- 2 README 章节重排："构建"+"安装包部署"两个 `##` 章节整体移到"测试"之后（顺序：常见问题 → 项目结构 → 测试 → 构建 → 安装包部署 → 环境要求 → 开发历史）；脚本切段重组实现（PowerShell 按标题定位 + 按段拼接，LF+BOM 保留）
+- 修复英文版产物表 header 行第 1 列宽度失效（`| Item              |` col1=20 与数据行 18 不一致）；全表列数/显示宽度校验通过
+- 事故：中途一次脚本切段顺序写错（把 segProj 放在了 segBuild 前）导致 README_CN 段落错乱重复（项目结构/构建/安装包部署出现 2-3 次），已按"从损坏文件中提取完整段（两份相同段取其一）+ 正确顺序重建"恢复，总行数 1287 与损坏前一致
+- 注意：README 段落移动/大块重排务必用"先备份原文件 + 验证段边界 + 写后用 Compare-Object 检查"流程，避免再次翻车
+
+## v26.11.0（2026-08-23）· 插件发行版改为"opt-level=z + UPX 压缩"（不再区分原版/UPX 版）
+- 修正认知：BUILD.ps1 原 UPX 段只压缩主程序 exe（osmium64-upx.exe / osmium32-upx.exe），两个插件只是 opt-level=z 编译后**直接复制**到 Publish\exts\，从未 UPX 压缩
+- 方案变更：插件**发行版即压缩版**——第 4/4.3 段构建后直接用 UPX（--ultra-brute --lzma）压缩再发布，文件名**不带** -upx 后缀（`osmium64-official-kits-v<版本>.osx`，64 位实测约 0.9 MB、32 位约 0.7 MB，原 2.48/1.84 MB）；upx.exe 不可用时回退未压缩并告警；$upxPath 定义提前
+- 第 7 段 UPX 询问只针对主程序 exe（osmium64-upx.exe / osmium32-upx.exe），删除上轮加的插件压缩代码
+- 2 README 同步：产物表大小行只留 exe、新增"插件大小"行（注明压缩产物即发行版）、UPX 行去掉插件说明、构建章节流水线说明（插件构建时直接压缩）；表格重新对齐（16 表列数 0 不一致）
+
+
+## v26.11.0（2026-08-23）· README 32 位产物与位数匹配说明 + 测试数/产物更新
+- 产物表重写:双版本（`osmium64.exe`/`osmium32.exe` + 两个插件 + 两个 UPX 版）、大小（64 位 4.3/2.0 MB、32 位 3.3/1.4 MB）、安装包注明"仅 64 位，32 位独立部署"、工具链补 i686 交叉 target
+- 插件系统补**位数匹配规则**（32 位进程不能启动 64 位可执行文件；32 位宿主用 osmium32-official-kits.osx，`--extend` 位数标记可核对）;官方插件章节改为双版本说明（安装包内嵌 64 位、32 位从 Releases 取）
+- 构建章节补 32 位:流水线 64→32→测试→安装包（仅 64 位）、UPX 段补 osmium32-upx、签名产物清单补 32 位、单独构建补 i686 交叉命令;安装包/环境要求（Windows 10+ 双位数）同步;download_auth 说明补 32 位插件
+- 测试数 171→**172**（目录结构 + 测试章节）;kits 目录描述补 32 位交叉构建;2 README 同步、表格重新对齐（16 表格列数一致）
+
+## v26.11.0（2026-08-23）· 帮助头位数标识 + --extend 插件位数标记
+- 帮助头 `Osmium v<ver>` → **`Osmium 64 v26.11.0` / `Osmium 32 v26.11.0`**（cfg!(target_pointer_width) 编译期判定，识别当前二进制位数）
+- `--extend` 插件列表在名称后附位数标记:新增 `pe_arch()`（读 PE 头 e_lfanew+4 Machine:0x14c→`[32]`/0x8664→`[64]`，非 PE/读取失败→`[unknown]`）;32 位宿主列 64 位插件仍走 spawn 失败红点路径（系统规则，无需额外判定）
+- 测试 +1（pe_arch:当前 exe 与自身位数一致/非 PE None/不存在 None）共 172 + 32/2 全过；clippy 零警告、fmt 通过
+- 真机验证:64/32 位 help 头 ✓；--extend 显示 `fake-plugin.osx [unknown]`、`osmium32-official-kits.osx [32]`、`osmium64-official-kits.osx [64]` ✓
+- 2 README 的 --extend 命令行描述补位数标记说明;表格重新对齐
+
+## v26.11.0（2026-08-23）· BUILD.ps1 新增 32 位产物（osmium32 系列）
+- BUILD.ps1 扩展:额外输出 **Publish\osmium32.exe + Publish\exts\osmium32-official-kits-v<VERSION>.osx + Publish\osmium32-upx.exe**（x86/i686 交叉构建，不新增安装包）
+- 实现:①`Save-X86Env`/`Restore-Env` 辅助函数——手动工具链环境（无 vswhere）下切 x86 LIB/INCLUDE/PATH 并设 `CC_i686_pc_windows_msvc` 环境变量（**cc-rs/ring 汇编必须显式指定 x86 cl.exe，否则按 PATH 误选 x64 机器类型导致 LNK1112**）;标准 VS 环境由 rustc/cc-rs 自动处理;②4.3 段构建 i686 target（rustup 自动补装）+ 复制产物 + 签名;③UPX 询问段复用同一环境切换生成 osmium32-upx.exe（opt-level=z）
+- 顺带修复:MSVC 工具链发现 `Sort-Object Name -Descending` 会把 "Tools" 目录误选为最新版本（字母序 T>1）→ 过滤 `Name -match '^\d'`
+- 实测产物:osmium32.exe x86 3.33MB / osmium32-upx.exe x86 0.93MB / osmium32 插件 x86 1.36MB（PE 机器类型 0x14c 验证）;64 位产物不受影响
+
+## v26.11.0（2026-08-23）· 脚本章节重排 + 配置参考补齐与排序
+- "脚本作为服务"章节按 **Python → Java → Node.js → Lua → PowerShell → 批处理** 顺序重排,新增 Node.js 与 Lua 示例（常驻写法/SIGINT 清理/os.exit 退出码/working_directory 说明）;开头语言列表补 .jar/.js/.lua
+- 配置参考补齐 2 个缺失字段:`log_redact`（日志表末尾）、`metrics_file`（健壮性与扩展表 metrics_format 前）;`service_start_mode` 说明补 `once` 值
+- 生命周期与钩子表重排为逻辑分组:钩子（prestart/poststop/auto_refresh）→ 扩展（extensions/plugins/require_signed_plugins）→ 停止行为（stop_executable/stop_arguments/stop_timeout/hide_window/stop_parent_first/kill_process_tree）→ 故障恢复（failure_reset/restart_delay/failure_action/failure_actions）→ 注册属性（interactive/allow_service_logon/security_descriptor/preshutdown）→ event_log
+- 2 README 同步;表格重新对齐（各 16 个表格列数一致 0 不一致）
+
+## v26.11.0（2026-08-23）· 完整示例全字段化 + plugins 占位符 + Go 示例
+- 完整示例重写为**全字段覆盖**（111 个配置字段逐一对照代码 ServiceConfig，缺失 0、多余 0；tomllib 解析通过）：按"基础/启动类型/进程行为/生命周期/故障恢复/日志/下载/资源监控/健康检查/指标/多进程/EcoQoS/SCM/告警通道/安全"分组 + 行内注释
+- 修复示例 TOML 陷阱：原示例 `[[extensions]]` 后跟顶层键（runaway/health_check 等会归入数组元素）——所有数组表（extensions/plugins/schedules/failure_actions/shared_directory_mappers/downloads）统一移到文件末尾，[env] 表保持在前；注释明示该规则
+- plugins 残留清理：完整示例 + 官方功能用法 + 接入步骤三处 `kit = "backup"` 全部改为 `kit = "your kit"` 占位符（表示留空由开发者自填）；插件开发示例代码（backup 分发逻辑）保持不变
+- 新增 **Go 语言插件示例**（C# 之后）：标准库 encoding/json + io.LimitReader 1MB 上限，fail 用 json.Marshal 自动转义；语言数描述 5 → 6（CN/EN 同步）
+- 2 README 完整示例键集完全一致（tomllib 对比 0 差异）
+
+## v26.11.0（2026-08-23）· 版本升级 + README 表格格式化 + 依赖核查
+- 版本升级:主程序 26.10.0 → **26.11.0**、插件 2.0.0 → **2.1.0**（Cargo.toml + Cargo.lock + installer.iss 同步;installer.iss 由 BUILD.ps1 自动同步,本次手动先行对齐）
+- README 表格全面格式化:两个 README 各 16 个 markdown 表格统一按东亚字符宽度（CJK=2）对齐,列数一致性校验通过（0 不一致）;脚本处理跳过代码围栏
+- 依赖核查（两个子项目 Cargo.toml 全量对照代码引用）:**无多余未使用库**——Project 10 个普通依赖 + 20 个 windows features（含 Wdk_System_Threading、Win32_Security 根类型 DACL_SECURITY_INFORMATION）全部在用;kits 6 个依赖 + 6 个 windows features 全部在用;build-deps winresource/chrono 双双在用
+- 171 + 32/2 全过、clippy 零警告、release 构建通过
+
+## v26.10.0（2026-08-23）· README 过时清理 + 内置告警通道双模式真机验证
+- README 全面检查修复过时点：测试数（139→171 主项目、24+1→32+2 kits）、kits_core 能力描述补 notify/smtp/syslog/probe、构建产物数 2→3（exe+插件+安装包）、单独构建 target 路径（workspace 根）、FAQ 插件错误消息与实际一致、产物大小实测更新（exe 4.3 MB / osx z 版 1.96 MB）、.github 描述补 CI 工作流；2 README 同步
+- **真机验证内置告警通道（notify_url/smtp_host/syslog_host 宿主字段）双模式**：
+  - **inplace 独立部署**（--test）：crash → 三通道自动调用全绿——notify teams MessageCard（text 注入 "[alert-inplace] crashed (exit code 1, failure #1)"）、smtp 完整会话（AUTH PLAIN base64 凭据解码正确 + 自定义 subject + 注入上下文 body）、syslog RFC5424（PRI=26 = facility3×8+severity2、UTC 时间戳、tag AlertInplace）
+  - **平台部署**（svcs 共享宿主）：install 后 .osiml 中 smtp_password 以 enc:OSMIUM1: DPAPI 密文落盘（明文不落盘）、sc start → crash → 三通道全绿（notify generic 格式 {text}）、--uninstall 清理无残留
+  - `--check` 真机拦截：非法 notify_url [FAIL] + smtp 缺 from/to [FAIL]、退出码 1
+  - 测试服务器事故：首版 SMTP 模拟器 AUTH PLAIN 忘回 334、readline 块读误判整块 DATA 为一行导致 "." 终止失效——均为测试脚本 bug，插件协议侧无问题
+- 环境处理：Program Files\Osmium\os.exe + exts 插件已更新为最新 release（hydride_svc64 恢复 Running）、测试目录/服务器/临时文件已删、osA-platform 保持 Stopped
+
+## v26.10.0（2026-08-23）· 内置告警通道：notify/smtp/syslog 挂上宿主字段（无需 plugins 声明）
+- 背景：早期 4 个 kit（sspi/netmap/unzip/reboot）挂在宿主内置配置字段上自动调用，后新增的 notify/smtp/syslog 只能走 `[[plugins]]`——本次按用户要求补齐差异：新增 11 个配置字段（`notify_url`/`notify_format` + `smtp_host`/`smtp_from`/`smtp_to`/`smtp_subject`/`smtp_username`/`smtp_password` + `syslog_host`/`syslog_facility`/`syslog_severity`/`syslog_tag`），任一启用即在 crash 阶段自动调用对应官方插件，自动注入崩溃上下文（service_name/exit_code/failures）
+- 实现：ServiceHost 新增 `alert_plugins` 字段 + 纯函数 `builtin_alert_plugins`（把配置字段转成 PluginCallConfig，smtp 缺 smtp_from/smtp_to 时该通道跳过）；crash 分支与 `[[plugins]]` 声明的 crash 调用合并执行，完全复用既有注入/失败告警逻辑
+- `smtp_password` 纳入 DPAPI 加密/解密/fallback 按行剥离（与 service_password 等凭据同源，明文不落盘）；`--check` 预检补 notify_url 合法 URL 校验 + smtp from/to 必填校验，插件存在性判定纳入告警字段
+- 测试 +2（告警字段 TOML 解析、builtin_alert_plugins 全配/缺 from/空配置）+ 扩展 3 个既有测试（加密往返含 smtp_password、fallback 剥离、decrypt 全字段）+ 预检测试补非法 notify_url/smtp 缺 from/to 断言，共 171 全过；clippy 零警告、fmt --check 通过
+- 2 README 同步：官方插件表最后 3 行改内置字段、新增"高级功能 — 内置告警通道"配置表、官方功能用法重写（内置字段优先 + plugins 通道补其他 phase 场景）、kit 数量 5→9（补 notify/probe/smtp/syslog）
+
+## v26.10.0（2026-08-23）· rustdoc 注释合规修复（HTML 标签/链接告警清零）
+- `[::1]:port` 在 `///` doc 注释中被 rustdoc 解析为 markdown 引用链接（IDE 告警）；统一修复 32 处 doc 注释尖括号占位符（`<name>`/`<config>`/`<kit>` 等 → 反引号包裹，`\<name>` 去反斜杠），另修 `[:port]`、`[服务名]` 裸链接与 3 处反引号嵌套错误；`cargo doc --workspace --no-deps` **零警告**
+- 169 + 32/2 全过、clippy 零警告、fmt --check 通过
+
+## v26.10.0（2026-08-23）· 注释折叠损坏修复 + 删除镜像同步工作流
+- 上轮注释折叠脚本损坏 3 处：service_host tick() 注释（无缩进+超长单行，已重写为规范 2 行）、set_io_priority 注释（第 3 行挤入，已拆回 2 行）、kits_tests sspi 测试注释（缩进丢失，cargo fmt 自动修复）；全量核查无其他损坏
+- 按用户要求删除镜像同步平台：git rm .github/scripts/sync-releases.ps1 + .github/workflows/release-sync.yml（Release 资产同步 Gitee/AtomGit 暂时不需要）；保留 ci.yml（fmt/clippy/test 检查）
+- 169 + 32/2 全过、clippy 零警告、fmt --check 通过
+
+## v26.10.0（2026-08-23）· 帮助排序 + 注释规则整理 + rustfmt 统一 + CI 检查工作流
+- 帮助文本排序：SMP 按"安装→迁移→启停→监控→维护→卸载"（uninstall/delete 移到末尾，status/kill 提到 refresh/reload 前）；两行简写按命令顺序重排（SMP 行 --ins --imp --exp --str --stp --rst --sts --kil --rfs --rld --uin --del --lst；DEV 行 --tst --chk --sigc --ext --stra --stpa --rsta --stsa）
+- 注释规则整理：全项目（Project/kits 全部 rs）连续 3+ 行注释块 33 处折叠为 2 行（合并 40 行）；英文注释核查——均为技术术语（SEC_WINNT_AUTH_IDENTITY_UNICODE/PRI 计算等），注释本体中文合规
+- **cargo fmt 全量格式化**（项目此前从未跑过 fmt，10890 行差异；备份在先）；多余空行检查（连续空行已清理）
+- 新增 `.github/workflows/ci.yml`：push/PR 触发，windows-latest 上 fmt --check + clippy -D warnings + cargo test（含 cargo cache）；顺带恢复被误删的 release-sync.yml/sync-releases.ps1（git restore）
+- 169 + 32/2 全过、clippy 零警告、release 构建通过
+
+## v26.10.0（2026-08-23）· 帮助补全精简 + 日志错误码补全 + osx 残留清理 + 覆盖确认
+- 帮助文本补全：恢复 TOML 配置示例段、补 --status-all 行、命令描述精简去括号、简写行补全（--rld/--imp/--exp/--stsa/--sigc）；真机输出 ✓
+- 日志准确性：3 处丢 Win32 错误码补 `{e}`（DeleteService/QueryServiceStatus/QueryServiceConfig 首查）
+- 根目录误放 `osmium64-official-kits.osx`（构建产物残留，未跟踪）已清理
+- osx:// 探针解析提取为纯函数 parse_osx_probe_spec + percent_decode（url crate 未启用 percent-encoding feature，手写 %XX 解码）；测试 +1（kit 提取/表单解码/空 spec 拒绝）
+- 测试 +1（cli_short_aliases_cover_test 补全全部新别名）共 169 + 32/2 全过；clippy 零警告；release 构建通过
+
+## v26.10.0（2026-08-23）· 加强批次 3：--status-all / 磁盘预检 / 钩子 SCM 中断 / notify 平台格式 / osx:// 插件探针 kit
+- **--status-all**（`--stsa`）：批量状态——遍历全部服务输出状态/注册属性/PIDs/指标摘要；真机 ✓
+- **下载磁盘空间预检**：HEAD 已知 Content-Length 后检查目标卷剩余空间（预留 64MB 余量，GetDiskFreeSpaceExW），不足拒绝下载
+- **run_hook SCM 停止协调**：钩子等待循环轮询 scm_stop_requested，停止请求到达立即中断强杀（不再干等超时）；真机 poststop 钩子 "aborted: stop requested" 立即返回 ✓
+- **kits notify 平台格式**：`format` 字段（generic 默认 | teams | discord | feishu），各平台消息卡片 JSON 结构（notify_payload）
+- **kits probe kit + 宿主 osx:// 健康探针**：`health_check_url = "osx://probe?url=...&probe_type=redis|mysql|tcp"` → 宿主解析表单参数调用插件；probe_target 验证协议握手（Redis PING/+PONG、MySQL 握手包 0x0a/0xff、TCP 连接）；真机 osx:// redis 探针通过 ✓
+- 测试 +2（notify 平台格式、probe redis/tcp 本地服务器）共 168 + 32/2 全过；clippy 零警告；环境清理完毕（exts 恢复只留 v26.9.0）
+
+## v26.10.0（2026-08-23）· 收尾加固：GBK 输出丢失修复（真 bug）+ 1003 事件接通 + --list 状态 + 更新竞态窗口加宽
+- **修复子进程输出静默丢失**：spawn_log_reader/spawn_raw_reader 原用 read_line(String)——非 UTF-8 输出（GBK 中文程序）首个无效序列即 Err 中断，后续输出全部丢失；改 read_until(b'\n') 字节读行 + from_utf8_lossy（raw reader 字节原样写）；真机 cmd type GBK 文件 → 日志保留行（lossy 显示）✓
+- **接通 1003 下载失败事件**：write_event(1003) 定义存在但从未调用；start_child_process 的 prepare_download 失败路径补 write_event（真机事件日志 1003 可见 ✓）
+- **--list 显示状态**：服务名后附 [Running]/[Stopped]（真机 ✓）
+- **更新安装竞态窗口加宽**：wait_service_deleted 10s→20s、CreateServiceW 1072 重试 5s→15s（stop→立即 install 连续场景 3.8s 稳定成功）
+- README 措辞修正：多实例健康检查/runaway 采样以主实例为准（文档与实现一致）
+- 168 + 30/2 全过、clippy 零警告；环境清理完毕
+
+## v26.10.0（2026-08-23）· 扩展批次 2：多实例 stop-cmd / --check 服务名 / 钩子 SID 注入 / --status 指标摘要 / 下载限速 + 3 项重构
+- 按建议清单继续扩展（备份在先），双模式（平台 + inplace）真机回归通过：
+  - **多实例 stop_cmd 逐实例**：stop_child_process 对每个实例各跑一次 stop_executable（%PID% 各自替换）；真机 stop-multi.txt 两行 stop-pid=9072/15344
+  - **--check 支持服务名**：参数为已注册服务名时读部署配置体检（平台 svcs .osiml / inplace exe 旁 toml），便于定位宿主启动失败；真机双模式 ✓
+  - **钩子注入 WINSGF_SERVICE_ID**：prestart/poststop/extensions/schedule 钩子环境注入服务标识（与子进程一致，poststop 保留 CHILD_PID/EXIT_CODE）；真机 SID=regress-e1 ✓
+  - **--status 指标摘要**：metrics_file 配置时显示最后一条导出记录（last_metrics_line）
+  - **下载限速 `download_rate_limit_kbps`**（默认 0 不限）：RateLimitedReader 按已读总量/速率节流，single 与分块路径共用；真机 32/64Kbps 下载 ✓
+- 重构：①install_from_config_path 拆分 collect_unsafe_paths / check_inplace_requirements（行为不变，测试全过）；②f() 单遍扫描替换（消除 O(n²)，嵌套占位符语义更正确）；③is_user_writable 进程内缓存（PowerShell 启动开销大；同一进程 ACL 不变缓存安全，writable_cache helper 收敛）
+- 测试 +2（缓存一致性、限速字段解析）共 168 + 30/2 全过；clippy 零警告；环境清理完毕
+
+## v26.10.0（2026-08-23）· 断点续传深挖：修复 2 个隐蔽 bug + 测试覆盖补全 + 帮助示例恢复 + rsa 0.9.10
+- **修复 ① 断点续传半写块误判**：chunk_already_done 用 any(!=0) 判定块完成——部分写入的块（中断）会被误判为已完成 → 数据缺失；改 all(!=0)（残缺块必须重下），测试补半写块断言
+- **修复 ② 下载回退数据错位（隐蔽）**：`File::set_len` 在 Windows 上**不保证把文件位置重置**，且分块 seek_write 并发竞争共享位置 → 分块失败回退单线程时 `io::copy` 从错误偏移写（实测位置 1MiB/3MiB 随机）→ 文件头部空洞+长度膨胀（无 sha 配置时静默损坏）；修复：写前显式 `seek(Start(0))`（304 分支/回退路径/single_download 内三处），并补 `read(true)` 权限（原 write-only 打开使 seek_read 拒绝访问 → 续传判定恒 false 静默退化）
+- **测试隔离修复**：download_core 测试改用 unique_temp_dir（固定全局 tmp 名在并发测试间互相污染——复用逻辑把他人残留误当断点续传）
+- 测试补全 +3：validate_config 扩展预检（坏 SDDL/坏 schedules/坏 tcp 目标/插件引用缺失/合法配置不误伤）、chunk_already_done 四态（完整/越界/全零/半写）、multi_process_starts_requested_instances（process_count=2 启动 + 主实例标记）共 166 + 30/2 全过；clippy 零警告
+- 恢复 CLI 帮助中间的 TOML 配置字段示例段（service_name/display_name/description/executable_path，用户误删）；rsa 显式更新 0.9.9 → 0.9.10（最新）
+
+## v26.10.0（2026-08-23）· 健壮性增强批次：多子进程 / TCP 健康探针 / 配置签名 / 断点续传 / --check 扩展 / 超时参数化 / Prometheus 指标 / 审计事件 / Job 状态
+- 按用户要求实现全部增强项（备份在先），新增字段双模式（平台 + inplace）真机回归通过：
+  - **多子进程 `process_count`**（默认 1 完全兼容，钳制 1..=64）：child 从 Option<Child> 重构为 Vec<Child>（主实例 = 第一个）；任一实例非零退出按故障恢复链处理（restart 重启全部实例）、正常退出（0）仅补足该实例（不计故障）、none 停止；采样/健康检查按主实例（同配置同行为）；stop 优雅路径只对主实例，其余 force_kill。真机：3×ping 故障重启全部恢复、2×powershell 正常退出补足
+  - **TCP 健康探针**：`health_check_url` 支持 `tcp://host:port`（连接成功即健康，非 HTTP 服务）；parse_tcp_target（IPv6 括号/缺省端口 80）；真机失败路径（关闭端口 → 连续失败 → 强杀 → 恢复链）✓
+  - **配置签名 RSA-SHA256**（rsa crate + PKCS#8 PEM）：exe 旁 `osmium-sign.key`（私钥，install 自动签名平台 `<name>.sig`/inplace `<exe>.toml.sig`）+ `osmium-public.pem`（宿主校验）；`require_signed_config=true` 时启动/热刷新/崩溃重启全部校验（fail-closed）；CLI `--sign-config`；真机：篡改 osiml → 拒绝启动 + 日志明确（修复校验位置在 log_dir 就绪后，否则拒绝原因不可见）
+  - **下载断点续传**：tmp 非空复用 + chunk_already_done 按块跳过（文件长度覆盖块尾且区间非全零）；单线程/304 路径 set_len(0) 清残留
+  - **--check 预检扩展**：插件存在性（plugins/sspi/netmap 引用）、SDDL 合法性（Convert 解析）、schedules 格式（every_secs 正/daily_at 可解析）、health_check URL（tcp 目标/http URL）
+  - **钩子/停止命令超时参数化**：`hook_prestart_timeout_secs`（默认 60）/`hook_poststop_timeout_secs`（30）/`stop_cmd_timeout_secs`（缺省 stop_timeout_secs）
+  - **Prometheus 指标**：`metrics_format = "prometheus"`（# TYPE 行）缺省 json
+  - **配置变更审计**：事件日志 ID 1005（install/update/refresh 时）
+  - **Job Object 状态**：宿主写 `<配置名>.job`（ok/failed:<计数>），`--status` 显示（KILL_ON_JOB_CLOSE 兜底不可用可见）
+- 测试 +5（TCP 目标解析 9 例、签名 roundtrip+篡改拒绝、process_count 钳制、超时字段解析、metrics_format 大小写）共 163 + 30/2 全过；clippy 零警告
+- 2 README 同步：新字段表（健壮性与扩展）、配置签名章节、health_check_url tcp 说明、--sign-config 命令、--status Job 状态、事件 ID 1005
+- 环境清理完毕（hydride_svc64 Running、密钥已删、测试目录/服务/服务器已删）
+
+## v26.10.0（2026-08-22）· inplace 独立部署补测 + Job Object 修复（第 5 个真 bug）
+- 补测 deploy_inplace 真注册全生命周期（上次只测了 --test 前台模式）：安装（ImagePath 直指 exe 无 -internal）、start/status（LocalSystem/子进程）、优雅停止（Ctrl+C）、**更新安装（同源覆盖）**、--refresh/--reload inplace 分支、插件（exe 旁 .osx）、日志落 exe 旁、--list 不列 inplace（设计）、**刷新器不误删 inplace**（扫描 2 服务=hydride+osA-platform）、卸载；全部通过（钩子写文件失败是测试路径含空格被 cmd 重定向截断，cmd 已知语义）
+- 又发现并修复真 bug ⑤：`AssignProcessToJobObject` 要求句柄具备 **PROCESS_SET_QUOTA | PROCESS_TERMINATE**（文档），代码只开 PROCESS_SET_INFORMATION → **SCM 服务模式（LS）下恒 0x80070005，Job Object 的 KILL_ON_JOB_CLOSE 兜底从未生效**（--test 当前用户模式正常，服务模式全失败）；补权限后真机验证：日志无 assign failed + **taskkill /F 强杀宿主 → 子进程被系统级终止** ✓
+- 环境清理完毕（regress-job 已卸、hydride_svc64 Running、OsmiumTest/测试目录已删）
+
+## v26.10.0（2026-08-22）· 第二轮审查 + 全字段/插件真机回归：再修 4 个真 bug（2 功能 + 2 健壮性）
+- 复查确认上轮修复全部正确（git diff 逐项核对 + 实测 `[IO.Directory]::GetAccessControl` 对文件路径返回文件自身 SDDL，is_user_writable 文件检查有效）；又发现并修复：
+  - ①`wait_service_deleted` 只认 1060（服务不存在）——刚停止的服务被 DeleteService 后先处于**标记删除（1072）**状态（SCM 在最后句柄关闭后才移除），等 5s 超时后 CreateServiceW 撞 ERROR_SERVICE_MARKED_FOR_DELETE → **更新安装竞态失败**（真机 18.6s 复现，修复后连续 2 次 stop→立即 install 均 3.5s 成功）；补 1072 继续等待（总 10s）+ CreateServiceW 1072 重试 11 次
+  - ②`--reload` 与 schedule reload 动作只调 try_restart_child 启动新进程、**未先优雅停止旧子进程** → 旧实例残留、多实例并存（真机 Child PIDs 出现 4 个）；补 stop_child_process（auto_refresh 路径原有，这两处漏了）
+  - ③`PluginCallConfig.payload` 缺省 serde default = serde_json::Value::Null → 部署序列化 toml 报 "unsupported unit type" → **所有不带 payload 的插件配置安装失败**（真机：`{ kit = "ping" }` 无 payload 装不上）；缺省改为空对象 `{}`
+  - ④`write_quick_config` 把 canonicalize 的 `\\?\` 前缀路径写入配置（普通安装会 strip，快速安装漏了）；补 strip（测试断言同步）
+- 真机回归（独立 + 平台双模式，本地 HTTP 18080/SMTP 18082/syslog 18083/notify 18081 服务器）：
+  - **--test 全字段**：钩子（prestart/poststop + %WINSGF_CHILD_PID% 注入）、extensions 四阶段、schedules hook、plugins（notify start_before / ping）、EcoQoS 子进程+宿主 auto 进入、下载数组+sha+unzip 解压、log_redact（SUPERSECRET→***）、auto_refresh 热刷新、runaway CPU 强杀、故障恢复链（restart×3→none）、crash 插件上下文注入（[cfg_a2] crashed exit code 1 failure #3）、健康检查 404 连续失败→强杀→恢复、metrics 最终行、once 模式、pid 文件清理、P1-4（http 无 sha 拒绝）、健康检查 URL 凭据去敏
+  - **平台服务（共享宿主 + 虚拟账户）**：安装（ImagePath/账户/SDDL）、delayed_auto、事件日志（1001）、preshutdown（ACCEPTS_PRESHUTDOWN）、stop_executable（%PID%→pid=10548 + WINSGF_CHILD_PID，虚拟账户最小权限拒绝写用户目录——设计正确）、--refresh 同步 SCM、--reload 优雅重启（修复后）、--export/--import 往返、--kill→故障恢复 restart、批量命令、--list/--extend 绿点、快速安装（--pth，quick 目录无残留）、更新安装保留日志（前后文件数不变）、--check 正确报告 Python 目录可写（P0-3 真机拦截）
+  - **插件全链路**：notify POST / smtp 完整会话（EHLO/MAIL/RCPT/DATA/QUIT）/ syslog RFC5424（PRI=29）/ netmap 失败路径（非致命）/ unzip / sspi 匿名 200 下载+sha
+  - **刷新器**：注册→sc start 扫描 3 服务→自动停止→卸载；含 `%SystemRoot%` exe 路径的服务未被误删（展开修复真机验证）
+  - **P0-3 双拦截**：Python314 安装目录 ACL 确有 BU 完全控制（安装器行为）→ 安装被正确拒绝；regress-p1 配了过窄 SDDL（无 START/STOP）→ SCM 全部拒绝（SDDL 生效证明），需接管所有权才能改（SeTakeOwnershipPrivilege 实验）
+- **已知设计**（非 bug，README 补提示）：`service_account="virtual"`（NT SERVICE\<name>）宿主无法读取加固后的 exts 插件目录（仅 SYSTEM/Admin）→ 插件调用退化非致命告警；需要插件用 LocalSystem
+- 测试：158 + 30/2 全过、clippy 零警告；环境清理完毕（hydride_svc64 Running、刷新器已卸、exts 恢复只留 v26.9.0、osA-platform 保留、测试目录/服务器已删）
+
+## v26.10.0（2026-08-22）· 全面代码审查：修复 11 个真 bug（3 功能失效 + 5 安全/健壮性 + 3 清理）+ 测试基础设施修复
+- 全项目（service_core/service_host/service_cli/service_config + kits）逐文件审查，修复：
+  - ①`set_io_priority` 把 **PID 传给 OpenThread**（第 3 参是线程 ID）→ io_priority 配置从未生效；改 SetProcessInformation(ProcessIoPriority=21) 按进程设置（与 EcoQoS 同 API 族）
+  - ②`refresh_service` 不映射 service_account="virtual" → "virtual" 字面量被当真实账户名注册（刷新后账户非法）；补与 install 一致的 NT SERVICE\<name> 映射 + 密码置空 + 部署目录授权（幂等）
+  - ③刷新器 `cleanup_invalid_service` 的 exe 存在性检查未展开 %VAR%/%BASE% → 含环境变量的部署配置被开机扫描误删服务；补 expand_env_value（%BASE%=svcs\<name>）
+  - ④`has_download` 只认 download_url 不认 downloads 数组 → 数组模式首次安装被误拒"exe 不存在"、刷新器误删；补数组任一条 from 非空判定（install/validate/刷新器三处同源受益）
+  - ⑤健康检查日志 URL 未 redact（下载路径已去敏此处漏）→ 内嵌凭据（http://user:pass@host）进日志；三处日志补 redact_url
+  - ⑥`write_deployed_config` fallback（非标准 TOML）只剥 service_password → download_password/共享映射 password 明文落盘；改为剥离全部凭据键 + 新增回归测试；顺带修复该函数闭包类型错误（`?` 在 Option 闭包传播 Result——工作区未提交改动遗留的编译错误，重构为 Result<Option<String>, String> 三态：加密完成/解析失败走剥离/加密失败 fail-closed）
+  - ⑦`run_download_entry` 重试退避 `2^attempt` 配置过大溢出 panic；改 saturating 乘积 + retries 上限 20
+  - ⑧`parse_run_service_name` 用 find("--run") → 宿主安装路径含 "--run" 子串时解析错；改定位 "-internal" 后第一个 --run（to_ascii_lowercase 保证字节偏移），服务名含 --run 也正确
+  - ⑨SMTP 告警 kit：from/to/subject 未滤 CR/LF（地址拼入 SMTP 命令存在注入面）；smtp_expect 响应行无长度上限（恶意服务器无限输出）；补 CRLF 过滤 + 8KB 行长上限 + 断连检测（smtp_expect 参数从 impl Trait 具体化为 BufReader\<TcpStream>，顺带解决 impl Trait 上 take() 方法解析问题）
+  - ⑩stop/start_service 错误消息丢具体 Win32 错误码；补 `{e}` 透传
+  - ⑪install/validate_config 的 working_directory/download_to/downloads[].to 可写性校验未展开 %VAR% → 含环境变量的路径误判；补展开
+- 清理：single_download 304 判断重复两次删一处；expand_env_value 对 %%（空变量名）静默吞掉改原样保留（与 %PID% 保留语义一致）
+- 测试基础设施修复：spawn_http_server 只读到请求头空行就 break——body 是否入 buf 取决于 TCP 分段竞态（偶发 10053/body 缺失）；按 Content-Length 读满 body 再处理；schedule_due 测试的 now+5h 深夜跨天脆弱性（hour<19 才构造"未来时刻"断言）
+- 测试：+3（parse_run_service_name 含 --run 子串 2 例、write_deployed_config fallback 全键剥离、has_download 数组、expand_env_value %%）共 158 全过；kits 30/2 全过（连跑 3 次稳定）；clippy 零警告；release 构建通过
+- 实测确认：`[IO.Directory]::GetAccessControl` 对文件路径正常返回文件自身 SDDL（is_user_writable 文件检查有效，无需改）
+
 ## v26.10.0（2026-08-22）· 真机双模式回归（新增字段 + 插件）+ 修复 3 个 bug + 代码审查清理
 - 真机回归（平台 + inplace 独立模式各一轮），覆盖新增字段与插件全链路，发现并修复 3 个真 bug：
   - ①`service_process_pids`（--status Child PIDs）未启用 SeDebugPrivilege——管理员默认持有但禁用，读 SYSTEM 级子进程环境失败 → LocalSystem 服务的 PIDs 恒为空；补 enable_debug_privilege（真机验证 5456, 31004, 31272 正常显示）

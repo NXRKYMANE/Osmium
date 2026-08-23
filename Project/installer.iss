@@ -2,8 +2,8 @@
 ; 服务刷新程序注册与卸载 / PATH 注册 / 可选扩展组件
 
 #define MyAppName "Osmium"
-#define MyAppVersion "26.10.0"
-#define KitsVersion "2.0.0"
+#define MyAppVersion "26.11.0"
+#define KitsVersion "2.1.0"
 #define MyAppPublisher "Copyright (C) 2026 NXRKYMANE SOFTWARE"
 #define MyAppURL "https://github.com/NXRKYMANE/Osmium"
 #define MyAppExeName "os.exe"

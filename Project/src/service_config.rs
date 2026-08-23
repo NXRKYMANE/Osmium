@@ -18,7 +18,6 @@ fn default_sixteen() -> i32 {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ServiceConfig {
     // ==================== 必填字段 ====================
-
     /// 服务名称 — SCM 内部标识符，不可重复
     #[serde(rename = "service_name")]
     pub service_name: String,
@@ -36,7 +35,6 @@ pub struct ServiceConfig {
     pub service_executable_path: String,
 
     // ==================== 可选字段 ====================
-
     /// 目标程序的命令行参数
     #[serde(rename = "service_executable_args")]
     pub service_executable_args: Option<String>,
@@ -83,7 +81,6 @@ pub struct ServiceConfig {
     pub deploy_inplace: bool,
 
     // ==================== 生命周期钩子（可选） ====================
-
     /// 启动前钩子命令 — 在拉起目标进程前执行（cmd.exe 语义，失败不阻断）
     #[serde(rename = "prestart_command")]
     pub prestart_command: Option<String>,
@@ -98,7 +95,6 @@ pub struct ServiceConfig {
     pub auto_refresh: bool,
 
     // ==================== 启动前下载（可选） ====================
-
     /// 启动前下载 URL — 配置后宿主在启动前确保该可执行文件已就位
     #[serde(rename = "download_url")]
     pub download_url: Option<String>,
@@ -116,7 +112,6 @@ pub struct ServiceConfig {
     pub download_fail_on_error: bool,
 
     // ==================== 日志（可选） ====================
-
     /// 是否写入服务日志，默认 true；设为 false 可彻底关闭宿主日志（含钩子/下载输出）
     #[serde(rename = "log_enabled", default = "default_true")]
     pub log_enabled: bool,
@@ -192,7 +187,6 @@ pub struct ServiceConfig {
     pub metrics_file: Option<String>,
 
     // ==================== 进程环境（可选） ====================
-
     /// 目标进程工作目录 — 省略时取目标 exe 所在目录；相对路径基于服务部署目录
     #[serde(rename = "working_directory")]
     pub working_directory: Option<String>,
@@ -214,7 +208,6 @@ pub struct ServiceConfig {
     pub job_object: bool,
 
     // ==================== 自定义停止（可选） ====================
-
     /// 停止服务时先运行的程序（用于优雅排空等）；运行后等待子进程退出
     #[serde(rename = "stop_executable")]
     pub stop_executable: Option<String>,
@@ -224,7 +217,6 @@ pub struct ServiceConfig {
     pub stop_arguments: Option<String>,
 
     // ==================== SCM 服务标志（可选） ====================
-
     /// 注册为可交互桌面的服务（SERVICE_INTERACTIVE_PROCESS），默认 false
     #[serde(rename = "interactive", default)]
     pub interactive: bool,
@@ -255,7 +247,6 @@ pub struct ServiceConfig {
     pub preshutdown: bool,
 
     // ==================== 下载增强（可选） ====================
-
     /// 下载认证方式: basic（用户名/密码）| sspi（Windows 集成认证，经官方 osmium-kit-sspi 插件完成）
     #[serde(rename = "download_auth", default)]
     pub download_auth: Option<String>,
@@ -301,8 +292,12 @@ pub struct ServiceConfig {
     #[serde(rename = "download_retry_backoff_ms", default)]
     pub download_retry_backoff_ms: i64,
 
-    // ==================== 进程与停止（可选） ====================
+    /// 下载限速（Kbps，默认 0 不限速）: 单文件下载（含分块）按此速率节流，
+    /// 避免占满带宽影响业务流量
+    #[serde(rename = "download_rate_limit_kbps", default)]
+    pub download_rate_limit_kbps: i64,
 
+    // ==================== 进程与停止（可选） ====================
     /// 隐藏目标进程窗口（CreateNoWindow），默认 true；false 时子进程可创建控制台窗口
     #[serde(rename = "hide_window", default = "default_true")]
     pub hide_window: bool,
@@ -316,16 +311,12 @@ pub struct ServiceConfig {
     pub stop_timeout_secs: i64,
 
     // ==================== 生命周期扩展（可选） ====================
-
-    /// 额外生命周期扩展命令（多条），phase: start（启动前，默认）| start_after | stop_before | stop，
-    /// 与 prestart/poststop 钩子互补；支持 stdout_path/stderr_path 独立重定向
+    // 额外生命周期扩展命令（多条），phase: start（启动前，默认）| start_after | stop_before | stop， 与 prestart/poststop 钩子互补；支持 stdout_path/stderr_path 独立重定向
     #[serde(default)]
     pub extensions: Option<Vec<ExtensionConfig>>,
 
     // ==================== 生命周期插件调用（可选） ====================
-
-    /// 生命周期插件调用（多条），phase 与 extensions 相同四阶段 + crash（崩溃恢复前）；
-    /// 按 kit 分发到 exe 同级 .osx 插件（stdin/stdout JSON 协议），第三方插件无需改宿主代码
+    // 生命周期插件调用（多条），phase 与 extensions 相同四阶段 + crash（崩溃恢复前）； 按 kit 分发到 exe 同级 .osx 插件（stdin/stdout JSON 协议），第三方插件无需改宿主代码
     #[serde(rename = "plugins", default)]
     pub plugins: Option<Vec<PluginCallConfig>>,
 
@@ -334,8 +325,58 @@ pub struct ServiceConfig {
     #[serde(rename = "require_signed_plugins", default)]
     pub require_signed_plugins: bool,
 
-    // ==================== 资源监控 / 健康检查（可选） ====================
+    // ==================== 内置告警通道（可选） ====================
+    // 无需 [[plugins]] 声明: notify_url / smtp_host / syslog_host 任一配置即启用，
+    // 宿主在 crash 阶段自动调用对应官方插件（notify / smtp / syslog）并注入崩溃上下文
+    /// Webhook 通知 URL: 配置即启用 crash 自动通知（POST JSON 消息到该 URL）
+    #[serde(rename = "notify_url")]
+    pub notify_url: Option<String>,
 
+    /// notify 平台消息格式: generic（默认）| teams | discord | feishu
+    #[serde(rename = "notify_format")]
+    pub notify_format: Option<String>,
+
+    /// SMTP 服务器地址（host:port，缺省端口 25）: 配置即启用 crash 自动邮件告警
+    #[serde(rename = "smtp_host")]
+    pub smtp_host: Option<String>,
+
+    /// SMTP 发件人地址（From 头）
+    #[serde(rename = "smtp_from")]
+    pub smtp_from: Option<String>,
+
+    /// SMTP 收件人地址（To 头，多个逗号分隔）
+    #[serde(rename = "smtp_to")]
+    pub smtp_to: Option<String>,
+
+    /// SMTP 邮件主题（缺省 "Osmium service notification"）
+    #[serde(rename = "smtp_subject")]
+    pub smtp_subject: Option<String>,
+
+    /// SMTP 认证用户名（可选，AUTH PLAIN）
+    #[serde(rename = "smtp_username")]
+    pub smtp_username: Option<String>,
+
+    /// SMTP 认证密码（部署时自动加密存储）
+    #[serde(rename = "smtp_password")]
+    pub smtp_password: Option<String>,
+
+    /// Syslog 服务器地址（host:port，缺省端口 514）: 配置即启用 crash 自动 syslog 告警
+    #[serde(rename = "syslog_host")]
+    pub syslog_host: Option<String>,
+
+    /// Syslog facility 号（0-23，默认 3 daemon）
+    #[serde(rename = "syslog_facility", default)]
+    pub syslog_facility: Option<u8>,
+
+    /// Syslog severity 号（0-7，默认 5 notice）
+    #[serde(rename = "syslog_severity", default)]
+    pub syslog_severity: Option<u8>,
+
+    /// Syslog 程序名 TAG（默认 "Osmium"）
+    #[serde(rename = "syslog_tag")]
+    pub syslog_tag: Option<String>,
+
+    // ==================== 资源监控 / 健康检查（可选） ====================
     /// HTTP 健康检查: 子进程运行期间轮询该 URL，连续 health_check_failures 次非 200 视为崩溃重启
     #[serde(rename = "health_check_url")]
     pub health_check_url: Option<String>,
@@ -357,13 +398,11 @@ pub struct ServiceConfig {
     pub health_check_expected_status: i64,
 
     // ==================== 定时调度（可选） ====================
-
     /// 定时调度: 固定间隔或每日定点触发动作（restart 重启子进程 / reload 热刷新 / hook 执行命令）
     #[serde(rename = "schedules", default)]
     pub schedules: Option<Vec<ScheduleConfig>>,
 
     // ==================== 资源监控 / 网络映射（可选） ====================
-
     /// RunawayProcessKiller: 子进程 CPU 占用上限（百分比，全核累计），超限自动终止并触发重启逻辑
     #[serde(rename = "runaway_cpu_limit")]
     pub runaway_cpu_limit: Option<f64>,
@@ -394,7 +433,6 @@ pub struct ServiceConfig {
     pub shared_directory_mappers: Option<Vec<SharedMapperConfig>>,
 
     // ==================== 效率模式（EcoQoS，可选） ====================
-
     /// 子进程效率模式: none（默认）| always（常开）| auto（空闲进/繁忙退）
     #[serde(rename = "eco_qos", default)]
     pub eco_qos: Option<String>,
@@ -420,15 +458,41 @@ pub struct ServiceConfig {
     pub host_eco_qos_busy_cpu_pct: Option<f64>,
 
     // ==================== SCM 上报（可选） ====================
-
-    /// SCM 状态上报 dwWaitHint（毫秒），默认 3600000（1 小时）；
-    /// 启动/停止 PENDING 阶段向 SCM 声明的最大等待时间（对应 WinSW waitHint）
+    // SCM 状态上报 dwWaitHint（毫秒），默认 3600000（1 小时）； 启动/停止 PENDING 阶段向 SCM 声明的最大等待时间（对应 WinSW waitHint）
     #[serde(rename = "scm_wait_hint_ms", default)]
     pub scm_wait_hint_ms: i64,
 
-    /// 宿主主循环 SCM 信号轮询间隔（毫秒），默认 500（对应 WinSW sleepTime）
+    /// 主循环 SCM 信号轮询间隔（毫秒），默认 500（对应 WinSW sleepTime）
     #[serde(rename = "scm_sleep_time_ms", default)]
     pub scm_sleep_time_ms: i64,
+
+    // ==================== 健壮性增强（可选） ====================
+    /// prestart/扩展钩子超时（秒），默认 60（防钩子卡死触发 SCM 启动超时）
+    #[serde(rename = "hook_prestart_timeout_secs", default)]
+    pub hook_prestart_timeout_secs: i64,
+
+    /// poststop 钩子超时（秒），默认 30
+    #[serde(rename = "hook_poststop_timeout_secs", default)]
+    pub hook_poststop_timeout_secs: i64,
+
+    /// stop_executable 停止命令超时（秒），默认取 stop_timeout_secs
+    #[serde(rename = "stop_cmd_timeout_secs", default)]
+    pub stop_cmd_timeout_secs: i64,
+
+    /// 指标导出格式: json（默认，每行一个 JSON 对象）| prometheus（Prometheus 文本格式，
+    /// # HELP/# TYPE + 指标行，便于采集器直接抓取）
+    #[serde(rename = "metrics_format", default)]
+    pub metrics_format: Option<String>,
+
+    /// 启动的目标进程实例数（多子进程），默认 1。
+    /// 大于 1 时宿主同时托管 N 个同配置子进程：任一非零退出按故障恢复动作序列处理（restart 重启全部实例）、 正常退出仅重启该实例（不计故障）、none 停止服务；健康检查/runaway 逐实例独立判定， 任一实例超限即触发故障流程
+    #[serde(rename = "process_count", default)]
+    pub process_count: i64,
+
+    /// 是否要求已部署配置带有效 RSA-SHA256 签名（.sig 文件，--sign-config 生成）。
+    /// true 时 .osiml 旁缺少 .sig 或校验失败 → 拒绝加载（fail-closed）；默认 false（ACL+DPAPI 已覆盖）
+    #[serde(rename = "require_signed_config", default)]
+    pub require_signed_config: bool,
 }
 
 /// 生命周期扩展配置: phase=start 在目标进程启动前执行，phase=start_after 在启动后执行，
@@ -445,6 +509,12 @@ pub struct ExtensionConfig {
     pub stderr_path: Option<String>,
 }
 
+/// serde 缺省: 插件未配 payload 时按空对象处理——
+/// 缺省值若是 Null，部署时 toml 序列化会报 "unsupported unit type" 导致安装失败
+fn default_empty_payload() -> serde_json::Value {
+    serde_json::json!({})
+}
+
 /// 生命周期插件调用配置: 按 kit 分发到 exe 同级 .osx 插件（stdin 单行 JSON，
 /// 响应 stdout 单行 JSON ok:true/false）；payload 合并进请求 JSON 根对象透传
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -453,8 +523,8 @@ pub struct PluginCallConfig {
     pub kit: String,
     /// 执行阶段: start（启动前）| start_after | stop_before | stop（停止后）
     pub phase: String,
-    /// 可选: 透传给插件的参数（JSON 对象，与 kit 字段合并）
-    #[serde(default)]
+    /// 可选: 透传给插件的参数（JSON 对象，与 kit 字段合并）；缺省空对象
+    #[serde(default = "default_empty_payload")]
     pub payload: serde_json::Value,
     /// 可选: 插件失败是否阻断流程（start 阶段阻断启动；其他阶段仅告警），默认 false
     #[serde(default)]

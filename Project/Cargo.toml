@@ -1,6 +1,6 @@
 [package]
 name = "osmium"
-version = "26.10.0"
+version = "26.11.0"
 edition = "2024"
 
 [[bin]]
@@ -22,6 +22,8 @@ sha2 = "0.11.0"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 # Basic 认证头拼接 + DPAPI 密文 base64 编码
 base64 = "0.23.1"
+# 配置签名（RSA-SHA256）: 部署配置防篡改校验（require_signed_config）；pkcs8 支持默认内置
+rsa = { version = "0.9.10", features = ["sha2", "pem"] }
 
 [dependencies.windows]
 version = "=0.62.2"

@@ -61,10 +61,46 @@ function Sign-File([string]$file, $cert) {
     }
 }
 
+# UPX 压缩复制: 临时副本压缩后落到目标（不动源文件），压缩参数用 --lzma（实测与 --ultra-brute 体积几乎一致, 快 60 倍）
+# 签名由调用方在 4.5 段统一完成（此时证书才确定）
+function Compress-Upx([string]$src, [string]$dst, [string]$label) {
+    if (-not (Test-Path $upxPath)) { throw "UPX not found at $upxPath" }
+    $tmp = Join-Path $env:TEMP ("os-upx-" + [guid]::NewGuid().ToString("N") + ".exe")
+    Copy-Item $src $tmp -Force
+    & $upxPath --lzma $tmp | Out-Null
+    if ($LASTEXITCODE -ne 0) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue; throw "UPX compression failed: $src" }
+    Copy-Item $tmp $dst -Force
+    Remove-Item $tmp -Force
+    Write-Host "Done: $dst ($label)" -ForegroundColor Green
+}
+
+# 切到 x86 交叉工具链（无 vswhere 的手动环境）: 返回当前环境快照供 Restore-Env 恢复
+# 标准 VS 环境（vswhere 存在）由 rustc/cc-rs 自动按 target 选择工具链, 无需切换
+function Save-X86Env {
+    $saved = @{ Lib = $env:LIB; Include = $env:INCLUDE; Path = $env:PATH; Cc = $env:CC_i686_pc_windows_msvc }
+    if (-not (Test-Path $vswhere)) {
+        $env:LIB = "$($msvc.FullName)\lib\x86;$sdkBase\Lib\$($sdkVer.Name)\ucrt\x86;$sdkBase\Lib\$($sdkVer.Name)\um\x86"
+        $env:INCLUDE = "$($msvc.FullName)\include;$sdkBase\Include\$($sdkVer.Name)\ucrt;$sdkBase\Include\$($sdkVer.Name)\um;$sdkBase\Include\$($sdkVer.Name)\shared"
+        $env:PATH = "$($msvc.FullName)\bin\Hostx64\x86;$env:PATH"
+        # cc-rs（ring 汇编）必须显式指定 x86 编译器, 否则按 PATH 误选 x64 机器类型导致 LNK1112
+        $env:CC_i686_pc_windows_msvc = "$($msvc.FullName)\bin\Hostx64\x86\cl.exe"
+    }
+    return $saved
+}
+
+function Restore-Env($saved) {
+    $env:LIB = $saved.Lib
+    $env:INCLUDE = $saved.Include
+    $env:PATH = $saved.Path
+    if ($null -eq $saved.Cc) { Remove-Item Env:CC_i686_pc_windows_msvc -ErrorAction SilentlyContinue }
+    else { $env:CC_i686_pc_windows_msvc = $saved.Cc }
+}
+
 # 工具链：无 VS（vswhere）时使用本机 F:\DevTools 的 MSVC + SDK（自动取最新版本），跳过 vcvarsall 查找
+# MSVC 版本目录以数字开头（如 14.51.36231）; "Tools" 等非版本目录需排除
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
 if (-not (Test-Path $vswhere)) {
-    $msvc = Get-ChildItem "F:\DevTools\MSVC" -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+    $msvc = Get-ChildItem "F:\DevTools\MSVC" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\d' } | Sort-Object Name -Descending | Select-Object -First 1
     $sdkVer = Get-ChildItem "F:\DevTools\Windows11 SDK\Lib" -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
     $sdkBase = "F:\DevTools\Windows11 SDK"
     if ($msvc -and $sdkVer -and (Test-Path "$($msvc.FullName)\bin\Hostx64\x64\link.exe")) {
@@ -82,38 +118,34 @@ $kitsToml = Get-Content "$ProjectRoot\Extension\osmium-official-kits\Cargo.toml"
 $kitsVersion = [regex]::Match($kitsToml, '^version = "([^"]+)"', 'Multiline').Groups[1].Value.Trim()
 Write-Host "Version (kits): $kitsVersion" -ForegroundColor Cyan
 
-# 2. 构建主程序 (release) + 测试
-Write-Host "Building Osmium (release)..." -ForegroundColor Yellow
-Push-Location "$ProjectRoot\Project"
+# UPX 路径（插件发行版构建时直接压缩；不可用时回退未压缩并告警）
+$upxPath = "F:\DevTools\UPX\upx.exe"
+
+# 2. 一次 workspace 构建: 主程序 (opt-3) + 官方插件 (per-package opt-level=z)
+# 合并构建让依赖树只编译一次（分开构建时共享依赖会被重复编译）
+Write-Host "Building workspace (osmium + kits, release)..." -ForegroundColor Yellow
+Push-Location "$ProjectRoot"
 try {
-    cargo build --release
+    cargo build --release --workspace
     if ($LASTEXITCODE -ne 0) { throw "Rust build failed" }
-    if (-not $SkipTests) {
-        Write-Host "Running Osmium unit tests..." -ForegroundColor Yellow
-        cargo test --release
-        if ($LASTEXITCODE -ne 0) { throw "Rust tests failed" }
-    }
 } finally {
     Pop-Location
 }
 
-# 3. 构建官方插件 (osmium-official-kits, opt-level=z) + 测试
-Write-Host "Building osmium-official-kits (release, size-first)..." -ForegroundColor Yellow
-# --config 传内联字符串会被 PowerShell 5.1 剥离双引号（opt-level=z 解析失败），改用临时配置文件
-$kitsProfile = Join-Path $env:TEMP "osmium-kits-profile.toml"
-[System.IO.File]::WriteAllText($kitsProfile, 'profile.release.opt-level = "z"', [System.Text.UTF8Encoding]::new($false))
-Push-Location "$ProjectRoot\Extension\osmium-official-kits"
-try {
-    cargo build --release --config $kitsProfile
-    if ($LASTEXITCODE -ne 0) { throw "Kits build failed" }
-    if (-not $SkipTests) {
-        Write-Host "Running kits unit tests..." -ForegroundColor Yellow
+# 2.5 单元测试（主程序 release 测试; 插件 debug 测试更快）
+if (-not $SkipTests) {
+    Write-Host "Running Osmium unit tests..." -ForegroundColor Yellow
+    Push-Location "$ProjectRoot\Project"
+    try {
+        cargo test --release
+        if ($LASTEXITCODE -ne 0) { throw "Rust tests failed" }
+    } finally { Pop-Location }
+    Write-Host "Running kits unit tests..." -ForegroundColor Yellow
+    Push-Location "$ProjectRoot\Extension\osmium-official-kits"
+    try {
         cargo test
         if ($LASTEXITCODE -ne 0) { throw "Kits tests failed" }
-    }
-} finally {
-    Pop-Location
-    Remove-Item $kitsProfile -Force -ErrorAction SilentlyContinue
+    } finally { Pop-Location }
 }
 
 # 4. 整理 Publish 产物（先清空, 确保目录里只有最终产物）
@@ -122,11 +154,60 @@ New-Item -ItemType Directory -Force -Path $publishDir | Out-Null
 Get-ChildItem $publishDir -Force | Remove-Item -Recurse -Force
 # 主程序: 直接以 osmium64.exe 输出（安装时改名为 os.exe）
 Copy-Item (Join-Path $ProjectRoot "target\release\osmium64.exe") (Join-Path $publishDir "osmium64.exe") -Force
-# 官方插件: osmium-kit.exe → exts\osmium64-official-kits-v<KITS_VERSION>.osx（文件名带插件自身版本）
+# 官方插件: osmium-kit.exe → UPX 压缩 → exts\osmium64-official-kits-v<KITS_VERSION>.osx（文件名带插件自身版本）
+# 插件发行版直接以 opt-level=z + UPX 压缩产物发布（不再区分 UPX/原版；upx 不可用则回退未压缩并告警）
 $extDir = Join-Path $publishDir "exts"
 New-Item -ItemType Directory -Force -Path $extDir | Out-Null
 $kitOsxName = "osmium64-official-kits-v$kitsVersion.osx"
-Copy-Item (Join-Path $ProjectRoot "target\release\osmium-kit.exe") (Join-Path $extDir $kitOsxName) -Force
+if (Test-Path $upxPath) {
+    Compress-Upx (Join-Path $ProjectRoot "target\release\osmium-kit.exe") (Join-Path $extDir $kitOsxName) "kits 64-bit"
+} else {
+    Write-Warning "UPX not found, kits shipped uncompressed."
+    Copy-Item (Join-Path $ProjectRoot "target\release\osmium-kit.exe") (Join-Path $extDir $kitOsxName) -Force
+}
+
+# 4.3 32 位构建 (i686): Publish\osmium32.exe + Publish\exts\osmium32-official-kits-v<VERSION>.osx（不生成安装包）
+$i686Target = "i686-pc-windows-msvc"
+$build32 = $false
+$kitOsx32Name = $null
+$haveI686 = (& rustup target list --installed 2>$null) -match [regex]::Escape($i686Target)
+if (-not $haveI686) {
+    Write-Host "Adding rust target $i686Target..." -ForegroundColor Yellow
+    & rustup target add $i686Target
+    if ($LASTEXITCODE -ne 0) { throw "rustup target add $i686Target failed" }
+}
+# x86 交叉工具链可用性: 标准 VS 由 rustc/cc-rs 自动处理；手动环境需 Hostx64\x86 链接器
+if (Test-Path $vswhere) {
+    $build32 = $true
+} elseif ($msvc -and (Test-Path "$($msvc.FullName)\bin\Hostx64\x86\cl.exe")) {
+    $build32 = $true
+} else {
+    Write-Warning "x86 MSVC toolchain (Hostx64\x86) not found, skipping 32-bit build."
+}
+if ($build32) {
+    $savedEnv32 = Save-X86Env
+    try {
+        # 32 位一次 workspace 构建（per-package opt-level=z 已固化在根 Cargo.toml）
+        Push-Location "$ProjectRoot"
+        try {
+            cargo build --release --target $i686Target --workspace
+            if ($LASTEXITCODE -ne 0) { throw "32-bit build failed (workspace)" }
+        } finally { Pop-Location }
+        $kitOsx32Name = "osmium32-official-kits-v$kitsVersion.osx"
+        Copy-Item "$ProjectRoot\target\i686-pc-windows-msvc\release\osmium64.exe" (Join-Path $publishDir "osmium32.exe") -Force
+        # 32 位插件同样 UPX 压缩（发行版即压缩版）
+        if (Test-Path $upxPath) {
+            Compress-Upx "$ProjectRoot\target\i686-pc-windows-msvc\release\osmium-kit.exe" (Join-Path $extDir $kitOsx32Name) "kits 32-bit"
+        } else {
+            Write-Warning "UPX not found, 32-bit kits shipped uncompressed."
+            Copy-Item "$ProjectRoot\target\i686-pc-windows-msvc\release\osmium-kit.exe" (Join-Path $extDir $kitOsx32Name) -Force
+        }
+        Write-Host "Done: Publish\osmium32.exe" -ForegroundColor Green
+        Write-Host "Done: Publish\exts\$kitOsx32Name" -ForegroundColor Green
+    } finally {
+        Restore-Env $savedEnv32
+    }
+}
 
 # 4.5 代码签名: osmium64.exe + 插件（安装包在第 6 步编译完成后签名）
 $signCert = $null
@@ -135,6 +216,10 @@ if (-not $SkipSign) {
     if ($signCert) {
         Sign-File (Join-Path $publishDir "osmium64.exe") $signCert
         Sign-File (Join-Path $extDir $kitOsxName) $signCert
+        if ($build32 -and $kitOsx32Name) {
+            Sign-File (Join-Path $publishDir "osmium32.exe") $signCert
+            Sign-File (Join-Path $extDir $kitOsx32Name) $signCert
+        }
     } else {
         Write-Warning "No code-signing certificate found (OSMIUM_CERT_PFX or Misc\codesign.pfx), skipping signature."
     }
@@ -164,9 +249,11 @@ Write-Host "Done: Publish\osmium64.exe" -ForegroundColor Green
 Write-Host "Done: Publish\exts\$kitOsxName" -ForegroundColor Green
 Write-Host "Done: Publish\$setupName" -ForegroundColor Green
 
-# 7. 可选: UPX 压缩版本 (opt-level="z" 体积优先 + UPX --ultra-brute --lzma)
-# 仅生成 Publish\osmium64-upx.exe, 不覆盖普通版, 也不生成安装包
-$upxPath = "F:\DevTools\UPX\upx.exe"
+# 7. 可选: 主程序 UPX 压缩版本
+# 直接用第 2/4.3 步已构建的产物压缩（不再 opt-level=z 重建——切换 opt-level 会触发整个依赖树重编译, 非常慢；
+# 且实测普通版 UPX 后 ~1.5 MB, 与 z 版差异很小, 换取大幅提速）
+# 仅生成 Publish\osmium64-upx.exe / osmium32-upx.exe, 不覆盖普通版, 也不生成安装包
+# 注: 插件已在第 4/4.3 段构建时直接 UPX 压缩, 此处不再处理
 if (Test-Path $upxPath) {
     # -Upx 参数强制生成；否则交互询问（非交互终端自动跳过）
     if ($Upx) {
@@ -179,35 +266,13 @@ if (Test-Path $upxPath) {
         }
     }
     if ($yn -match '^[yY]') {
-        # workspace 化后 profile 位于根 Cargo.toml: 临时切换 opt-level 为 "z"(体积优先)
-        $cargoPath = "$ProjectRoot\Cargo.toml"
-        # 临时切换 opt-level 为 "z"(体积优先)
-        $cargo = Get-Content $cargoPath -Raw
-        $cargo = $cargo -replace '(?m)^opt-level = .*$', 'opt-level = "z"'
-        [System.IO.File]::WriteAllText($cargoPath, $cargo, [System.Text.UTF8Encoding]::new($false))
-        try {
-            Write-Host "Building size-optimized (opt-level=z)..." -ForegroundColor Yellow
-            Push-Location "$ProjectRoot\Project"
-            try {
-                cargo build --release
-                if ($LASTEXITCODE -ne 0) { throw "Rust build failed (opt-level=z)" }
-            } finally { Pop-Location }
-
-            # 压缩副本, 不动 target 里的原 exe, 保证后续普通构建不受影响
-            Write-Host "Compressing with UPX (--ultra-brute --lzma)..." -ForegroundColor Yellow
-            $upxTmp = Join-Path $env:TEMP "os-upx-tmp.exe"
-            Copy-Item "$ProjectRoot\target\release\osmium64.exe" $upxTmp -Force
-            & $upxPath --ultra-brute --lzma $upxTmp
-            if ($LASTEXITCODE -ne 0) { throw "UPX compression failed" }
-            Copy-Item $upxTmp (Join-Path $publishDir "osmium64-upx.exe") -Force
-            Remove-Item $upxTmp -Force
-            if ($signCert) { Sign-File (Join-Path $publishDir "osmium64-upx.exe") $signCert }
-            Write-Host "Done: Publish\osmium64-upx.exe" -ForegroundColor Green
-        } finally {
-            # 恢复 opt-level = 3 (速度优先, 供下次普通构建使用)
-            $cargo = Get-Content $cargoPath -Raw
-            $cargo = $cargo -replace '(?m)^opt-level = .*$', 'opt-level = 3'
-            [System.IO.File]::WriteAllText($cargoPath, $cargo, [System.Text.UTF8Encoding]::new($false))
+        Compress-Upx (Join-Path $publishDir "osmium64.exe") (Join-Path $publishDir "osmium64-upx.exe") "exe 64-bit UPX"
+        if ($build32) {
+            Compress-Upx (Join-Path $publishDir "osmium32.exe") (Join-Path $publishDir "osmium32-upx.exe") "exe 32-bit UPX"
+        }
+        if ($signCert) {
+            Sign-File (Join-Path $publishDir "osmium64-upx.exe") $signCert
+            if ($build32) { Sign-File (Join-Path $publishDir "osmium32-upx.exe") $signCert }
         }
     }
 } else {

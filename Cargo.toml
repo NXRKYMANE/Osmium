@@ -15,5 +15,6 @@ strip = true
 lto = true
 codegen-units = 1
 
-# 插件体积优先: BUILD.ps1 以临时配置文件（--config <临时 toml>，内含 opt-level="z"）覆盖，
-# 因为 PowerShell 5.1 传内联 --config 字符串会剥离双引号导致 TOML 解析失败
+# 插件体积优先: 仅插件包自身 opt-level=z（依赖与主程序共享 opt-3 缓存, 插件增量构建几乎零成本）
+[profile.release.package.osmium-official-kits]
+opt-level = "z"
