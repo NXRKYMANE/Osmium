@@ -580,7 +580,8 @@ fn collect_descendants_finds_grandchild() {
         .expect("spawn powershell");
 
     let mut ping_pid = 0u32;
-    for _ in 0..50 {
+    // 等待窗口 30s（CI 并行跑全部测试时 CPU 竞争激烈，10s 偶发超时）
+    for _ in 0..150 {
         if let Ok(s) = std::fs::read_to_string(&pid_file)
             && let Ok(v) = s.trim().parse::<u32>()
         {
