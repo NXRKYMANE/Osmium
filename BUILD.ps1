@@ -27,8 +27,14 @@ function Get-SignCert {
     }
     $devPfx = Join-Path $ProjectRoot "Misc\codesign.pfx"
     if (Test-Path $devPfx) {
-        # 自签名开发证书固定密码（仅仓库内开发用；正式证书请用 OSMIUM_CERT_PFX/PASSWORD）
-        return @{ Pfx = $devPfx; Password = "OsmiumDevSign2026!" }
+        # 自签名开发证书密码: 优先取环境变量 OSMIUM_DEV_CERT_PASSWORD（密码不应随仓库分发）；
+        # 未设置时回退仓库内固定密码并告警（仅本地开发可用）
+        $devPass = $env:OSMIUM_DEV_CERT_PASSWORD
+        if (-not $devPass) {
+            $devPass = "OsmiumDevSign2026!"
+            Write-Warning "OSMIUM_DEV_CERT_PASSWORD not set, using the repo-default dev certificate password."
+        }
+        return @{ Pfx = $devPfx; Password = $devPass }
     }
     return $null
 }
@@ -225,20 +231,30 @@ if (-not $SkipSign) {
     }
 }
 
-# 5. 更新 installer.iss 的版本号和版权年份
+# 5. 注入 installer.iss 版本号与版权年份后编译；构建结束还原文件——
+#    版本仅注入本次编译产物，避免每次构建都把受跟踪的 installer.iss 弄成脏状态
 Write-Host "Updating installer.iss..." -ForegroundColor Yellow
 $year = (Get-Date).Year
 
-$rsIss = Get-Content "$ProjectRoot\Project\installer.iss" -Raw -Encoding UTF8
-$rsIss = $rsIss -replace '(?m)^#define MyAppVersion ".*"$', "#define MyAppVersion `"$rsVersion`""
-$rsIss = $rsIss -replace '(?m)^#define KitsVersion ".*"$', "#define KitsVersion `"$kitsVersion`""
-$rsIss = $rsIss -replace '(?m)(?<=^#define MyAppPublisher "Copyright \(C\) )\d{4}', $year
-[System.IO.File]::WriteAllText("$ProjectRoot\Project\installer.iss", $rsIss, [System.Text.UTF8Encoding]::new($false))
+$issPath = "$ProjectRoot\Project\installer.iss"
+$issBackup = Join-Path $env:TEMP ("installer.iss." + [guid]::NewGuid().ToString("N") + ".bak")
+Copy-Item $issPath $issBackup -Force
+try {
+    $rsIss = Get-Content $issPath -Raw -Encoding UTF8
+    # CRLF 兼容: installer.iss 为 CRLF 行尾，正则须容忍行尾 \r（否则 $ 锚点匹配不到）
+    $rsIss = $rsIss -replace '(?m)^#define MyAppVersion ".*"\r?$', "#define MyAppVersion `"$rsVersion`""
+    $rsIss = $rsIss -replace '(?m)^#define KitsVersion ".*"\r?$', "#define KitsVersion `"$kitsVersion`""
+    $rsIss = $rsIss -replace '(?m)(?<=^#define MyAppPublisher "Copyright \(C\) )\d{4}\r?$', $year
+    [System.IO.File]::WriteAllText($issPath, $rsIss, [System.Text.UTF8Encoding]::new($false))
 
-# 6. 编译安装包
-Write-Host "Compiling installer..." -ForegroundColor Yellow
-& $ISCC "$ProjectRoot\Project\installer.iss"
-if ($LASTEXITCODE -ne 0) { throw "Installer build failed" }
+    # 6. 编译安装包
+    Write-Host "Compiling installer..." -ForegroundColor Yellow
+    & $ISCC $issPath
+    if ($LASTEXITCODE -ne 0) { throw "Installer build failed" }
+} finally {
+    Copy-Item $issBackup $issPath -Force
+    Remove-Item $issBackup -Force -ErrorAction SilentlyContinue
+}
 
 $setupName = "osmium-win-x64-setup-v$rsVersion.exe"
 # 6.5 代码签名: 安装包编译完成后签名（Inno 的 SignTool 依赖其自带配置，统一在脚本侧完成）

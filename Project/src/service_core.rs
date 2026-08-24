@@ -4,7 +4,7 @@ use std::process;
 use std::sync::atomic::Ordering;
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, AtomicU32},
+    atomic::{AtomicBool, AtomicU32, AtomicU64},
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -22,8 +22,8 @@ use windows::Win32::System::Services::{
     ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, ControlService,
     CreateServiceW, DeleteService, ENUM_SERVICE_TYPE, OpenSCManagerW, OpenServiceW,
     QUERY_SERVICE_CONFIGW, QueryServiceConfig2W, QueryServiceConfigW, QueryServiceStatus,
-    SC_ACTION_REBOOT, SC_ACTION_RESTART, SC_HANDLE, SC_MANAGER_ALL_ACCESS, SERVICE_AUTO_START,
-    SERVICE_CONFIG_DELAYED_AUTO_START_INFO, SERVICE_CONFIG_DESCRIPTION,
+    SC_ACTION_REBOOT, SC_ACTION_RESTART, SC_HANDLE, SC_MANAGER_ALL_ACCESS, SC_MANAGER_CONNECT,
+    SERVICE_AUTO_START, SERVICE_CONFIG_DELAYED_AUTO_START_INFO, SERVICE_CONFIG_DESCRIPTION,
     SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_CONTROL_STOP, SERVICE_DELAYED_AUTO_START_INFO,
     SERVICE_DEMAND_START, SERVICE_DESCRIPTIONW, SERVICE_DISABLED, SERVICE_ERROR,
     SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONSW, SERVICE_NO_CHANGE, SERVICE_QUERY_CONFIG,
@@ -119,6 +119,19 @@ fn key_file_adjacent(name: &str) -> Option<PathBuf> {
     let dir = Path::new(&own).parent()?;
     let p = dir.join(name);
     p.exists().then_some(p)
+}
+
+/// 私钥是否可能被非管理员篡改/替换（文件或所在目录对低权限用户可写）。
+/// 可写即能换成攻击者自己的密钥替任意配置签名——与"可读"同样致命，
+/// 且复用既有 is_user_writable 的 ACL 判定基础设施（读判定需另建 Win32 解析链）
+fn key_file_tamperable_by_unprivileged(path: &Path) -> bool {
+    crate::service_core::is_user_writable(&path.to_string_lossy())
+        || crate::service_core::is_user_writable(
+            &path
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        )
 }
 
 /// 对文件内容做 RSA-SHA256 签名，写入 `<path>`.sig（DER 二进制）;
@@ -277,6 +290,9 @@ pub(crate) fn write_quick_config(name: &str, exe_path: &str) -> String {
             &[&quick_dir.to_string_lossy()],
         ));
     }
+    // 清理历史残留的临时配置（安装中途报错退出时未来得及删除；配置不含敏感字段，
+    // 超过 1 小时即视为残留——正常快速安装全程远小于 1 小时）
+    sweep_stale_quick_configs(&quick_dir);
     let tmp = quick_dir.join(format!("osmium-quick-{}-{}.toml", process::id(), name));
     let write = || {
         std::fs::OpenOptions::new()
@@ -295,6 +311,27 @@ pub(crate) fn write_quick_config(name: &str, exe_path: &str) -> String {
         )
     });
     tmp.to_string_lossy().to_string()
+}
+
+/// 清理 quick 目录中超过 1 小时的历史临时配置（osmium-quick-*.toml，快速安装失败退出时的残留）
+pub(crate) fn sweep_stale_quick_configs(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("osmium-quick-") || !name.ends_with(".toml") {
+            continue;
+        }
+        let stale = std::fs::metadata(entry.path())
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(|t| t.elapsed().unwrap_or_default() > Duration::from_secs(3600))
+            .unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 pub(crate) fn install_from_config_path(config_path_str: &str) {
@@ -386,6 +423,8 @@ pub(crate) fn install_from_config_path(config_path_str: &str) {
 
     // 已注册判定以 SCM 为准。不能用 is_registered:
     // 同名外部服务会被其绕过冲突检测，失败回滚还会误删外部服务
+    // 更新路径的 logs 备份: 注册全链路成功或失败收尾时统一还原（见下方各分支）
+    let mut logs_backup: Option<PathBuf> = None;
     let is_update = if service_exists(&svc_name) {
         // 来源冲突检测: 防止同名但来源不同的服务被误覆盖
         if inplace {
@@ -411,10 +450,10 @@ pub(crate) fn install_from_config_path(config_path_str: &str) {
             }
         }
         // 更新已注册服务：force_remove_service 会删除整个 svcs 目录（含 logs），
-        // 先临时挪出 logs 到系统临时目录，卸载重建后还原，保证重装不丢日志
-        let logs_backup = backup_service_logs(&svc_name);
+        // 先临时挪出 logs 到系统临时目录；还原时机后置——注册全链路成功才回填，
+        // 任一失败分支也先还原再退出（旧实现失败时 logs 随部署目录一并被删）
+        logs_backup = backup_service_logs(&svc_name);
         force_remove_service(&svc_name, true);
-        restore_service_logs(&svc_name, logs_backup);
         true
     } else {
         false
@@ -442,31 +481,31 @@ pub(crate) fn install_from_config_path(config_path_str: &str) {
             || !secure_directory(&registry_dir().to_string_lossy())
             || !secure_directory(&base_dir.to_string_lossy())
         {
-            let _ = uninstall_service_scm(&svc_name);
-            safe_delete_dir(&base_dir);
-            error(&f(
-                "Service registration failed: {0}",
-                &["Failed to deploy service files"],
-            ));
+            rollback_registration(
+                &svc_name,
+                &base_dir,
+                &mut logs_backup,
+                "Failed to deploy service files",
+            );
         }
         let config_dest = deployed_config_path(&svc_name);
         if !write_deployed_config(config_path_str, &config_dest) {
-            let _ = uninstall_service_scm(&svc_name);
-            safe_delete_dir(&base_dir);
-            error(&f(
-                "Service registration failed: {0}",
-                &["Failed to deploy service files"],
-            ));
+            rollback_registration(
+                &svc_name,
+                &base_dir,
+                &mut logs_backup,
+                "Failed to deploy service files",
+            );
         }
         // 配置签名: exe 旁存在 osmium-sign.key 时对部署配置自动签名（<name>.sig），
         // 宿主 require_signed_config=true 时校验；签名失败必须中止（防未签名配置伪装成已签名）
         if key_file_adjacent(SIGN_KEY_FILE).is_some() && !sign_config_file(&config_dest) {
-            let _ = uninstall_service_scm(&svc_name);
-            safe_delete_dir(&base_dir);
-            error(&f(
-                "Service registration failed: {0}",
-                &["Failed to sign deployed config"],
-            ));
+            rollback_registration(
+                &svc_name,
+                &base_dir,
+                &mut logs_backup,
+                "Failed to sign deployed config",
+            );
         }
         // 共享宿主: 所有服务复用框架安装目录的同一份 exe（不再每服务复制副本）；
         // 框架未安装（源码直跑）时回退当前 exe；服务名允许空格，ImagePath 须引号包裹
@@ -565,6 +604,8 @@ pub(crate) fn install_from_config_path(config_path_str: &str) {
         security_descriptor: config.security_descriptor.as_deref(),
     }) {
         Ok(()) => {
+            // 更新路径: 注册全链路成功，把备份的 logs 回填到重建的部署目录（首次安装无备份为空操作）
+            restore_service_logs(&svc_name, logs_backup.take());
             // virtual 账户: 授权 NT SERVICE\<name> 遍历部署链（Osmium/svcs 仅 X 权限，
             // 不可读其他服务目录）并读写自身部署目录（M）——目录 ACL 默认仅 SYSTEM/Admin； inplace 时部署目录 = exe 所在目录（logs/pid/metrics 写在那里）
             if let Some(acct) = &virtual_account {
@@ -599,11 +640,23 @@ pub(crate) fn install_from_config_path(config_path_str: &str) {
             }
         }
         Err(e) => {
-            let _ = uninstall_service_scm(&svc_name);
-            safe_delete_dir(&base_dir); // inplace 模式无部署目录，删除为空操作
-            error(&f("Service registration failed: {0}", &[&e]));
+            rollback_registration(&svc_name, &base_dir, &mut logs_backup, &e);
         }
     }
+}
+
+/// 注册失败回滚（4 处失败分支共用）: 卸载已建服务 + 清理部署目录 + 还原备份日志后报错退出
+fn rollback_registration(
+    svc_name: &str,
+    base_dir: &Path,
+    logs_backup: &mut Option<PathBuf>,
+    reason: &str,
+) -> ! {
+    let _ = uninstall_service_scm(svc_name);
+    safe_delete_dir(base_dir); // inplace 模式无部署目录，删除为空操作
+    restore_service_logs(svc_name, logs_backup.take());
+    error(&f("Service registration failed: {0}", &[reason]));
+    unreachable!("error() 以 exit 结束")
 }
 
 // ==================== CLI 动作辅助 ====================
@@ -613,6 +666,16 @@ pub(crate) fn install_from_config_path(config_path_str: &str) {
 fn collect_unsafe_paths(
     config: &ServiceConfig,
     install_deploy_dir: &str,
+    svc_exe_path: &Path,
+    out: &mut Vec<String>,
+) {
+    collect_unsafe_paths_from(config, install_deploy_dir, svc_exe_path, out);
+}
+
+/// 可写路径收集的共享实现: validate_config（--check）与安装校验（collect_unsafe_paths）同源
+fn collect_unsafe_paths_from(
+    config: &ServiceConfig,
+    base_dir: &str,
     svc_exe_path: &Path,
     out: &mut Vec<String>,
 ) {
@@ -628,7 +691,7 @@ fn collect_unsafe_paths(
     if let Some(workdir) = config.working_directory.as_deref()
         && !workdir.trim().is_empty()
     {
-        let workdir = crate::service_host::expand_env_value(workdir, install_deploy_dir);
+        let workdir = crate::service_host::expand_env_value(workdir, base_dir);
         if is_user_writable(&workdir) {
             out.push(format!("working_directory '{workdir}'"));
         }
@@ -636,14 +699,14 @@ fn collect_unsafe_paths(
     // 下载目标: 绝对路径指向可写位置时同样可被预放恶意文件替换
     //（若 sha 匹配或未配置则跳过下载直接执行），纳入可写性校验
     if let Some(to) = config.download_to.as_deref() {
-        let to = crate::service_host::expand_env_value(to, install_deploy_dir);
+        let to = crate::service_host::expand_env_value(to, base_dir);
         if (Path::new(&to).is_absolute() || to.starts_with('\\')) && is_user_writable(&to) {
             out.push(format!("download_to '{to}'"));
         }
     }
     if let Some(list) = config.downloads.as_deref() {
         for d in list {
-            let to = crate::service_host::expand_env_value(d.to.trim(), install_deploy_dir);
+            let to = crate::service_host::expand_env_value(d.to.trim(), base_dir);
             if (Path::new(&to).is_absolute() || to.starts_with('\\')) && is_user_writable(&to) {
                 out.push(format!("downloads[].to '{to}'"));
             }
@@ -1199,6 +1262,31 @@ pub(crate) fn validate_config(config_path: &Path) -> Result<Vec<String>, Vec<Str
     } else {
         ok_msgs.push(format!("Service name '{}' is valid", config.service_name));
     }
+    // 启动类型: 未知值会被静默按 automatic 注册（拼错 delayed_auto 无感知）——预检显式提示
+    if let Some(mode) = config
+        .service_start_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        const KNOWN_MODES: [&str; 6] = [
+            "automatic",
+            "delayed_auto",
+            "delayed-auto",
+            "delayedauto",
+            "manual",
+            "disabled",
+        ];
+        if KNOWN_MODES.iter().any(|k| k.eq_ignore_ascii_case(mode))
+            || mode.eq_ignore_ascii_case("once")
+        {
+            ok_msgs.push(format!("Start mode '{mode}' is valid"));
+        } else {
+            errors.push(format!(
+                "service_start_mode: unknown value '{mode}' (expected automatic | delayed_auto | manual | disabled | once)"
+            ));
+        }
+    }
     if is_refresher_reserved_name(&config.service_name) {
         errors.push(f(RESERVED_NAME_MSG, &[&config.service_name]));
     }
@@ -1224,38 +1312,7 @@ pub(crate) fn validate_config(config_path: &Path) -> Result<Vec<String>, Vec<Str
     }
     // 可写性: exe 目录/工作目录/下载目标（与安装校验同源，防任意用户替换提权）
     let mut unsafe_paths: Vec<String> = Vec::new();
-    if let Some(exe) = svc_exe.to_str() {
-        let exe_dir = Path::new(exe)
-            .parent()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
-        if is_user_writable(&exe_dir) || is_user_writable(exe) {
-            unsafe_paths.push(exe.to_string());
-        }
-    }
-    if let Some(workdir) = config.working_directory.as_deref()
-        && !workdir.trim().is_empty()
-    {
-        // 与安装校验同源: 先展开 %VAR%/%BASE% 再判可写性（防含环境变量的路径误判）
-        let workdir = crate::service_host::expand_env_value(workdir, &check_base);
-        if is_user_writable(&workdir) {
-            unsafe_paths.push(format!("working_directory '{workdir}'"));
-        }
-    }
-    if let Some(to) = config.download_to.as_deref() {
-        let to = crate::service_host::expand_env_value(to, &check_base);
-        if (Path::new(&to).is_absolute() || to.starts_with('\\')) && is_user_writable(&to) {
-            unsafe_paths.push(format!("download_to '{to}'"));
-        }
-    }
-    if let Some(list) = config.downloads.as_deref() {
-        for d in list {
-            let to = crate::service_host::expand_env_value(d.to.trim(), &check_base);
-            if (Path::new(&to).is_absolute() || to.starts_with('\\')) && is_user_writable(&to) {
-                unsafe_paths.push(format!("downloads[].to '{to}'"));
-            }
-        }
-    }
+    collect_unsafe_paths_from(&config, &check_base, &svc_exe, &mut unsafe_paths);
     if unsafe_paths.is_empty() {
         ok_msgs.push("Path writability check passed".into());
     } else {
@@ -1360,7 +1417,64 @@ pub(crate) fn validate_config(config_path: &Path) -> Result<Vec<String>, Vec<Str
                 ));
             }
         }
-        if list.is_empty() { /* 空数组无校验项 */ }
+    }
+    // 定点滚动时刻格式: log_auto_roll_at 必须可解析（"HH:mm" / "HH:mm:ss"）
+    if let Some(at) = config.log_auto_roll_at.as_deref()
+        && !at.trim().is_empty()
+        && !crate::service_host::parse_daily_time_check(at)
+    {
+        errors.push(format!(
+            "log_auto_roll_at: invalid time '{at}' (expected \"HH:mm\" or \"HH:mm:ss\")"
+        ));
+    }
+    // 数值字段合法性: 负值/越界在宿主侧会被钳制但配置是错的，预检显式提示。
+    // 注意: 0 对这些字段 = "未配置"（宿主按默认处理），只有负值才真正非法；
+    // 有明确语义上限的字段（线程数/重试/实例数/备份数）按上限校验
+    for (name, v, min, max) in [
+        ("download_threads", config.download_threads as i64, 0, 64),
+        ("download_retries", config.download_retries, 0, 20),
+        ("log_max_size_mb", config.log_max_size_mb, 0, i64::MAX),
+        (
+            "log_max_backup_count",
+            config.log_max_backup_count as i64,
+            0,
+            1000,
+        ),
+        (
+            "health_check_interval_secs",
+            config.health_check_interval_secs,
+            0,
+            86400,
+        ),
+        (
+            "health_check_timeout_secs",
+            config.health_check_timeout_secs,
+            0,
+            300,
+        ),
+        (
+            "health_check_failures",
+            config.health_check_failures,
+            0,
+            1000,
+        ),
+        ("process_count", config.process_count, 0, 64),
+        ("stop_timeout_secs", config.stop_timeout_secs, 0, 3600),
+    ] {
+        if v < min || v > max {
+            errors.push(format!("{name}: value {v} out of range [{min}..{max}]"));
+        }
+    }
+    if config.download_rate_limit_kbps < 0 {
+        errors.push(format!(
+            "download_rate_limit_kbps: value {} must be >= 0",
+            config.download_rate_limit_kbps
+        ));
+    }
+    if let Some(s) = config.schedules.as_deref()
+        && s.is_empty()
+    {
+        ok_msgs.push("schedules: empty array (no-op, remove it)".into());
     }
     // 健康检查 URL: tcp:// 目标格式校验 / http(s) URL 格式校验
     if let Some(url) = config.health_check_url.as_deref()
@@ -1379,6 +1493,24 @@ pub(crate) fn validate_config(config_path: &Path) -> Result<Vec<String>, Vec<Str
         } else {
             ok_msgs.push("Health check URL is valid".into());
         }
+    }
+    // 不安全下载检查（http 无 sha256 / basic 走明文 http）: 与宿主启动时同源判定，
+    // 让 --install 前就能发现——管理员装上后才在启动失败是糟糕的反馈闭环
+    match crate::service_host::warn_if_insecure_download(&config) {
+        Ok(()) => {
+            if crate::service_core::has_download(&config) {
+                ok_msgs.push("Download targets are secure (https or sha256-protected)".into());
+            }
+        }
+        Err(e) => errors.push(e),
+    } // 签名密钥可篡改检查: 私钥文件/所在目录对低权限用户可写时，--sign-config 的签名不可信
+    if let Some(key) = key_file_adjacent(SIGN_KEY_FILE)
+        && key_file_tamperable_by_unprivileged(&key)
+    {
+        errors.push(format!(
+            "osmium-sign.key at '{}' is writable by unprivileged users — the signing key can be replaced. Protect the key file and its directory.",
+            key.display()
+        ));
     }
     if errors.is_empty() {
         Ok(ok_msgs)
@@ -1524,9 +1656,16 @@ pub(crate) fn job_state_path(name: &str) -> PathBuf {
     deployed_config_path(name).with_extension("job")
 }
 
-/// --status 指标摘要: 读取部署配置的 metrics_file（相对部署目录），返回最后一条导出记录
+/// --status 指标摘要: 读取部署配置的 metrics_file（相对部署目录），返回最后一条导出记录。
+/// inplace 服务的配置在 exe 旁（与 job_state_path 同款分支），不能只读 svcs 部署配置
 pub(crate) fn last_metrics_line(name: &str) -> Option<String> {
-    let config_path = deployed_config_path(name);
+    let config_path = if is_inplace_service(name)
+        && let Some(image) = get_service_image_path(name)
+    {
+        crate::service_host::config_path_next_to(Path::new(image.trim_matches('"')))
+    } else {
+        deployed_config_path(name)
+    };
     let config = std::panic::catch_unwind(|| load_config(&config_path)).ok()?;
     let mf = config.metrics_file.as_deref()?.trim();
     if mf.is_empty() {
@@ -1751,7 +1890,9 @@ fn writable_cache() -> &'static Mutex<Option<std::collections::HashMap<String, b
 /// 对象（目录/文件）是否允许低权限主体改写: 用 PowerShell 输出 SDDL 解析所有者与 DACL；
 /// 解析失败/无法判定一律视为可写（fail-closed），拒绝在不可信位置注册 SYSTEM 服务（防 P0-1）。 目标尚不存在时（如下载目标）按父目录判定——新建文件继承父目录 ACL， 父目录可写即等于目标可被预创建替换
 pub(crate) fn is_user_writable(path: &str) -> bool {
-    let key = path.to_string();
+    // 缓存键大小写归一（Windows 路径大小写不敏感）: 同一路径的大小写变体命中同一缓存，
+    // 避免重复触发 PowerShell（如 'C:\App' 与 'c:\app' 是同一对象）
+    let key = path.to_lowercase();
     if let Some(cache) = writable_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1858,16 +1999,34 @@ pub(crate) fn sddl_dacl_grants_non_admin_write(dacl: &str) -> bool {
     false
 }
 
-/// SDDL 权限令牌是否含写能力（文件/目录写、删子项、改 DACL/所有者、删除等）
+/// SDDL 权限是否含写能力: 字母令牌按子串扫描——精确等值会漏判组合形式（如 GRGW）,
+/// 把低权限用户实际可写的目录误判为安全；十六进制展开具体写位并叠加通用写权限位
 fn sddl_rights_include_write(rights: &str) -> bool {
-    matches!(
-        rights,
-        "FA" | "FW" | "M" | "WD" | "WO" | "GA" | "GW" | "DC" | "AD" | "DT" | "DE" | "WDAC" | "WOWN"
-    ) || rights
+    let r = rights.trim();
+    if r.is_empty() {
+        return false;
+    }
+    // 十六进制前缀不区分大小写（手写 SDDL 可能写成 0X）；解析失败按非写处理由字母分支兜底
+    let lower = r.to_ascii_lowercase();
+    if let Some(mask) = lower
         .strip_prefix("0x")
         .and_then(|h| u32::from_str_radix(h, 16).ok())
-        .map(|m| m & (0x2 | 0x4 | 0x40 | 0x10 | 0x100 | 0x10000 | 0x40000 | 0x80000) != 0)
-        .unwrap_or(false)
+    {
+        // 具体写权限位: 写数据/追加(创建文件/子目录)/写扩展属性/删子项/写属性/DELETE/写 DACL/写所有者
+        // 注意: 0x20(FILE_EXECUTE) 与 0x100000(SYNCHRONIZE) 是只读/同步位, 绝不能算写
+        const WRITE_BITS: u32 = 0x2 | 0x4 | 0x10 | 0x40 | 0x100 | 0x10000 | 0x40000 | 0x80000;
+        // 通用权限位映射: GENERIC_WRITE / GENERIC_ALL 均隐含写能力
+        const GENERIC_WRITE_BITS: u32 = 0x4000_0000 | 0x1000_0000;
+        return mask & (WRITE_BITS | GENERIC_WRITE_BITS) != 0;
+    }
+    // 文件系统 SDDL 字母令牌（Windows 实测位值）: DC=0x2 创建文件, LC=0x4 创建子目录,
+    // DT=0x40 删除子项, SD=0x10000 DELETE, WD=0x40000 写 DACL, AD 非有效文件令牌；
+    // CC=0x1 列出目录是只读, 绝不能加入（会把只读目录误判为可写）
+    [
+        "fa", "fw", "m", "wd", "wo", "ga", "gw", "dc", "lc", "dt", "sd", "wdac", "wown",
+    ]
+    .iter()
+    .any(|t| lower.contains(t))
 }
 
 /// SDDL SID 是否管理员级主体
@@ -1939,10 +2098,15 @@ pub(crate) fn safe_delete_dir(path: &Path) {
 }
 
 /// 递归删除目录树；安全要点: 用 DirEntry::file_type 判断（不跟随符号链接），Path::is_dir 会跟随
-/// junction/symlink，攻击者可放置指向任意目录的 junction 诱导 SYSTEM 刷新器递归删除其目标（#4）
+/// junction/symlink，攻击者可放置指向任意目录的 junction 诱导 SYSTEM 刷新器递归删除其目标（#4）。
+/// 根路径自身也须检查 reparse: 根为 junction 时 read_dir 枚举的是目标内容，子项检查拦不住
 pub(crate) fn delete_dir_tree(path: &Path) -> bool {
     if !path.exists() {
         return true;
+    }
+    // 根路径自身是 junction/symlink → 拒绝删除（防诱导删除 junction 目标的内容；仅移除链接本体）
+    if crate::service_host::is_reparse_path(path) {
+        return std::fs::remove_dir(path).is_ok();
     }
     let mut ok = true;
     if let Ok(entries) = std::fs::read_dir(path) {
@@ -2001,6 +2165,17 @@ pub(crate) fn install_svc_refresher_command() {
     if service_exists("Osmium Service Refresher") {
         force_remove_service("Osmium Service Refresher", false);
     }
+
+    // 刷新器以 SYSTEM 运行并对 svcs 目录做清理/删除: 加固 Osmium 根目录与 svcs 目录，
+    // 防普通用户预建目录放 junction（删除根 reparse 已拒，目录本身也应收紧防伪造内容）
+    let root = registry_dir()
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "C:\\ProgramData\\Osmium".to_string());
+    let _ = std::fs::create_dir_all(&root);
+    let _ = std::fs::create_dir_all(registry_dir());
+    let _ = secure_directory(&root);
+    let _ = secure_directory(&registry_dir().to_string_lossy());
 
     let own_exe = get_own_path();
     let bin_path = format!("\"{}\" -internal --refresher", own_exe);
@@ -2373,11 +2548,14 @@ enum SingleOutcome {
 }
 
 /// 限速包装 reader: 按 rate_bps（字节/秒）节流读取（0 = 不限速）。
-/// 简单令牌桶: 每读一段后按"已读总量/速率"应耗时长 sleep，突发后平滑到平均速率
+/// 简单令牌桶: 每读一段后按"已读总量/速率"应耗时长 sleep，突发后平滑到平均速率；
+/// shared 计数器提供时多请求共享同一配额（分块并行下载的聚合带宽仍≈配置值，而非 ×N）
 struct RateLimitedReader<R> {
     inner: R,
     rate_bps: u64,
+    /// 已读总量（本地计数或共享分块配额）
     bytes: u64,
+    shared: Option<std::sync::Arc<AtomicU64>>,
     start: Instant,
 }
 
@@ -2387,7 +2565,24 @@ impl<R: std::io::Read> RateLimitedReader<R> {
             inner,
             rate_bps,
             bytes: 0,
+            shared: None,
             start: Instant::now(),
+        }
+    }
+
+    /// 共享配额模式: total 传入各 worker 已共享的原子计数器与统一计时起点
+    fn new_shared(
+        inner: R,
+        rate_bps: u64,
+        shared: std::sync::Arc<AtomicU64>,
+        start: Instant,
+    ) -> Self {
+        Self {
+            inner,
+            rate_bps,
+            bytes: 0,
+            shared: Some(shared),
+            start,
         }
     }
 }
@@ -2395,9 +2590,15 @@ impl<R: std::io::Read> RateLimitedReader<R> {
 impl<R: std::io::Read> std::io::Read for RateLimitedReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.inner.read(buf)?;
-        if self.rate_bps > 0 {
-            self.bytes += n as u64;
-            let expected = self.bytes as f64 / self.rate_bps as f64;
+        if self.rate_bps > 0 && n > 0 {
+            let total = match &self.shared {
+                Some(counter) => counter.fetch_add(n as u64, Ordering::Relaxed) + n as u64,
+                None => {
+                    self.bytes += n as u64;
+                    self.bytes
+                }
+            };
+            let expected = total as f64 / self.rate_bps as f64;
             let elapsed = self.start.elapsed().as_secs_f64();
             if elapsed < expected {
                 thread::sleep(Duration::from_secs_f64(expected - elapsed));
@@ -2408,6 +2609,28 @@ impl<R: std::io::Read> std::io::Read for RateLimitedReader<R> {
 }
 
 /// 构造下载 Agent（全局超时覆盖整个下载；4xx/5xx 不转错误，调用方按状态码处理）
+/// Agent 缓存（按 timeout+proxy 复用连接池/DNS）: 多下载条目/重试循环不再每次重建；
+/// 小 map 覆盖常见组合（单槽在 timeout/proxy 交替时会反复重建）
+fn cached_agent(timeout_secs: u64, proxy: Option<&str>) -> ureq::Agent {
+    use std::collections::HashMap;
+    static CACHE: Mutex<Option<HashMap<String, ureq::Agent>>> = Mutex::new(None);
+    let key = format!("{timeout_secs}|{proxy:?}");
+    let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(HashMap::new);
+    if let Some(agent) = map.get(&key) {
+        return agent.clone();
+    }
+    let agent = build_agent(timeout_secs, proxy);
+    // 上限 8 槽防无限增长（超限丢弃最早项）
+    if map.len() >= 8
+        && let Some(oldest) = map.keys().next().cloned()
+    {
+        map.remove(&oldest);
+    }
+    map.insert(key, agent.clone());
+    agent
+}
+
 fn build_agent(timeout_secs: u64, proxy: Option<&str>) -> ureq::Agent {
     let mut builder = ureq::Agent::config_builder()
         .http_status_as_error(false)
@@ -2434,7 +2657,7 @@ pub(crate) fn download_core(
     if_modified_since: Option<String>,
     rate_bps: u64,
 ) -> Result<(), (bool, String)> {
-    let client = build_agent(timeout_secs, proxy);
+    let client = cached_agent(timeout_secs, proxy);
 
     // CreateNew 原子创建，拒绝预创建文件替换；残留同名文件清理后重试一次。
     // 断点续传: tmp 非空时复用（分块模式下按块跳过已下载区间，避免整文件重传）。 必须带 read 权限——chunk_already_done 的 seek_read 判定需要读 tmp（仅 write 会拒绝访问）
@@ -2462,6 +2685,11 @@ pub(crate) fn download_core(
         }
     };
 
+    // 断点归属标记文件（随 tmp 派生）: 记录上次下载源（URL 哈希）与总长，复用前校验——
+    // 防止更换下载源后旧资源的块被 chunk_already_done 误判已完成而混合污染；
+    // 成功完成后清理，失败残留由下次复用时的校验覆盖
+    let marker_path = PathBuf::from(format!("{tmp}.resume"));
+
     // 304 优化: 目标已存在且无 sha 校验时发送 If-Modified-Since，并强制单线程
     //（Range+If-Modified-Since 组合无意义，未变化时服务器直接回 304）
     if let Some(date) = if_modified_since {
@@ -2472,17 +2700,36 @@ pub(crate) fn download_core(
         let _ = (&file).seek(SeekFrom::Start(0));
         return match single_download(&client, url, &file, auth, Some(&date), rate_bps) {
             Ok(SingleOutcome::NotModified) => {
-                // 目标未变化: 保留原文件，删除空 tmp，视为下载完成
+                // 目标未变化: 保留原文件，删除空 tmp 与断点标记，视为下载完成
                 let _ = std::fs::remove_file(tmp);
+                let _ = std::fs::remove_file(&marker_path);
                 Ok(())
             }
-            Ok(SingleOutcome::Downloaded) => Ok(()),
+            Ok(SingleOutcome::Downloaded) => {
+                let _ = std::fs::remove_file(&marker_path);
+                Ok(())
+            }
             Err(e) => Err(e),
         };
     }
 
-    // 探测: HEAD 取 Content-Length 与 Accept-Ranges；HEAD 异常视为不支持 Range，直接单线程
-    let probe = client.head(url).call();
+    // 探测: HEAD 取 Content-Length 与 Accept-Ranges；HEAD 异常视为不支持 Range，直接单线程。
+    // 认证资源首探 401/403 时带凭据重试一次——否则 Basic 下载永远无法分块/预检磁盘
+    let probe = match client.head(url).call() {
+        Ok(r)
+            if !r.status().is_success()
+                && [401, 403].contains(&r.status().as_u16())
+                && let DownloadAuth::Basic(user, pass) = auth =>
+        {
+            use base64::Engine as _;
+            let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+            client
+                .head(url)
+                .header("authorization", format!("Basic {token}"))
+                .call()
+        }
+        other => other,
+    };
     if let Ok(resp) = probe
         && resp.status().is_success()
     {
@@ -2507,11 +2754,34 @@ pub(crate) fn download_core(
                     format!("insufficient disk space for {size} bytes at '{tmp}'"),
                 ));
             }
+            // 断点复用前校验 tmp 归属: 标记内容（URL 哈希+长度）与本次不符说明是旧源残留，
+            // 清零整体重下——否则旧资源的数据块会被 chunk_already_done 误判已完成而混合污染；
+            // 标记匹配且 tmp 不超长时保留（正常断点续传，半成品必然短于远端）。
+            // 用完整 URL 的哈希而非脱敏串: 脱敏会剥离 query，仅换查询串的换源（CDN cache-busting）会被漏判
+            let url_hash = {
+                use sha2::{Digest, Sha256};
+                let mut h = Sha256::new();
+                h.update(url.as_bytes());
+                h.finalize()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            };
+            let expected = format!("{url_hash}\n{size}");
+            let trusted = std::fs::read_to_string(&marker_path)
+                .map(|m| m == expected)
+                .unwrap_or(false);
+            let tmp_len = std::fs::metadata(tmp).map(|m| m.len()).unwrap_or(0);
+            if !trusted || tmp_len > size {
+                let _ = file.set_len(0);
+                let _ = std::fs::write(&marker_path, &expected);
+            }
             if size > CHUNK_SIZE
                 && threads >= 2
                 && chunked_download(&client, url, &file, auth, size, threads as u64, rate_bps)
                     .is_ok()
             {
+                let _ = std::fs::remove_file(&marker_path);
                 return Ok(());
             }
             // 分块失败（服务器实际不支持 Range/网络异常）→ 清零后回退单线程
@@ -2523,7 +2793,10 @@ pub(crate) fn download_core(
     use std::io::{Seek, SeekFrom};
     let _ = file.set_len(0);
     let _ = (&file).seek(SeekFrom::Start(0));
-    single_download(&client, url, &file, auth, None, rate_bps).map(|_| ())
+    let outcome = single_download(&client, url, &file, auth, None, rate_bps);
+    // 下载产物已就绪，断点标记完成使命一并清理（失败路径残留由下次复用校验覆盖）
+    let _ = std::fs::remove_file(&marker_path);
+    outcome.map(|_| ())
 }
 
 /// 单线程完整下载（不支持 Range / 小文件 / 分块回退路径；可选 If-Modified-Since 头）;
@@ -2536,10 +2809,17 @@ fn single_download(
     if_modified_since: Option<&str>,
     rate_bps: u64,
 ) -> Result<SingleOutcome, (bool, String)> {
+    // 凭据同源判定基准（scheme+host+端口）: Basic 认证仅在原始服务器及其同源重定向链上发送，
+    // 跨主机/跨端口重定向不携带 Authorization——防凭据经 302 外泄到第三方服务器
+    let origin = url::Url::parse(url).ok().map(same_origin_key);
     let mut current = url.to_string();
     for _ in 0..10 {
         let mut req = client.get(&current);
-        if let DownloadAuth::Basic(user, pass) = auth {
+        let same_origin = url::Url::parse(&current)
+            .ok()
+            .map(same_origin_key)
+            .is_some_and(|k| Some(k) == origin);
+        if same_origin && let DownloadAuth::Basic(user, pass) = auth {
             use base64::Engine as _;
             let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
             req = req.header("authorization", format!("Basic {token}"));
@@ -2586,15 +2866,39 @@ fn single_download(
             };
             return Err((false, hint.to_string()));
         }
+        // 完整性校验基准: 服务器声明 Content-Length 时，实际收到的字节数必须一致——
+        // 连接提前干净关闭（无 IO 错误）的截断响应按失败处理，防静默损坏
+        let expected_len = resp
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok());
         let mut reader = RateLimitedReader::new(resp.into_body().into_reader(), rate_bps);
         let mut out = file.try_clone().map_err(|e| (false, e.to_string()))?;
         // 防御: 明确从文件头写（try_clone 句柄共享文件位置，不依赖调用方已 seek）
         use std::io::{Seek, SeekFrom};
         let _ = out.seek(SeekFrom::Start(0));
-        std::io::copy(&mut reader, &mut out).map_err(|e| (false, e.to_string()))?;
+        let copied = std::io::copy(&mut reader, &mut out).map_err(|e| (false, e.to_string()))?;
+        if let Some(expect) = expected_len
+            && copied != expect
+        {
+            return Err((
+                false,
+                format!("truncated download: got {copied} of {expect} bytes"),
+            ));
+        }
         return Ok(SingleOutcome::Downloaded);
     }
     Err((false, "too many redirects (10)".to_string()))
+}
+
+/// 重定向同源判定键: (scheme, host, 端口)——三者全部一致才视为同一服务器
+fn same_origin_key(u: url::Url) -> (String, String, Option<u16>) {
+    (
+        u.scheme().to_ascii_lowercase(),
+        u.host_str().unwrap_or_default().to_ascii_lowercase(),
+        u.port_or_known_default(),
+    )
 }
 
 /// 解析重定向 Location（相对/绝对）: 基于当前 URL 做 RFC 3986 解析
@@ -2628,15 +2932,25 @@ fn chunked_download(
         DownloadAuth::None => None,
         DownloadAuth::Basic(u, p) => Some((u.to_string(), p.to_string())),
     };
+    // 取消标志: 任一块最终失败即置位，其余 worker 尽快退出（不再白拉剩余块）
+    let cancelled = Arc::new(AtomicBool::new(false));
+    // 共享限速配额: 各 worker 的读取量计入同一计数器（聚合带宽≈rate_bps，而非 rate×workers）
+    let quota = Arc::new(AtomicU64::new(0));
+    let quota_start = Instant::now();
     let mut handles = Vec::new();
     for w in 0..workers {
         let client = client.clone();
         let file = file.clone();
         let url = url.to_string();
         let auth_owned = auth_owned.clone();
+        let cancelled = cancelled.clone();
+        let quota = quota.clone();
         handles.push(thread::spawn(move || {
             let mut i = w;
             while i < chunk_count {
+                if cancelled.load(Ordering::Relaxed) {
+                    return Err((false, "download cancelled".into()));
+                }
                 let start = i * CHUNK_SIZE;
                 let end = (start + CHUNK_SIZE - 1).min(size - 1);
                 // 断点续传: 复用 tmp 中已完整写入的块（长度覆盖块尾且区间非全零）直接跳过
@@ -2654,6 +2968,8 @@ fn chunked_download(
                         start,
                         end,
                         rate_bps,
+                        Some(quota.clone()),
+                        quota_start,
                     )
                     .is_ok()
                     {
@@ -2661,10 +2977,14 @@ fn chunked_download(
                     }
                     attempt += 1;
                     if attempt > CHUNK_MAX_RETRIES {
+                        cancelled.store(true, Ordering::Relaxed);
                         return Err((
                             false,
                             format!("chunk {}-{} failed after retries", start, end),
                         ));
+                    }
+                    if cancelled.load(Ordering::Relaxed) {
+                        return Err((false, "download cancelled".into()));
                     }
                 }
                 i += workers;
@@ -2679,7 +2999,17 @@ fn chunked_download(
     Ok(())
 }
 
-/// 下载单个分块（Range 请求）并写入文件偏移；服务器必须返回 206
+/// 解析 Content-Range: "bytes 0-1023/2048" → (0, 1023)；格式非法返回 None
+fn parse_content_range(value: &str) -> Option<(u64, u64)> {
+    let rest = value.trim().strip_prefix("bytes ")?;
+    let (range, _total) = rest.split_once('/')?;
+    let (a, b) = range.split_once('-')?;
+    Some((a.parse().ok()?, b.parse().ok()?))
+}
+
+/// 下载单个分块（Range 请求）并写入文件偏移；服务器必须返回 206。
+/// quota 提供时读取量计入分块共享限速配额（None = 本地独立计数）
+#[allow(clippy::too_many_arguments)] // 全部为分块下载所需配置项，参数打包反增调用点负担
 fn download_chunk(
     client: &ureq::Agent,
     url: &str,
@@ -2688,6 +3018,8 @@ fn download_chunk(
     start: u64,
     end: u64,
     rate_bps: u64,
+    quota: Option<std::sync::Arc<AtomicU64>>,
+    quota_start: Instant,
 ) -> Result<(), (bool, String)> {
     use std::io::Read;
     use std::os::windows::fs::FileExt;
@@ -2722,7 +3054,37 @@ fn download_chunk(
             ),
         ));
     }
-    let mut reader = RateLimitedReader::new(resp.into_body().into_reader(), rate_bps);
+    // Content-Range 校验: 响应声明的区间必须与请求一致——恶意/异常服务器回错位片段
+    // 会静默拼坏文件（仅 sha 配置时兜底），区间不符直接失败
+    let declared = resp
+        .headers()
+        .get("content-range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_content_range)
+        .ok_or_else(|| {
+            (
+                false,
+                format!("chunk {start}-{end}: missing/invalid Content-Range header"),
+            )
+        })?;
+    if declared != (start, end) {
+        return Err((
+            false,
+            format!(
+                "chunk {start}-{end}: server returned mismatched Content-Range {}",
+                resp.headers()
+                    .get("content-range")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+            ),
+        ));
+    }
+    let mut reader = match quota {
+        Some(q) => {
+            RateLimitedReader::new_shared(resp.into_body().into_reader(), rate_bps, q, quota_start)
+        }
+        None => RateLimitedReader::new(resp.into_body().into_reader(), rate_bps),
+    };
     let mut buf = [0u8; 64 * 1024];
     let mut offset = start;
     loop {
@@ -2734,30 +3096,56 @@ fn download_chunk(
             .map_err(|e| (false, e.to_string()))?;
         offset += n as u64;
     }
+    // 完整性校验: 实际收到的字节数必须等于请求的区间长度——
+    // 服务器提前干净关闭连接（无 IO 错误）的截断响应按失败处理，防块数据静默缺失
+    if offset - start != end - start + 1 {
+        return Err((
+            false,
+            format!(
+                "chunk {}-{} truncated: got {} of {} bytes",
+                start,
+                end,
+                offset - start,
+                end - start + 1
+            ),
+        ));
+    }
     Ok(())
 }
 
-/// 计算文件 SHA-256（小写十六进制）并比较；未提供校验值视为匹配
+/// 计算文件 SHA-256（小写十六进制）并比较；未提供校验值视为匹配。
+/// 流式分块读取: 大文件（多 GB 下载产物）不全量载入内存
 pub(crate) fn sha256_matches(path: &str, expected: Option<&str>) -> bool {
     use sha2::{Digest, Sha256};
+    use std::io::Read;
     let Some(sha) = expected else { return true };
     let sha = sha.trim();
     if sha.is_empty() {
         return true;
     }
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => return false,
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
     };
-    let hex: String = Sha256::digest(&data)
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(_) => return false,
+        }
+    }
+    let hex: String = hasher
+        .finalize()
         .iter()
-        .map(|b| format!("{:02x}", b))
+        .map(|b| format!("{b:02x}"))
         .collect();
     hex == sha.to_lowercase()
 }
 
 /// 断点续传判定: 分块区间是否已完整写入 tmp（文件长度覆盖块尾且区间**全部非零**——
-/// 部分写入的块（中断/半块）必须重新下载，any 判定会把残缺块误判为已完成导致数据缺失）
+/// 部分写入的块（中断/半块）必须重新下载，any 判定会把残缺块误判为已完成导致数据缺失）。
+/// 已知取舍: 内容恰好全零的完整块会被重复下载（正确性不受影响，仅续传效率退化）
 pub(crate) fn chunk_already_done(file: &std::fs::File, start: u64, end: u64) -> bool {
     use std::os::windows::fs::FileExt;
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -2770,28 +3158,26 @@ pub(crate) fn chunk_already_done(file: &std::fs::File, start: u64, end: u64) -> 
         .unwrap_or(false)
 }
 
-/// 磁盘空间预检: 目标文件所在卷剩余空间是否足够（need 字节 + 64MB 余量）；
+/// 磁盘空间预检: 目标文件所在卷的调用者可用空间（配额感知）是否足够（need 字节 + 64MB 余量）；
 /// 查询失败（路径无效等）视为通过（由后续写入报错兜底）
 fn disk_space_ok(path: &str, need: u64) -> bool {
     use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
     let wide = to_wide(path);
     let mut free_to_caller = 0u64;
-    let mut total = 0u64;
-    let mut free_total = 0u64;
     let ok = unsafe {
         GetDiskFreeSpaceExW(
             PCWSTR::from_raw(wide.as_ptr()),
             Some(&mut free_to_caller),
-            Some(&mut total),
-            Some(&mut free_total),
+            None,
+            None,
         )
         .is_ok()
     };
     if !ok {
         return true;
     }
-    // 预留 64MB 余量（下载产物/解压等后续操作也需要空间）
-    free_total >= need.saturating_add(64 * 1024 * 1024)
+    // 预留 64MB 余量（下载产物/解压等后续操作也需要空间）；用配额口径的可用空间而非卷总量
+    free_to_caller >= need.saturating_add(64 * 1024 * 1024)
 }
 
 // ==================== SCM API ====================
@@ -2879,49 +3265,54 @@ fn install_service_scm(p: &InstallServiceParams) -> Result<(), String> {
         }
         let svc = svc.map_err(|e| format!("{}: {e}", "Failed to create service"))?;
 
-        // 设置描述（失败必须传播，不能静默缺失，P2-3）
-        let desc_wide = to_wide(p.description);
-        let desc_info = SERVICE_DESCRIPTIONW {
-            lpDescription: PWSTR::from_raw(desc_wide.as_ptr() as *mut _),
-        };
-        ChangeServiceConfig2W(
-            svc,
-            SERVICE_CONFIG_DESCRIPTION,
-            Some(&desc_info as *const _ as *const _),
-        )
-        .map_err(|e| format!("{}: {e}", "Failed to set service description"))?;
-
-        // 设置故障恢复（failure_action 决定动作序列）
-        if p.failure_reset_sec > 0 {
-            set_failure_actions(
-                svc,
-                p.failure_reset_sec,
-                p.restart_delay_ms,
-                p.failure_action,
-            )?;
-        }
-
-        // 延迟自动启动
-        if p.delayed_auto_start {
-            let delay_info = SERVICE_DELAYED_AUTO_START_INFO {
-                fDelayedAutostart: true.into(),
+        // 服务创建后的全部配置步骤在闭包内执行: 任一步失败都先关闭句柄再传播错误
+        //（旧实现 `?` 提前返回会泄漏 svc/scm 句柄）
+        let configured = (|| -> Result<(), String> {
+            // 设置描述（失败必须传播，不能静默缺失，P2-3）
+            let desc_wide = to_wide(p.description);
+            let desc_info = SERVICE_DESCRIPTIONW {
+                lpDescription: PWSTR::from_raw(desc_wide.as_ptr() as *mut _),
             };
             ChangeServiceConfig2W(
                 svc,
-                SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
-                Some(&delay_info as *const _ as *const _),
+                SERVICE_CONFIG_DESCRIPTION,
+                Some(&desc_info as *const _ as *const _),
             )
-            .map_err(|e| format!("{}: {e}", "Failed to set delayed auto start"))?;
-        }
+            .map_err(|e| format!("{}: {e}", "Failed to set service description"))?;
 
-        // 服务安全描述符（SDDL）: 应用到服务 DACL，控制谁能管理该服务（对应 WinSW securityDescriptor）
-        if let Some(sddl) = p.security_descriptor {
-            apply_service_sddl(svc, sddl)
-                .map_err(|e| format!("{}: {e}", "Failed to set service security descriptor"))?;
-        }
+            // 设置故障恢复（failure_action 决定动作序列）
+            if p.failure_reset_sec > 0 {
+                set_failure_actions(
+                    svc,
+                    p.failure_reset_sec,
+                    p.restart_delay_ms,
+                    p.failure_action,
+                )?;
+            }
 
+            // 延迟自动启动
+            if p.delayed_auto_start {
+                let delay_info = SERVICE_DELAYED_AUTO_START_INFO {
+                    fDelayedAutostart: true.into(),
+                };
+                ChangeServiceConfig2W(
+                    svc,
+                    SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
+                    Some(&delay_info as *const _ as *const _),
+                )
+                .map_err(|e| format!("{}: {e}", "Failed to set delayed auto start"))?;
+            }
+
+            // 服务安全描述符（SDDL）: 应用到服务 DACL，控制谁能管理该服务（对应 WinSW securityDescriptor）
+            if let Some(sddl) = p.security_descriptor {
+                apply_service_sddl(svc, sddl)
+                    .map_err(|e| format!("{}: {e}", "Failed to set service security descriptor"))?;
+            }
+            Ok(())
+        })();
         let _ = CloseServiceHandle(svc);
         let _ = CloseServiceHandle(scm);
+        configured?;
     }
 
     // allow_service_logon: 服务创建后若使用自定义账户，自动授予其"作为服务登录"权限
@@ -3118,14 +3509,15 @@ fn set_failure_actions(
     }
 }
 
-/// 将分号分隔的依赖字符串转换为 SC multi-sz 格式
+/// 将分号/逗号分隔的依赖字符串转换为 SC multi-sz 格式。
+/// 不把 ':' 当分隔符: SCM 服务名允许含冒号（如某些驱动服务），按名拆分会静默错配依赖
 pub(crate) fn build_dependency_string(dependencies: Option<&str>) -> Option<String> {
     let deps = dependencies?;
     if deps.trim().is_empty() {
         return None;
     }
     let parts: Vec<&str> = deps
-        .split(&[';', ',', ':'][..])
+        .split(&[';', ','][..])
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .collect();
@@ -3196,29 +3588,38 @@ pub(crate) fn start_service(service_name: &str, timeout: Duration) -> Result<(),
         let name_wide = to_wide(service_name);
         let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
             .map_err(|e| format!("{}: {e}", "Failed to open service control manager"))?;
-        let svc = OpenServiceW(scm, PCWSTR::from_raw(name_wide.as_ptr()), SERVICE_START)
-            .map_err(|e| format!("{}: {e}", "Failed to open service"))?;
+        let svc = OpenServiceW(
+            scm,
+            PCWSTR::from_raw(name_wide.as_ptr()),
+            SERVICE_START | SERVICE_QUERY_STATUS,
+        )
+        .map_err(|e| format!("{}: {e}", "Failed to open service"))?;
 
         let result = StartServiceW(svc, None);
-        let _ = CloseServiceHandle(svc);
-        let _ = CloseServiceHandle(scm);
-
         if let Err(e) = result {
+            let _ = CloseServiceHandle(svc);
+            let _ = CloseServiceHandle(scm);
             return Err(format!("Failed to start service: {e}"));
         }
-    }
 
-    // 等待运行状态
-    let deadline = Instant::now() + timeout;
-    loop {
-        let status = get_status_raw(service_name)?;
-        if status.dwCurrentState == windows::Win32::System::Services::SERVICE_RUNNING {
-            return Ok(());
+        // 等待运行状态（复用 svc 句柄轮询，不再每次重开 SCM）
+        let deadline = Instant::now() + timeout;
+        let mut svc_status = SERVICE_STATUS::default();
+        loop {
+            let ok = QueryServiceStatus(svc, &mut svc_status).is_ok();
+            if ok && svc_status.dwCurrentState == windows::Win32::System::Services::SERVICE_RUNNING
+            {
+                let _ = CloseServiceHandle(svc);
+                let _ = CloseServiceHandle(scm);
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                let _ = CloseServiceHandle(svc);
+                let _ = CloseServiceHandle(scm);
+                return Err("Timeout waiting for service to start".into());
+            }
+            thread::sleep(Duration::from_millis(200));
         }
-        if Instant::now() > deadline {
-            return Err("Timeout waiting for service to start".into());
-        }
-        thread::sleep(Duration::from_millis(200));
     }
 }
 
@@ -3227,40 +3628,50 @@ pub(crate) fn stop_service(service_name: &str, timeout: Duration) -> Result<(), 
     if status.dwCurrentState == SERVICE_STOPPED {
         return Ok(());
     }
-    // 正在停止中（STOP_PENDING，如故障恢复/前一次停止尚未完成）: 跳过 ControlService，
-    // 直接进入等待循环（对停止中的服务再发 STOP 会被 SCM 拒绝 ERROR_SERVICE_CANNOT_ACCEPT_CTRL）
-    if status.dwCurrentState != SERVICE_STOP_PENDING {
-        unsafe {
-            let name_wide = to_wide(service_name);
-            let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
-                .map_err(|e| format!("{}: {e}", "Failed to open service control manager"))?;
-            let svc = OpenServiceW(scm, PCWSTR::from_raw(name_wide.as_ptr()), SERVICE_STOP)
-                .map_err(|e| format!("{}: {e}", "Failed to open service"))?;
+    unsafe {
+        let name_wide = to_wide(service_name);
+        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
+            .map_err(|e| format!("{}: {e}", "Failed to open service control manager"))?;
+        let svc = OpenServiceW(
+            scm,
+            PCWSTR::from_raw(name_wide.as_ptr()),
+            SERVICE_STOP | SERVICE_QUERY_STATUS,
+        )
+        .map_err(|e| format!("{}: {e}", "Failed to open service"))?;
 
-            let mut svc_status = SERVICE_STATUS::default();
+        // 正在停止中（STOP_PENDING，如故障恢复/前一次停止尚未完成）: 跳过 ControlService，
+        // 直接进入等待循环（对停止中的服务再发 STOP 会被 SCM 拒绝 ERROR_SERVICE_CANNOT_ACCEPT_CTRL）
+        let mut svc_status = SERVICE_STATUS::default();
+        if status.dwCurrentState != SERVICE_STOP_PENDING {
             let result = ControlService(svc, SERVICE_CONTROL_STOP, &mut svc_status);
-            let _ = CloseServiceHandle(svc);
-            let _ = CloseServiceHandle(scm);
-
             if let Err(e) = result {
+                let _ = CloseServiceHandle(svc);
+                let _ = CloseServiceHandle(scm);
                 return Err(format!("Failed to stop service: {e}"));
             }
         }
-    }
 
-    // 等待停止
-    let deadline = Instant::now() + timeout;
-    loop {
-        let status = get_status_raw(service_name)?;
-        if status.dwCurrentState == SERVICE_STOPPED {
-            return Ok(());
+        // 等待停止（复用 svc 句柄轮询）
+        let deadline = Instant::now() + timeout;
+        loop {
+            let ok = QueryServiceStatus(svc, &mut svc_status).is_ok();
+            if ok && svc_status.dwCurrentState == SERVICE_STOPPED {
+                let _ = CloseServiceHandle(svc);
+                let _ = CloseServiceHandle(scm);
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                let _ = CloseServiceHandle(svc);
+                let _ = CloseServiceHandle(scm);
+                return Err("Timeout waiting for service to stop".into());
+            }
+            thread::sleep(Duration::from_millis(200));
         }
-        if Instant::now() > deadline {
-            return Err("Timeout waiting for service to stop".into());
-        }
-        thread::sleep(Duration::from_millis(200));
     }
 }
+
+/// 重启间隔常量: 停止到启动之间留出的 SCM 状态稳定窗口（毫秒）
+const RESTART_GAP_MS: u64 = 2000;
 
 pub(crate) fn restart_service(
     service_name: &str,
@@ -3268,7 +3679,7 @@ pub(crate) fn restart_service(
     start_timeout: Duration,
 ) -> Result<(), String> {
     stop_service(service_name, stop_timeout)?;
-    thread::sleep(Duration::from_secs(2));
+    thread::sleep(Duration::from_millis(RESTART_GAP_MS));
     start_service(service_name, start_timeout)
 }
 
@@ -3290,7 +3701,8 @@ pub(crate) fn get_status(service_name: &str) -> Result<String, String> {
 pub(crate) fn query_service_details(service_name: &str) -> Result<Vec<(String, String)>, String> {
     unsafe {
         let name_wide = to_wide(service_name);
-        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
+        // 只读查询用 CONNECT 最小权限打开 SCM（与 get_status_raw 同款，免管理员）
+        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
             .map_err(|e| format!("{}: {e}", "Failed to open service control manager"))?;
         let svc = OpenServiceW(
             scm,
@@ -3303,9 +3715,17 @@ pub(crate) fn query_service_details(service_name: &str) -> Result<Vec<(String, S
         })?;
         let result = (|| -> Result<Vec<(String, String)>, String> {
             let mut details = Vec::new();
-            // QueryServiceConfigW: 启动类型 + 运行账户（两次调用: 先取所需大小再填充）
+            // QueryServiceConfigW: 启动类型 + 运行账户（两次调用: 先取所需大小再填充）。
+            // 第一次调用传空缓冲必然返回 ERROR_INSUFFICIENT_BUFFER(122)——windows crate 映射为 Err，
+            // 这是"查大小"的标准模式，必须容忍该错误码（needed 会返回实际所需大小）
             let mut needed = 0u32;
-            if QueryServiceConfigW(svc, None, 0, &mut needed).is_err() || needed == 0 {
+            let size_call = QueryServiceConfigW(svc, None, 0, &mut needed);
+            let size_ok = match size_call {
+                Ok(_) => true,
+                Err(e) if e.code().0 as u32 & 0xFFFF == 122 => true, // ERROR_INSUFFICIENT_BUFFER
+                Err(_) => false,
+            };
+            if !size_ok || needed == 0 {
                 return Err("Failed to query service config".into());
             }
             let mut buf = vec![0u8; needed as usize];
@@ -3425,7 +3845,8 @@ fn wcs_len(ptr: PWSTR) -> usize {
 fn get_status_raw(service_name: &str) -> Result<SERVICE_STATUS, String> {
     unsafe {
         let name_wide = to_wide(service_name);
-        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
+        // 只读查询用 CONNECT 最小权限打开 SCM: 状态/详情查询免管理员（写操作路径仍 ALL_ACCESS）
+        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
             .map_err(|e| format!("{}: {e}", "Failed to open service control manager"))?;
         let svc = OpenServiceW(
             scm,
@@ -3863,7 +4284,8 @@ pub(crate) fn dpapi_encrypt(plain: &str) -> Option<String> {
     }
 }
 
-/// DPAPI 解密: 仅处理 enc:OSMIUM1: 前缀的值；明文/旧格式/解密失败原样返回（兼容 inplace 手写配置）
+/// DPAPI 解密: 仅处理 enc:OSMIUM1: 前缀的值；明文/旧格式/解密失败原样返回（兼容 inplace 手写配置）。
+/// 带前缀但解密失败（配置跨机迁移/密文损坏）时明确告警——密文被当明文使用是难排查的隐性故障
 pub(crate) fn dpapi_decrypt(value: &str) -> String {
     let Some(rest) = value.strip_prefix(DPAPI_ENC_PREFIX) else {
         return value.to_string();
@@ -3872,7 +4294,17 @@ pub(crate) fn dpapi_decrypt(value: &str) -> String {
     use windows::Win32::Security::Cryptography::{
         CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptUnprotectData,
     };
+    let warn = |why: &str| {
+        eprintln!(
+            "{}",
+            red(&f(
+                "Warning: DPAPI decrypt failed ({0}) — encrypted value is used as-is. The config was likely moved from another machine or the ciphertext is corrupted.",
+                &[why]
+            ))
+        );
+    };
     let Ok(cipher) = base64::engine::general_purpose::STANDARD.decode(rest) else {
+        warn("invalid base64");
         return value.to_string();
     };
     let in_blob = CRYPT_INTEGER_BLOB {
@@ -3892,6 +4324,7 @@ pub(crate) fn dpapi_decrypt(value: &str) -> String {
         )
         .is_err()
         {
+            warn("CryptUnprotectData failed");
             return value.to_string();
         }
         if out_blob.pbData.is_null() {

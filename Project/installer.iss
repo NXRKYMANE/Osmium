@@ -2,7 +2,7 @@
 ; 服务刷新程序注册与卸载 / PATH 注册 / 可选扩展组件
 
 #define MyAppName "Osmium"
-#define MyAppVersion "26.11.0"
+#define MyAppVersion "26.12.0"
 #define KitsVersion "2.1.0"
 #define MyAppPublisher "Copyright (C) 2026 NXRKYMANE SOFTWARE"
 #define MyAppURL "https://github.com/NXRKYMANE/Osmium"
@@ -78,6 +78,8 @@ english.NoOutput=(no output captured; exit code %1)
 chinesesimp.NoOutput=（未捕获到输出；退出码 %1）
 english.InstallCancelled=Installation cancelled.
 chinesesimp.InstallCancelled=安装已取消。
+english.HostedServicesWarning=The following service(s) are hosted by Osmium and will stop working after uninstall:%n%n%1%n%nContinue with uninstall?
+chinesesimp.HostedServicesWarning=以下服务由 Osmium 共享宿主托管，卸载后将无法启动：%n%n%1%n%n确定继续卸载？
 ; .osiml 文件类型描述统一英文（所有语言均回退到该默认值）
 OsimlDescription=Osmium service configuration file
 ; .osx 插件文件类型描述统一英文（所有语言均回退到该默认值）
@@ -492,7 +494,7 @@ end;
 // 停止所有引用 os.exe 的服务并等待其退出（避免覆盖运行中的文件）
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  OldVer, OldUninst, SvcList: String;
+  OldVer, OldUninst, SvcList, ExePathFile: String;
   ResultCode: Integer;
 begin
   Result := '';
@@ -515,13 +517,20 @@ begin
     end;
   end;
 
-  // 3. 停止所有引用 os.exe 的服务（共享宿主/刷新程序运行时占用 os.exe，文件无法覆盖替换），
+  // 3. 停止所有以本产品 os.exe 为宿主的服务（共享宿主/刷新程序运行时占用文件无法覆盖），
   // 并把服务名记录到临时文件，安装完成后由 ssPostInstall 重新启动。
+  // 判定方式: ImagePath 的 exe 段剥离引号/参数后与本体路径精确相等（大小写不敏感）——
+  // 旧实现的 'os\.exe' 子串匹配会误伤第三方同名结尾服务（如 VideoOS.exe）。
   // WMI StopService() 异步触发：所有服务并行停止（不等单个服务走完优雅流程），
   // 随后轮询等待全部进入 Stopped（总超时 3 分钟，覆盖 poststop 钩子/停止超时），失败容忍
   SvcList := ExpandConstant('{tmp}\osmium-svc-list.txt');
+  // 本体 exe 路径写入临时文件供 PS 读取比对（避免路径拼入命令行的转义问题）
+  ExePathFile := ExpandConstant('{tmp}\osmium-exe-path.txt');
+  SaveStringToFile(ExePathFile, ExpandConstant('{app}\os.exe'), True);
   AddLog('Stopping services that use os.exe...');
-  Exec('powershell.exe', '-NoProfile -NonInteractive -Command "$svcs = Get-WmiObject Win32_Service | Where-Object { $_.PathName -match ''os\.exe'' }; $svcs.Name | Set-Content ''' + SvcList + '''; $svcs | ForEach-Object { $_.StopService() } | Out-Null; $deadline = (Get-Date).AddMinutes(3); do { $running = Get-WmiObject Win32_Service | Where-Object { $svcs.Name -contains $_.Name -and $_.State -ne ''Stopped'' }; if (-not $running) { break }; Start-Sleep -Seconds 2 } while ((Get-Date) -lt $deadline)"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Get-CimInstance 替代已弃用的 Get-WmiObject（WMI 损坏/精简系统下后者不可用）；
+  // CIM 实例方法须经 Invoke-CimMethod 调用（StopService/StartService）
+  Exec('powershell.exe', '-NoProfile -NonInteractive -Command "$p = (Get-Content -LiteralPath ''' + ExePathFile + ''' -Raw).Trim(); $svcs = @(Get-CimInstance Win32_Service | Where-Object { $pn = [string]$_.PathName; if ($pn) { $n = $pn.Trim(); if ($n.StartsWith([string][char]34)) { $q = $n.IndexOf([char]34, 1); if ($q -gt 0) { $n = $n.Substring(1, $q - 1) } } elseif ($n.Contains('' '')) { $n = $n.Split('' '')[0] }; $n.Trim() -eq $p } }; $svcs.Name | Set-Content ''' + SvcList + '''; $svcs | ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName StopService } | Out-Null; $deadline = (Get-Date).AddMinutes(3); do { $running = @(Get-CimInstance Win32_Service | Where-Object { $svcs.Name -contains $_.Name -and $_.State -ne ''Stopped'' }); if (-not $running) { break }; Start-Sleep -Seconds 2 } while ((Get-Date) -lt $deadline)"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   // 4. 等待旧 os.exe 完全退出（最长 30 秒），避免覆盖运行中的 exe
   AddLog('Waiting for os.exe to exit...');
@@ -576,16 +585,52 @@ begin
     if FileExists(SvcList) then
     begin
       AddLog('Restarting previously stopped services...');
-      Exec('powershell.exe', '-NoProfile -NonInteractive -Command "if (Test-Path ''' + SvcList + ''') { Get-Content ''' + SvcList + ''' | Where-Object { $_.Trim() -ne '''' } | ForEach-Object { $n = $_.Trim(); $s = Get-WmiObject Win32_Service | Where-Object { $_.Name -eq $n }; if ($s) { $s.StartService() | Out-Null } } }"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Exec('powershell.exe', '-NoProfile -NonInteractive -Command "if (Test-Path ''' + SvcList + ''') { Get-Content ''' + SvcList + ''' | Where-Object { $_.Trim() -ne '''' } | ForEach-Object { $n = $_.Trim(); $s = Get-CimInstance Win32_Service | Where-Object { $_.Name -eq $n }; if ($s) { Invoke-CimMethod -InputObject $s -MethodName StartService | Out-Null } } }"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end;
   end
   else if CurStep = ssDone then
     AddLog('Installation complete.');
 end;
 
+// ── 卸载确认: 列出仍以本产品 os.exe 为宿主的服务（共享宿主部署），
+// 卸载后这些服务将无法启动——经用户确认才继续（只读枚举，不触碰服务状态）──
+function ConfirmUninstallWithServices: Boolean;
+var
+  ExeFile, PathFile, ListFile, Names, Msg: String;
+  Lines: TArrayOfString;
+  Output: TExecOutput;
+  ResultCode, I: Integer;
+begin
+  Result := True;
+  ExeFile := ExpandConstant('{app}\os.exe');
+  PathFile := ExpandConstant('{tmp}\osmium-exe-path.txt');
+  ListFile := ExpandConstant('{tmp}\osmium-svc-hosted.txt');
+  SaveStringToFile(PathFile, ExeFile, False);
+  DeleteFile(ListFile);
+  ExecAndCaptureOutput('powershell.exe', '-NoProfile -NonInteractive -Command "$p = (Get-Content -LiteralPath ''' + PathFile + ''' -Raw).Trim(); $names = @(Get-CimInstance Win32_Service | Where-Object { $pn = [string]$_.PathName; if ($pn) { $n = $pn.Trim(); if ($n.StartsWith([string][char]34)) { $q = $n.IndexOf([char]34, 1); if ($q -gt 0) { $n = $n.Substring(1, $q - 1) } } elseif ($n.Contains('' '')) { $n = $n.Split('' '')[0] }; $n.Trim() -eq $p } }); $names.Name | Set-Content ''' + ListFile + '''"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode, Output);
+  if FileExists(ListFile) and LoadStringsFromFile(ListFile, Lines) then
+  begin
+    Names := '';
+    for I := 0 to GetArrayLength(Lines) - 1 do
+      if Trim(Lines[I]) <> '' then
+        Names := Names + Lines[I] + #13#10;
+    if Names <> '' then
+    begin
+      Msg := FmtMessage(CustomMessage('HostedServicesWarning'), [Names]);
+      Result := (MsgBox(Msg, mbConfirmation, MB_YESNO) = IDYES);
+    end;
+  end;
+end;
+
 // ── 卸载：移除服务刷新程序；失败弹「终止 / 重试 / 忽略」──
 function InitializeUninstall: Boolean;
 begin
+  // 共享宿主托管的服务确认（用户拒绝则中止卸载）
+  if not ConfirmUninstallWithServices() then
+  begin
+    Result := False;
+    Exit;
+  end;
   Result := True;
 
   // 移除服务刷新程序（失败弹窗；Abort → 终止卸载，Ignore → 继续）

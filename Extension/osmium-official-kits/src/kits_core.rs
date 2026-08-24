@@ -17,11 +17,13 @@ use windows::Win32::Security::Credentials::SecHandle;
 use windows::core::PCWSTR;
 
 /// 构造下载 Agent（全局超时覆盖整个下载；4xx/5xx 不转错误，
-/// 401/200 均需读取原始响应）
+/// 401/200 均需读取原始响应）。max_redirects=0: 重定向由 sspi 流程手动跟随——
+/// 自动跟随会把 Negotiate/NTLM 令牌发给重定向目标（凭据中继面），与宿主下载器策略对齐
 fn build_agent(timeout_secs: u64, proxy: Option<&str>) -> ureq::Agent {
     let mut builder = ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(timeout_secs)));
+        .timeout_global(Some(Duration::from_secs(timeout_secs)))
+        .max_redirects(0);
     if let Some(proxy_url) = proxy
         && let Ok(p) = ureq::Proxy::new(proxy_url)
     {
@@ -31,7 +33,8 @@ fn build_agent(timeout_secs: u64, proxy: Option<&str>) -> ureq::Agent {
 }
 
 /// 执行一次带 SSPI 认证的完整下载（URL → 目标文件）: 401 挑战-响应循环（最多 3 轮），
-/// 凭据缺省用当前进程身份；目标文件以 .download.tmp 原子写入（CreateNew 防 TOCTOU）后改名
+/// 重定向手动跟随（拒绝 https→http 降级，跨源重新协商）；凭据缺省用当前进程身份；
+/// 目标文件以 .download.tmp 原子写入（CreateNew 防 TOCTOU）后改名，截断响应按失败处理
 pub fn sspi_download_to_file(
     url: &str,
     to: &str,
@@ -59,12 +62,6 @@ pub fn sspi_download_to_file(
             create().map_err(|e| format!("cannot create temporary file '{0}': {e}", tmp))?
         }
     };
-
-    // SPN: HTTP/<host>，非默认端口拼 :port（Kerberos 匹配服务注册名）
-    let uri = url::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
-    let host = uri.host_str().unwrap_or("localhost").to_string();
-    let spn = sspi_spn(&host, uri.scheme(), uri.port());
-    let spn_wide = to_wide(&spn);
 
     // 凭据: 缺省用当前会话；提供 user/pass 时构造身份结构（DOMAIN\User 或 user）。
     // 身份缓冲（宽字符串 + 结构）必须存活到 AcquireCredentialsHandleW 调用结束，故在闭包内构造
@@ -117,30 +114,86 @@ pub fn sspi_download_to_file(
     // 句柄守卫: 所有退出路径（成功/报错/? 提前返回）自动释放凭据句柄与最终安全上下文
     let mut guard = SspiGuard { cred, ctx: None };
 
-    // 挑战-响应循环: 无头 → 401+challenge → 送 token → 200 读 body
+    // 当前请求 URL（重定向手动跟随会更新）；token 为上一轮 ISC 输出（跨源时作废）
+    let mut current = url.to_string();
     let mut token: Option<Vec<u8>> = None;
-    for _ in 0..3 {
-        let mut req = client.get(url);
+    let mut challenges = 0u32;
+    for _ in 0..12 {
+        let uri = url::Url::parse(&current).map_err(|e| format!("invalid URL: {e}"))?;
+        let host = uri.host_str().unwrap_or("localhost").to_string();
+        // SPN 按当前源计算（重定向换主机后须匹配新源的注册名）
+        let spn = sspi_spn(&host, uri.scheme(), uri.port());
+        let spn_wide = to_wide(&spn);
+
+        let mut req = client.get(&current);
         if let Some(t) = &token {
             let b64 = base64::engine::general_purpose::STANDARD.encode(t);
             req = req.header("authorization", format!("Negotiate {b64}"));
         }
         let resp = req
             .call()
-            .map_err(|e| format!("request failed for {url}: {e}"))?;
+            .map_err(|e| format!("request failed for {current}: {e}"))?;
+        // 手动跟随重定向（max_redirects=0 时 3xx 原样返回）: 拒绝 https→http 降级；
+        // 跨源后旧协商上下文/令牌作废，对新源从零开始挑战（令牌不带给第三方）
+        if (300..400).contains(&resp.status().as_u16()) {
+            let status = resp.status().as_u16();
+            let loc = resp
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+                .ok_or_else(|| format!("redirect without Location header (HTTP {status})"))?;
+            let next = resolve_redirect_url(&current, &loc);
+            if current.starts_with("https://") && next.starts_with("http://") {
+                return Err(format!("insecure redirect refused: {current} -> {next}"));
+            }
+            let _ = std::io::copy(&mut resp.into_body().into_reader(), &mut std::io::sink());
+            if let Some(old) = guard.ctx.take() {
+                unsafe {
+                    let _ = DeleteSecurityContext(&old);
+                }
+            }
+            token = None;
+            current = next;
+            continue;
+        }
         if resp.status().is_success() {
+            let expected_len = resp
+                .headers()
+                .get("content-length")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
             let mut reader = resp.into_body().into_reader();
-            std::io::copy(&mut reader, &mut file)
-                .map_err(|e| format!("failed to write '{to}': {e}"))?;
+            let copied = match std::io::copy(&mut reader, &mut file) {
+                Ok(n) => n,
+                // 对端提前断开（Peer disconnected 等）: 同属截断失败，清理残留 tmp
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(format!("failed to write '{to}': {e}"));
+                }
+            };
+            // 截断对照: 连接干净关闭的短响应按失败处理（无 sha 配置时防静默损坏被执行）
+            if let Some(expect) = expected_len
+                && copied != expect
+            {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(format!(
+                    "truncated download: got {copied} of {expect} bytes"
+                ));
+            }
             drop(file);
             std::fs::rename(&tmp, to).map_err(|e| format!("rename failed for '{to}': {e}"))?;
             return Ok(());
         }
         if resp.status().as_u16() != 401 {
             return Err(format!(
-                "server returned HTTP {} for {url}",
+                "server returned HTTP {} for {current}",
                 resp.status().as_u16()
             ));
+        }
+        challenges += 1;
+        if challenges > 3 {
+            return Err("authentication exceeded 3 challenge rounds — server likely rejected the credentials or the negotiation is unsupported".into());
         }
         // 401: 取 WWW-Authenticate: Negotiate/NTLM [challenge]
         let challenge = resp
@@ -243,7 +296,16 @@ pub fn sspi_download_to_file(
         }
         token = out_token;
     }
-    Err("authentication exceeded 3 challenge rounds — server likely rejected the credentials or the negotiation is unsupported".into())
+    Err("download failed: too many redirects or unresolved authentication".into())
+}
+
+/// 解析重定向 Location（相对/绝对，RFC 3986 join）；解析失败原样返回
+fn resolve_redirect_url(current: &str, location: &str) -> String {
+    url::Url::parse(current)
+        .ok()
+        .and_then(|base| base.join(location).ok())
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| location.to_string())
 }
 
 /// SSPI 句柄守卫: 退出时统一释放凭据句柄与安全上下文，
@@ -483,7 +545,17 @@ pub fn notify_webhook(
     timeout_secs: u64,
     proxy: Option<&str>,
 ) -> Result<(), String> {
-    let agent = build_agent(timeout_secs, proxy);
+    // notify 无凭据（凭据在 payload 里），允许跟随重定向——build_agent 的 max_redirects=0
+    // 是给 sspi 的（防 Negotiate/NTLM 令牌中继），此处单独构建可跟随的 agent
+    let mut builder = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(timeout_secs.max(1))));
+    if let Some(proxy_url) = proxy
+        && let Ok(p) = ureq::Proxy::new(proxy_url)
+    {
+        builder = builder.proxy(Some(p));
+    }
+    let agent = ureq::Agent::new_with_config(builder.build());
     let resp = agent
         .post(url)
         .header("content-type", "application/json")
@@ -530,6 +602,9 @@ fn redact_webhook_url(url: &str) -> String {
         Ok(mut u) => {
             let _ = u.set_username("");
             let _ = u.set_password(None);
+            // query/fragment 常带 token/signature 等凭据，与宿主 redact_url 口径对齐一并剥离
+            u.set_query(None);
+            u.set_fragment(None);
             u.to_string()
         }
         Err(_) => url.to_string(),
@@ -580,7 +655,9 @@ pub fn probe_target(
             }
         }
         "mysql" => {
-            // MySQL 客户端握手: 服务器首先发握手包（0x0a 协议版本 或 0xff 错误包）
+            // MySQL 客户端握手: 初始握书包为 [3 字节长度][1 字节序号][payload]，
+            // payload 首字节（buf[4]）是协议版本（0x0a）或错误包标志（0xff）；
+            // 数据不足 5 字节时按无包头流处理（兼容个别代理），检查 buf[0]
             let mut buf = [0u8; 128];
             let n = stream
                 .read(&mut buf)
@@ -588,13 +665,14 @@ pub fn probe_target(
             if n == 0 {
                 return Err("probe: mysql closed connection".into());
             }
-            let first = buf[0];
+            let first = if n >= 5 { buf[4] } else { buf[0] };
             if first == 0x0a || first == 0x00 {
                 Ok(()) // 协议版本 10 握手包 / 0x00 也视为握手开始
             } else if first == 0xff {
+                let msg_at = if n >= 5 { 5 } else { 1 };
                 Err(format!(
                     "probe: mysql server error: {}",
-                    String::from_utf8_lossy(&buf[1..n]).trim()
+                    String::from_utf8_lossy(&buf[msg_at..n]).trim()
                 ))
             } else {
                 Err(format!(
@@ -799,7 +877,21 @@ pub fn send_syslog_udp(
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds
     );
     let hostname = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "localhost".into());
-    let msg = message.replace('\n', " ");
+    // hostname 清洗: 空格/CR/LF 会破坏 RFC5424 帧的 HOSTNAME 字段（罕见但需防）
+    let hostname: String = hostname
+        .chars()
+        .map(|c| {
+            if c.is_whitespace() || c == '\r' || c == '\n' {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    // TAG 清洗: CR/LF/空格会破坏 RFC5424 帧结构（与 smtp 地址清洗同源的注入防护）
+    let tag = tag.replace(['\r', '\n', ' '], "-");
+    // MSG 清洗: 同样滤掉 CR（\r 可单独注入帧分段，smtp 同源修复已做，此处补上）
+    let msg = message.replace(['\r', '\n'], " ");
     let frame = format!("<{pri}>1 {ts} {hostname} {tag} - - - {msg}");
     let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("syslog: bind failed: {e}"))?;
     let _ = socket.set_write_timeout(Some(Duration::from_secs(timeout_secs.max(2))));

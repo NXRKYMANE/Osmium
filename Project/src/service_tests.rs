@@ -36,7 +36,7 @@ use crate::service_host::{
     process_env_var, process_working_set_mb, redact_url, reset_auto_roll_state, reset_current_logs,
     resolve_download_target, roll_by_time_if_due, roll_if_needed, roll_logs_to_old, run_hook,
     run_stop_command, runaway_cleanup_pid_file, runaway_exceeded, set_process_priority,
-    warn_if_insecure_download, write_log_entry, zip_backup_file,
+    warn_if_insecure_download, write_log_entry, write_metrics_file, zip_backup_file,
 };
 
 /// 本地 HTTP 测试服务器: handler 接收 (方法, 请求行列表)，返回 (状态行, 头部, 响应体)；
@@ -424,9 +424,10 @@ fn build_dependency_string_multi_sz() {
         build_dependency_string(Some("EventLog, WinRM")),
         Some("EventLog\0WinRM\0\0".to_string())
     );
+    // 冒号不再作分隔符: SCM 服务名可含冒号，按名保留（旧实现会错拆为两个依赖）
     assert_eq!(
         build_dependency_string(Some("A:B")),
-        Some("A\0B\0\0".to_string())
+        Some("A:B\0\0".to_string())
     );
     assert_eq!(build_dependency_string(None), None);
     assert_eq!(build_dependency_string(Some("")), None);
@@ -867,6 +868,45 @@ fn sddl_parse_ignores_inherit_only_creator_owner_ace() {
 }
 
 #[test]
+fn sddl_parse_handles_combined_generic_right_tokens() {
+    // 回归: 组合字母令牌（GRGW 等）此前被精确等值匹配漏判——低权限用户实际可写的
+    // 目录会被误判为安全放行安装；子串扫描后必须正确识别
+    assert!(sddl_dacl_grants_non_admin_write("D:PAI(A;;GRGW;;;BU)"));
+    assert!(sddl_dacl_grants_non_admin_write("D:PAI(A;;FRFW;;;IU)"));
+    // 只读+执行组合（GRGX）不含任何写令牌，必须保持不可写判定
+    assert!(!sddl_dacl_grants_non_admin_write("D:PAI(A;;GRGX;;;BU)"));
+    // 十六进制的 GENERIC_WRITE / GENERIC_ALL 同样隐含写能力
+    assert!(sddl_dacl_grants_non_admin_write("D:P(A;;0x40000000;;;WD)"));
+    assert!(sddl_dacl_grants_non_admin_write("D:P(A;;0x10000000;;;AU)"));
+    // 十六进制前缀/位字母大小写混排均须识别（手写 SDDL 可能写 0X 与大写位字母）
+    assert!(sddl_dacl_grants_non_admin_write("D:P(A;;0X1301BF;;;WD)"));
+    assert!(!sddl_dacl_grants_non_admin_write("D:P(A;;0X1200A9;;;BU)"));
+    // 大小写混写不漏判（SDDL 规范为大写，手写配置可能混排）
+    assert!(sddl_dacl_grants_non_admin_write("D:PAI(A;;gwgw;;;BU)"));
+    // 仅"创建子目录/删除子项/DELETE"的目录写权限（Windows 实测位值）必须判可写:
+    // LC=0x4(FILE_ADD_SUBDIRECTORY), DT=0x40(FILE_DELETE_CHILD), SD=0x10000(DELETE)
+    assert!(sddl_dacl_grants_non_admin_write("D:P(A;;LC;;;BU)"));
+    assert!(sddl_dacl_grants_non_admin_write("D:P(A;;DT;;;BU)"));
+    assert!(sddl_dacl_grants_non_admin_write("D:P(A;;SD;;;BU)"));
+    // 组合: DCLC=0x6（创建文件+创建子目录，无修改/删除）同样判可写（上传目录场景）
+    assert!(sddl_dacl_grants_non_admin_write("D:P(A;;DCLC;;;BU)"));
+    // 同步+执行位（0x100020 = SYNCHRONIZE|FILE_EXECUTE）不含任何写能力 → 必须判不可写
+    assert!(!sddl_dacl_grants_non_admin_write("D:P(A;;0x100020;;;BU)"));
+}
+
+#[test]
+fn sddl_parse_flags_admin_denied_ace_as_untrusted() {
+    // 锁定 Deny ACE 语义: 管理员被显式拒绝全控视为异常配置（判不可信=拒绝安装）；
+    // 非管理员被拒绝不影响整体判定（剩余仅管理员允许时仍为安全）
+    assert!(sddl_dacl_grants_non_admin_write(
+        "D:PAI(D;;FA;;;BA)(A;;FR;;;WD)"
+    ));
+    assert!(!sddl_dacl_grants_non_admin_write(
+        "D:PAI(D;;FW;;;BU)(A;;FA;;;SY)"
+    ));
+}
+
+#[test]
 fn sddl_parse_owner_rules() {
     assert!(sddl_owner_is_administrative("O:BA"));
     assert!(sddl_owner_is_administrative("O:SY"));
@@ -1218,6 +1258,39 @@ fn safe_delete_dir_removes_tree_without_following_links() {
     assert!(delete_dir_tree(&dir));
     assert!(!dir.exists());
     safe_delete_dir(&dir); // 不存在: 不 panic
+}
+
+#[test]
+fn delete_dir_tree_refuses_junction_root() {
+    // S1 回归: 根路径自身是 junction 时必须拒绝递归删除（防诱导 SYSTEM 刷新器删 junction 目标内容）——
+    // 子项 file_type 检查拦不住根是 junction 的场景（read_dir 枚举的是目标内容）
+    let target = unique_temp_dir("jt-target");
+    std::fs::create_dir_all(target.join("keep")).unwrap();
+    std::fs::write(target.join("keep/secret.txt"), "x").unwrap();
+    let link = unique_temp_dir("jt-link");
+    // 用 cmd mklink /J 创建 junction（无需管理员）
+    let ok = std::process::Command::new("cmd.exe")
+        .args([
+            "/c",
+            "mklink",
+            "/J",
+            &link.to_string_lossy(),
+            &target.to_string_lossy(),
+        ])
+        .creation_flags(0x08000000)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if ok {
+        // 删除 junction 根: 不得递归进入目标删除其内容（链接本体移除与否均可，目标内容必须保留）
+        let _ = delete_dir_tree(&link);
+        assert!(
+            target.join("keep/secret.txt").exists(),
+            "junction 目标内容不应被删除"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&target);
+    let _ = std::fs::remove_dir_all(&link);
 }
 
 #[test]
@@ -1655,6 +1728,191 @@ fn download_core_chunk_failure_falls_back_to_single() {
     stop.store(true, Ordering::Relaxed);
     assert_eq!(std::fs::read(&tmp).unwrap(), data, "回退后数据必须完整一致");
     let _ = std::fs::remove_file(&tmp);
+}
+
+// ==================== 下载断点复用防跨源污染 / 指标落盘（prometheus 重写 + json 滚动） ====================
+
+#[test]
+fn download_resume_discards_stale_tmp_from_other_resource() {
+    // 回归: 复用断点前必须校验 tmp 与远端长度一致——更换下载源后旧 URL 的残留 tmp
+    // 若按块跳过会把新旧数据混合（无 sha 配置时静默损坏并被执行）
+    let data: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let d2 = data.clone();
+    let (addr, stop, _count) = spawn_http_server(move |method, lines| {
+        let common = vec![
+            ("Content-Length".into(), d2.len().to_string()),
+            ("Accept-Ranges".into(), "bytes".into()),
+        ];
+        if method == "HEAD" {
+            return ("200 OK".to_string(), common, vec![]);
+        }
+        // GET: 解析 Range: bytes=a-b，命中则回 206 区间（分块并行下载依赖）
+        let ranged = lines
+            .iter()
+            .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+            .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))
+            .and_then(|v| v.strip_prefix("bytes=").map(|s| s.to_string()))
+            .and_then(|spec| {
+                spec.split_once('-')
+                    .map(|(a, b)| (a.to_string(), b.to_string()))
+            })
+            .and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?)))
+            .filter(|(_, e)| *e < d2.len());
+        if let Some((s, e)) = ranged {
+            let mut h = vec![
+                ("Content-Length".into(), (e - s + 1).to_string()),
+                (
+                    "Content-Range".into(),
+                    format!("bytes {}-{}/{}", s, e, d2.len()),
+                ),
+            ];
+            h.extend(common);
+            return ("206 Partial Content".to_string(), h, d2[s..=e].to_vec());
+        }
+        ("200 OK".to_string(), common, d2.clone())
+    });
+    let dir = unique_temp_dir("tmp");
+    let tmp = dir.join("stale-resume.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    // 伪造"旧资源残留断点": 长度与远端不一致的全非零内容（旧实现会按块跳过造成混合）
+    std::fs::write(&tmp, vec![7u8; 512 * 1024]).unwrap();
+    let url = format!("http://{}:{}/big.bin", addr.ip(), addr.port());
+    download_core(
+        &url,
+        tmp.to_str().unwrap(),
+        60,
+        DownloadAuth::None,
+        None,
+        8,
+        None,
+        0,
+    )
+    .unwrap();
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(
+        std::fs::read(&tmp).unwrap(),
+        data,
+        "长度不符的陈旧断点必须清零重下，不得残留旧资源数据"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn download_resume_keeps_valid_partial_tmp() {
+    // 回归（防修复过度）: 长度与远端一致的合法断点必须按块跳过续传——
+    // 预填完整的第 0 块，服务器只应收到第 1 块的 Range 请求，最终内容完整
+    let second: Vec<u8> = (0..1024 * 1024).map(|i| (i % 251 + 1) as u8).collect();
+    let first = vec![0xA5u8; 1024 * 1024]; // 全非零 → chunk_already_done 判定已完成
+    let mut data = first.clone();
+    data.extend_from_slice(&second);
+    let d2 = data.clone();
+    let range_hits = Arc::new(AtomicUsize::new(0));
+    let rh = range_hits.clone();
+    let (addr, stop, _count) = spawn_http_server(move |method, lines| {
+        let common = vec![
+            ("Content-Length".into(), d2.len().to_string()),
+            ("Accept-Ranges".into(), "bytes".into()),
+        ];
+        if method == "HEAD" {
+            return ("200 OK".to_string(), common, vec![]);
+        }
+        let ranged = lines
+            .iter()
+            .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+            .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))
+            .and_then(|v| v.strip_prefix("bytes=").map(|s| s.to_string()))
+            .and_then(|spec| {
+                spec.split_once('-')
+                    .map(|(a, b)| (a.to_string(), b.to_string()))
+            })
+            .and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?)))
+            .filter(|(_, e)| *e < d2.len());
+        if let Some((s, e)) = ranged {
+            rh.fetch_add(1, Ordering::Relaxed);
+            let mut h = vec![
+                ("Content-Length".into(), (e - s + 1).to_string()),
+                (
+                    "Content-Range".into(),
+                    format!("bytes {}-{}/{}", s, e, d2.len()),
+                ),
+            ];
+            h.extend(common);
+            return ("206 Partial Content".to_string(), h, d2[s..=e].to_vec());
+        }
+        ("200 OK".to_string(), common, d2.clone())
+    });
+    let dir = unique_temp_dir("tmp");
+    let tmp = dir.join("valid-resume.tmp");
+    let url = format!("http://{}:{}/resume.bin", addr.ip(), addr.port());
+    // 合法断点: 与远端等长、第 0 块完整写入（全非零）、第 1 块全零待续传；
+    // 同时预填 .resume 归属标记（模拟上次同 URL 下载中断的残留——无标记的 tmp 视为旧源残留会清零）
+    std::fs::write(&tmp, &first).unwrap();
+    // 标记内容与实现一致: 完整 URL 的 SHA-256 + 长度（哈希判归属，防换源误复用且不落明文凭据）
+    use sha2::{Digest, Sha256};
+    let mut mh = Sha256::new();
+    mh.update(url.as_bytes());
+    let url_hash: String = mh.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::write(
+        dir.join("valid-resume.tmp.resume"),
+        format!("{url_hash}\n{}", data.len()),
+    )
+    .unwrap();
+    download_core(
+        &url,
+        tmp.to_str().unwrap(),
+        60,
+        DownloadAuth::None,
+        None,
+        4,
+        None,
+        0,
+    )
+    .unwrap();
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(
+        range_hits.load(Ordering::Relaxed),
+        1,
+        "已完成的第 0 块必须被跳过，只下载第 1 块"
+    );
+    assert_eq!(
+        std::fs::read(&tmp).unwrap(),
+        data,
+        "合法断点续传后内容必须完整且保留已下载部分"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn metrics_file_prometheus_rewrites_and_json_rotates() {
+    let dir = unique_temp_dir("metrics");
+    let path = dir.join("metrics.out");
+    let ps = path.to_str().unwrap();
+    // prometheus: # TYPE 行须全局唯一——重复写入必须是整文件重写而非追加，
+    // 否则 textfile 采集器解析失败
+    let prom_line = "# TYPE osmium_cpu_percent gauge\nosmium_cpu_percent{pid=\"1\"} 1.0";
+    write_metrics_file(ps, prom_line, true);
+    write_metrics_file(ps, prom_line, true);
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        content.matches("# TYPE").count(),
+        1,
+        "prometheus 重写不得累积重复 # TYPE 行"
+    );
+    // json: 超过滚动阈值把当前挪到 .1，新写入从空文件开始追加
+    let big = "x".repeat(crate::service_host::METRICS_ROTATE_BYTES as usize);
+    write_metrics_file(ps, &big, false);
+    write_metrics_file(ps, "{\"small\":1}", false);
+    let rolled = std::fs::read_to_string(dir.join("metrics.out.1")).unwrap();
+    assert!(rolled.contains(&big), "滚动文件保留触发滚动前的历史内容");
+    assert!(
+        !rolled.contains("{\"small\":1}"),
+        "滚动后的最新记录不得进入 .1"
+    );
+    let cur = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        cur.contains("{\"small\":1}") && !cur.contains(&big),
+        "滚动后新文件只含最新记录"
+    );
 }
 
 // ==================== 日志底层: 分流 / 转义 / 空目录 / 归档失败 / 滚动空操作 ====================
@@ -2389,6 +2647,7 @@ fn reboot_missing_plugin_reports_error() {
 fn discover_plugins_returns_osx_entries_only() {
     // 扫描环境: 插件目录（exe 同级）随运行环境而定——
     // 未安装插件时为空；若存在插件则逐项校验扩展名与目录跳过规则
+    crate::service_host::clear_plugin_cache();
     let plugins = crate::service_host::discover_plugins();
     for p in &plugins {
         assert_eq!(
@@ -3304,6 +3563,44 @@ fn zip_backup_file_uses_date_format() {
     assert!(zip_backup_file(&log, ""));
     assert!(dir.join("2026-08-11.log.zip").exists());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_backup_file_refuses_reparse_target() {
+    // S2 回归: 归档目标 {file}.zip 自身是 junction/symlink 时拒绝（防日志归档写穿到系统文件）
+    let target = unique_temp_dir("zipjt-target");
+    std::fs::create_dir_all(&target).unwrap();
+    let src_dir = unique_temp_dir("zipjt-src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    let src = src_dir.join("2026-08-11.log");
+    std::fs::write(&src, "data").unwrap();
+    // 归档目标 = src_dir\2026-08-11.log.zip → 把它做成指向 target 的 symlink
+    let zip_target = src_dir.join("2026-08-11.log.zip");
+    let ok = std::process::Command::new("cmd.exe")
+        .args([
+            "/c",
+            "mklink",
+            &zip_target.to_string_lossy(),
+            &target.to_string_lossy(),
+        ])
+        .creation_flags(0x08000000)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if ok {
+        assert!(
+            !zip_backup_file(&src, ""),
+            "zip 目标为 reparse point 时必须拒绝"
+        );
+        assert!(
+            std::fs::read_dir(&target)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true),
+            "归档不得写穿 symlink 到目标目录"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&target);
+    let _ = std::fs::remove_dir_all(&src_dir);
 }
 
 #[test]
@@ -4407,6 +4704,7 @@ fn validate_config_extended_prechecks() {
     let f4 = mk(
         "service_name = \"d\"\nservice_display_name = \"d\"\nservice_description = \"d\"\nservice_executable_path = 'C:\\Windows\\System32\\ping.exe'\nplugins = [{ kit = \"ping\", phase = \"start\" }]\n",
     );
+    crate::service_host::clear_plugin_cache();
     let plugins = crate::service_host::discover_plugins();
     if plugins.is_empty() {
         assert!(validate_config(&f4).is_err(), "引用插件但无插件可用应报错");
@@ -4541,4 +4839,489 @@ fn parse_osx_probe_spec_parses_kit_and_payload() {
     // 空 kit 拒绝
     assert!(crate::service_host::parse_osx_probe_spec("").is_none());
     assert!(crate::service_host::parse_osx_probe_spec("?a=1").is_none());
+}
+
+// ==================== 审计修复回归（percent_decode 边界 / 截断下载 / 跨源凭据 / quick 残留 / 启动类型预检） ====================
+
+#[test]
+fn parse_osx_probe_spec_truncated_escape_no_panic() {
+    // B1 回归: 以 "%X" 结尾的残缺转义不得越界 panic（旧边界 i+2<=len 允许 bytes[i+2] 越界）
+    let (kit, payload) = crate::service_host::parse_osx_probe_spec("probe?url=host%A").unwrap();
+    assert_eq!(kit, "probe");
+    assert_eq!(payload["url"], "host%A", "残缺转义应原样保留");
+    let (_, p2) = crate::service_host::parse_osx_probe_spec("probe?url=%").unwrap();
+    assert_eq!(p2["url"], "%");
+}
+
+#[test]
+fn download_core_truncated_body_fails_without_sha() {
+    // B8 回归: 响应体比 Content-Length 短（连接提前干净关闭）→ 必须报错，不得静默成功
+    let body = b"short".to_vec();
+    let b2 = body.clone();
+    let (addr, stop, _count) = spawn_http_server(move |_method, _lines| {
+        (
+            "200 OK".to_string(),
+            vec![("Content-Length".into(), "1048576".to_string())],
+            b2.clone(),
+        )
+    });
+    let url = format!("http://{}:{}", addr.ip(), addr.port());
+    let dir = unique_temp_dir("trunc");
+    let tmp = dir.join("f.bin");
+    let result = download_core(
+        &url,
+        tmp.to_str().unwrap(),
+        30,
+        DownloadAuth::None,
+        None,
+        0,
+        None,
+        0,
+    );
+    stop.store(true, Ordering::Relaxed);
+    assert!(result.is_err(), "截断响应必须失败");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn download_core_cross_origin_redirect_strips_basic_auth() {
+    // S1 回归: Basic 凭据仅同源发送——302 跳转到另一主机时 Authorization 不得跟随
+    let seen_auth = Arc::new(std::sync::Mutex::new(String::new()));
+    let seen = seen_auth.clone();
+    let data = b"final".to_vec();
+    let d2 = data.clone();
+    let (addr_b, stop_b, _cb) = spawn_http_server(move |method, lines| {
+        if method == "HEAD" {
+            return ("200 OK".to_string(), vec![], vec![]);
+        }
+        let auth = lines
+            .iter()
+            .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+            .cloned()
+            .unwrap_or_default();
+        *seen.lock().unwrap() = auth;
+        (
+            "200 OK".to_string(),
+            vec![("Content-Length".into(), d2.len().to_string())],
+            d2.clone(),
+        )
+    });
+    let loc = format!("http://{}:{}/file", addr_b.ip(), addr_b.port());
+    let (addr_a, stop_a, _ca) = spawn_http_server(move |_method, _lines| {
+        (
+            "302 Found".to_string(),
+            vec![("Location".into(), loc.clone())],
+            vec![],
+        )
+    });
+    let url = format!("http://{}:{}/start", addr_a.ip(), addr_a.port());
+    let dir = unique_temp_dir("redirauth");
+    let tmp = dir.join("f.bin");
+    let result = download_core(
+        &url,
+        tmp.to_str().unwrap(),
+        30,
+        DownloadAuth::Basic("user", "pass"),
+        None,
+        0,
+        None,
+        0,
+    );
+    stop_a.store(true, Ordering::Relaxed);
+    stop_b.store(true, Ordering::Relaxed);
+    result.unwrap();
+    assert_eq!(std::fs::read(&tmp).unwrap(), data);
+    let auth_seen = seen_auth.lock().unwrap();
+    assert!(
+        auth_seen.is_empty(),
+        "跨源重定向后不得携带 Authorization，实际: {auth_seen}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sweep_stale_quick_configs_removes_only_old_files() {
+    // B10 回归: 快速安装残留的临时配置按超期清理；新文件与不匹配名称保留
+    let dir = unique_temp_dir("quick");
+    std::fs::create_dir_all(&dir).unwrap();
+    let old = dir.join("osmium-quick-1-old.toml");
+    std::fs::write(&old, "x").unwrap();
+    // mtime 回拨 2 小时，越过 1 小时清理阈值
+    let f = std::fs::OpenOptions::new().write(true).open(&old).unwrap();
+    f.set_times(
+        std::fs::FileTimes::new()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(7200)),
+    )
+    .unwrap();
+    let fresh = dir.join("osmium-quick-2-fresh.toml");
+    std::fs::write(&fresh, "y").unwrap();
+    let other = dir.join("unrelated.txt");
+    std::fs::write(&other, "z").unwrap();
+    crate::service_core::sweep_stale_quick_configs(&dir);
+    assert!(!old.exists(), "超期残留应被删除");
+    assert!(fresh.exists(), "未超期文件保留");
+    assert!(other.exists(), "无关文件保留");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn validate_config_flags_unknown_start_mode() {
+    // F3 回归: service_start_mode 拼错值（旧实现静默落 automatic）→ 预检显式报错
+    let dir = unique_temp_dir("smode");
+    let bad = dir.join("bad.toml");
+    std::fs::write(
+        &bad,
+        "service_name = \"sm\"\nservice_display_name = \"sm\"\nservice_description = \"sm\"\nservice_executable_path = 'C:\\x.exe'\nservice_start_mode = \"automatik\"\n",
+    )
+    .unwrap();
+    let errs = validate_config(&bad).unwrap_err();
+    assert!(
+        errs.iter().any(|e| e.contains("unknown value 'automatik'")),
+        "未知启动类型应被标记: {errs:?}"
+    );
+    // 合法值不产生启动类型错误项（其他校验项的错误不影响该断言）
+    let good = dir.join("good.toml");
+    std::fs::write(
+        &good,
+        "service_name = \"sm\"\nservice_display_name = \"sm\"\nservice_description = \"sm\"\nservice_executable_path = 'C:\\x.exe'\nservice_start_mode = \"delayed_auto\"\n",
+    )
+    .unwrap();
+    let errs2 = validate_config(&good).unwrap_err();
+    assert!(
+        !errs2.iter().any(|e| e.contains("service_start_mode")),
+        "合法启动类型不应报错: {errs2:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn validate_config_flags_insecure_download_and_bad_numbers() {
+    // F1: --check 预检必须包含不安全下载检查（http 无 sha / basic 走明文 http）——
+    // 与宿主启动时同源判定，安装前就能发现
+    let dir = unique_temp_dir("insecure");
+    let f = dir.join("bad.toml");
+    std::fs::write(
+        &f,
+        "service_name = \"sm\"\nservice_display_name = \"sm\"\nservice_description = \"sm\"\nservice_executable_path = 'C:\\x.exe'\ndownload_url = 'http://example.com/app.exe'\n",
+    )
+    .unwrap();
+    let errs = validate_config(&f).unwrap_err();
+    assert!(
+        errs.iter().any(|e| e.contains("plain HTTP without sha256")),
+        "http 无 sha 下载必须被预检拦截: {errs:?}"
+    );
+    // F3: 数值字段负值/越界显式报错（0 = 未配置合法，负值非法）
+    std::fs::write(
+        &f,
+        "service_name = \"sm\"\nservice_display_name = \"sm\"\nservice_description = \"sm\"\nservice_executable_path = 'C:\\x.exe'\ndownload_threads = -1\nprocess_count = 65\ndownload_rate_limit_kbps = -5\n",
+    )
+    .unwrap();
+    let errs = validate_config(&f).unwrap_err();
+    for needle in [
+        "download_threads",
+        "process_count",
+        "download_rate_limit_kbps",
+    ] {
+        assert!(
+            errs.iter().any(|e| e.contains(needle)),
+            "{needle} 越界应被预检标记: {errs:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn readonly_commands_skip_admin_gate() {
+    // 只读/本地命令集合: 免管理员（帮助/查询/插件列表/预检/前台调试/签名）
+    for t in [
+        "help",
+        "-h",
+        "--help",
+        "--list",
+        "--lst",
+        "--status",
+        "--sts",
+        "--status-all",
+        "--stsa",
+        "--extend",
+        "--ext",
+        "--check",
+        "--chk",
+        "--test",
+        "--tst",
+        "--sign-config",
+        "--sigc",
+    ] {
+        assert!(
+            crate::service_cli::is_readonly_command(t),
+            "'{t}' should be treated as read-only"
+        );
+    }
+    // SCM 写操作与内部入口仍要求管理员
+    for t in [
+        "--install",
+        "--ins",
+        "--import",
+        "--export",
+        "--uninstall",
+        "--uin",
+        "--start",
+        "--str",
+        "--stop",
+        "--stp",
+        "--restart",
+        "--rst",
+        "--delete",
+        "--del",
+        "--kill",
+        "--kil",
+        "--refresh",
+        "--rfs",
+        "--reload",
+        "--rld",
+        "-internal",
+        "-m",
+    ] {
+        assert!(
+            !crate::service_cli::is_readonly_command(t),
+            "'{t}' should require administrator"
+        );
+    }
+}
+
+#[test]
+fn expand_env_value_keeps_url_percent_escapes() {
+    // 回归: URL 百分号转义不得被当环境变量吞掉（%20/%2F/%E4 数字开头序列原样保留）
+    assert_eq!(
+        expand_env_value("https://cdn.example.com/app%20v2%2Fbuild/f.zip", "C:\\base"),
+        "https://cdn.example.com/app%20v2%2Fbuild/f.zip"
+    );
+    assert_eq!(
+        expand_env_value("https://h/p?token=a%3Db%26c", "C:\\base"),
+        "https://h/p?token=a%3Db%26c"
+    );
+    assert_eq!(
+        expand_env_value("https://h/%E4%B8%AD%E6%96%87.zip", "C:\\base"),
+        "https://h/%E4%B8%AD%E6%96%87.zip"
+    );
+    // 合法变量名展开语义不回归（含 %BASE% 与普通变量）
+    unsafe {
+        std::env::set_var("OSMIUM_TV", "vv");
+    }
+    assert_eq!(
+        expand_env_value("%BASE%\\%OSMIUM_TV%", "C:\\b"),
+        "C:\\b\\vv"
+    );
+    assert_eq!(expand_env_value("%PID%", "C:\\b"), "%PID%");
+    // 未闭合单个 % 与数字开头的伪变量均按字面保留
+    assert_eq!(expand_env_value("50% off", "C:\\b"), "50% off");
+    assert_eq!(expand_env_value("%20name%tail", "C:\\b"), "%20name%tail");
+}
+
+#[test]
+fn escapes_deploy_dir_boundary_cases() {
+    use crate::service_host::escapes_deploy_dir;
+    let base = "C:\\ProgramData\\Osmium\\svcs\\svc";
+    // 部署目录自身与其子路径放行
+    assert!(!escapes_deploy_dir(base, base));
+    assert!(!escapes_deploy_dir(
+        "C:\\ProgramData\\Osmium\\svcs\\svc\\logs\\a.log",
+        base
+    ));
+    // ..\ 折叠后越出部署目录 → 拒绝
+    assert!(escapes_deploy_dir(
+        "C:\\ProgramData\\Osmium\\svcs\\svc\\..\\other\\x",
+        base
+    ));
+    // 前缀相同但为兄弟目录（svc2）不得因字符串前缀误判放行
+    assert!(escapes_deploy_dir(
+        "C:\\ProgramData\\Osmium\\svcs\\svc2\\x",
+        base
+    ));
+}
+
+#[test]
+fn download_entry_rejects_relative_target_escape() {
+    // 数组条目 to 相对路径折叠后越出部署目录 → 配置错误，网络请求前即失败
+    let dir = unique_temp_dir("escape");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg: ServiceConfig = toml::from_str(
+        "service_name = 's'\nservice_display_name = 's'\nservice_description = 'd'\n\
+         service_executable_path = 'C:\\\\x\\\\e.exe'\n\
+         [[downloads]]\nfrom = 'https://example.invalid/a.bin'\nto = '..\\\\evil.bin'\n",
+    )
+    .unwrap();
+    let entry = &cfg.downloads.as_ref().unwrap()[0];
+    let result = crate::service_host::run_download_entry(
+        &cfg,
+        entry,
+        &dir.to_string_lossy(),
+        "",
+        &LogOptions::default(),
+    );
+    let err = format!("{:?}", result.err());
+    assert!(
+        err.contains("escapes the deployment directory"),
+        "实际: {err}"
+    );
+    // 旧单条模式 download_to 同款拦截
+    let cfg2: ServiceConfig = toml::from_str(
+        "service_name = 's'\nservice_display_name = 's'\nservice_description = 'd'\n\
+         service_executable_path = 'C:\\\\x\\\\e.exe'\ndownload_url = 'https://example.invalid/a.bin'\n\
+         download_to = '..\\\\evil.bin'\n",
+    )
+    .unwrap();
+    let entry2 = &download_entries(&cfg2)[0];
+    let result2 = crate::service_host::run_download_entry(
+        &cfg2,
+        entry2,
+        &dir.to_string_lossy(),
+        "",
+        &LogOptions::default(),
+    );
+    let err2 = format!("{:?}", result2.err());
+    assert!(
+        err2.contains("download_to") && err2.contains("escapes"),
+        "实际: {err2}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn download_resume_rejects_query_only_source_change() {
+    // 回归: 归属标记按完整 URL 哈希判定——仅换查询串的换源不得复用旧断点
+    //（旧脱敏串方案剥离 query 后会误判同源，旧块混入新内容）
+    let data: Vec<u8> = (0..1024 * 1024 + 11).map(|i| (i % 253) as u8).collect();
+    let d2 = data.clone();
+    let (addr, stop, _count) = spawn_http_server(move |method, lines| {
+        let common = vec![
+            ("Content-Length".into(), d2.len().to_string()),
+            ("Accept-Ranges".into(), "bytes".into()),
+        ];
+        if method == "HEAD" {
+            return ("200 OK".to_string(), common, vec![]);
+        }
+        let ranged = lines
+            .iter()
+            .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+            .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))
+            .and_then(|v| v.strip_prefix("bytes=").map(|s| s.to_string()))
+            .and_then(|spec| {
+                spec.split_once('-')
+                    .map(|(a, b)| (a.to_string(), b.to_string()))
+            })
+            .and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?)))
+            .filter(|(_, e)| *e < d2.len());
+        if let Some((s, e)) = ranged {
+            let mut h = vec![
+                ("Content-Length".into(), (e - s + 1).to_string()),
+                (
+                    "Content-Range".into(),
+                    format!("bytes {}-{}/{}", s, e, d2.len()),
+                ),
+            ];
+            h.extend(common);
+            return ("206 Partial Content".to_string(), h, d2[s..=e].to_vec());
+        }
+        ("200 OK".to_string(), common, d2.clone())
+    });
+    let dir = unique_temp_dir("tmp");
+    let tmp = dir.join("query-change.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    // 预置"另一来源"的合法格式断点标记（不同 URL 的哈希 + 当前远端长度）:
+    // 标记与本次 URL 不匹配 → 必须清零整体重下
+    let other_url = format!("http://{}:{}/other.bin?v=999", addr.ip(), addr.port());
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(other_url.as_bytes());
+    let other_hash: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::write(&tmp, vec![9u8; 512 * 1024]).unwrap();
+    std::fs::write(
+        format!("{}.resume", tmp.display()),
+        format!("{other_hash}\n{}", data.len()),
+    )
+    .unwrap();
+    let url = format!("http://{}:{}/big.bin?v=1", addr.ip(), addr.port());
+    download_core(
+        &url,
+        tmp.to_str().unwrap(),
+        60,
+        DownloadAuth::None,
+        None,
+        8,
+        None,
+        0,
+    )
+    .unwrap();
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(
+        std::fs::read(&tmp).unwrap(),
+        data,
+        "查询串不同的换源必须整体重下，不得复用旧断点数据块"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn download_chunk_rejects_mismatched_content_range() {
+    // S6 回归: 服务器回错位 Content-Range（声明区间与请求不符）时必须拒绝该块——
+    // 分块路径拒绝错位片段后整体回退单线程全量重下，最终文件内容必须纯净
+    //（修复前错位片段会被静默拼入文件，无 sha 配置时直接损坏）
+    let data: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let d2 = data.clone();
+    let (addr, stop, _count) = spawn_http_server(move |method, lines| {
+        let common = vec![
+            ("Content-Length".into(), d2.len().to_string()),
+            ("Accept-Ranges".into(), "bytes".into()),
+        ];
+        if method == "HEAD" {
+            return ("200 OK".to_string(), common, vec![]);
+        }
+        // 恶意服务器: 请求区间 a-b，但声明 Content-Range 从 a+1024 开始（错位）
+        let ranged = lines
+            .iter()
+            .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+            .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))
+            .and_then(|v| v.strip_prefix("bytes=").map(|s| s.to_string()))
+            .and_then(|spec| {
+                spec.split_once('-')
+                    .map(|(a, b)| (a.to_string(), b.to_string()))
+            })
+            .and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?)));
+        if let Some((s, e)) = ranged {
+            let wrong = (s + 1024).min(d2.len() - 1);
+            let mut h = vec![
+                ("Content-Length".into(), (e - s + 1).to_string()),
+                (
+                    "Content-Range".into(),
+                    format!("bytes {wrong}-{e}/{}", d2.len()),
+                ),
+            ];
+            h.extend(common);
+            return ("206 Partial Content".to_string(), h, d2[wrong..=e].to_vec());
+        }
+        ("200 OK".to_string(), common, d2.clone())
+    });
+    let dir = unique_temp_dir("cr");
+    let tmp = dir.join("f.bin");
+    let url = format!("http://{}:{}/bad.bin", addr.ip(), addr.port());
+    // 分块路径必须拒绝错位块并回退（结果 Ok，但内容必须与源完全一致，不得混入错位片段）
+    download_core(
+        &url,
+        tmp.to_str().unwrap(),
+        30,
+        DownloadAuth::None,
+        None,
+        8,
+        None,
+        0,
+    )
+    .unwrap();
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(
+        std::fs::read(&tmp).unwrap(),
+        data,
+        "错位 Content-Range 后回退重下，文件内容必须纯净"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

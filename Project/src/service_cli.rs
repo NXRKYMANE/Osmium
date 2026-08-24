@@ -59,8 +59,17 @@ pub fn main_entry() {
         return;
     }
 
-    // CLI 模式需要管理员权限
-    if !is_administrator() {
+    let tag = args[1].to_lowercase();
+    let mut rest: Vec<String> = args.iter().skip(2).cloned().collect();
+
+    // 服务操作命令可省略 -m 前缀直接使用（如 --start foo），与 -m --start foo 等价。
+    // 只读/本地命令免管理员（帮助/查询/插件列表/预检/前台调试/签名）；其余维持强制提权（SCM 写操作）
+    let effective_cmd = if tag == "-m" {
+        rest.first().map(|s| s.to_lowercase()).unwrap_or_default()
+    } else {
+        tag.clone()
+    };
+    if !is_readonly_command(&effective_cmd) && !is_administrator() {
         eprintln!("{}", red("Error: Administrator privileges required."));
         eprintln!(
             "{}",
@@ -69,10 +78,6 @@ pub fn main_entry() {
         process::exit(1);
     }
 
-    let tag = args[1].to_lowercase();
-    let mut rest: Vec<String> = args.iter().skip(2).cloned().collect();
-
-    // 服务操作命令可省略 -m 前缀直接使用（如 --start foo），与 -m --start foo 等价
     let is_cli = is_cli_command(&tag);
     if is_cli {
         rest.insert(0, tag.clone());
@@ -135,7 +140,7 @@ fn print_help() {
     println!("  os.exe | os --test         <config.toml>               Run in foreground");
     println!("  os.exe | os --check        <config.toml | svc name>    Validate config");
     println!("  os.exe | os --sign-config  <config.toml>               Sign config");
-    println!("=== DEB Mode ===");
+    println!("=== BATCH Mode ===");
     println!("  os.exe | os --list                                     List all services");
     println!("  os.exe | os --extend                                   List installed extensions");
     println!("  os.exe | os --start-all                                Start all services");
@@ -165,6 +170,31 @@ fn print_help() {
 }
 
 // ==================== 辅助判定 ====================
+
+/// 只读/本地命令集合（免管理员）: 帮助、查询类（list/status/status-all）、插件列表、
+/// 配置预检、前台调试、配置签名——均不做 SCM 写操作（tag 已小写化）
+pub(crate) fn is_readonly_command(tag: &str) -> bool {
+    matches!(
+        tag,
+        "help"
+            | "-h"
+            | "--help"
+            | "--list"
+            | "--lst"
+            | "--status"
+            | "--sts"
+            | "--status-all"
+            | "--stsa"
+            | "--extend"
+            | "--ext"
+            | "--check"
+            | "--chk"
+            | "--test"
+            | "--tst"
+            | "--sign-config"
+            | "--sigc"
+    )
+}
 
 /// 服务操作命令（可省略 -m 前缀直接使用，如 --start foo）；
 /// 支持简化别名: --ins/--uin/--str/--stp/--rst/--sts/--del/--lst（--test 可简写 --tst，--extend 可简写 --ext，--refresh 可简写 --rfs，--kill 可简写 --kil）
@@ -347,7 +377,6 @@ fn run_internal(args: &[String]) {
 fn install_command(args: &[&str]) {
     if args.is_empty() {
         usage("install <config path> | <name> --pth <exe path>");
-        return;
     }
     // 快速安装: install <name> --pth/--path <exe path>，自动生成配置并平台部署
     if args.len() >= 3
@@ -364,7 +393,6 @@ fn install_command(args: &[&str]) {
 fn uninstall_command(args: &[&str]) {
     if args.is_empty() {
         usage("uninstall <service name>");
-        return;
     }
     let svc_name = args[0];
     require_registered(svc_name);
@@ -374,7 +402,6 @@ fn uninstall_command(args: &[&str]) {
 fn start_command(args: &[&str]) {
     if args.is_empty() {
         usage("start <service name>");
-        return;
     }
     let svc_name = args[0];
     require_registered(svc_name);
@@ -384,7 +411,6 @@ fn start_command(args: &[&str]) {
 fn stop_command(args: &[&str]) {
     if args.is_empty() {
         usage("stop <service name>");
-        return;
     }
     let svc_name = args[0];
     require_registered(svc_name);
@@ -397,7 +423,6 @@ fn stop_command(args: &[&str]) {
 fn restart_command(args: &[&str]) {
     if args.is_empty() {
         usage("restart <service name>");
-        return;
     }
     let svc_name = args[0];
     require_registered(svc_name);
@@ -414,7 +439,6 @@ fn restart_command(args: &[&str]) {
 fn status_command(args: &[&str]) {
     if args.is_empty() {
         usage("status <service name>");
-        return;
     }
     let svc_name = args[0];
     require_registered(svc_name);
@@ -467,7 +491,6 @@ fn status_command(args: &[&str]) {
 fn refresh_command(args: &[&str]) {
     if args.is_empty() {
         usage("refresh <service name>");
-        return;
     }
     let svc_name = args[0];
     require_registered(svc_name);
@@ -482,7 +505,6 @@ fn refresh_command(args: &[&str]) {
 fn reload_command(args: &[&str]) {
     if args.is_empty() {
         usage("reload <service name>");
-        return;
     }
     let svc_name = args[0];
     require_registered(svc_name);
@@ -510,7 +532,6 @@ fn reload_command(args: &[&str]) {
 fn kill_command(args: &[&str]) {
     if args.is_empty() {
         usage("kill <service name>");
-        return;
     }
     let svc_name = args[0];
     require_registered(svc_name);
@@ -532,7 +553,6 @@ fn kill_command(args: &[&str]) {
 fn export_command(args: &[&str]) {
     if args.len() < 2 {
         usage("export <service name> <dest dir>");
-        return;
     }
     let svc_name = args[0];
     require_registered(svc_name);
@@ -553,7 +573,20 @@ fn export_command(args: &[&str]) {
     }
     let dest = std::path::Path::new(dest_dir).join(format!("{}.osiml", svc_name));
     match std::fs::copy(&src, &dest) {
-        Ok(_) => println!("{CLI_PREFIX}: Config exported to {0}", dest.display()),
+        Ok(_) => {
+            println!("{CLI_PREFIX}: Config exported to {0}", dest.display());
+            // 导出副本含 DPAPI 机器级密文（enc:OSMIUM1:），本机任意账户可解密——
+            // 目标目录可写位置（共享/公共目录）等于把密码敞开，明确告警
+            let content = std::fs::read_to_string(&src).unwrap_or_default();
+            if content.contains("enc:OSMIUM1:") {
+                eprintln!(
+                    "{}",
+                    red(
+                        "Warning: the exported config contains machine-scoped DPAPI secrets (enc:OSMIUM1:). Any local account can decrypt them — keep the destination directory restricted to administrators."
+                    )
+                );
+            }
+        }
         Err(e) => error(&f("Export failed: {0}", &[&e.to_string()])),
     }
 }
@@ -561,7 +594,6 @@ fn export_command(args: &[&str]) {
 fn force_delete_command(args: &[&str]) {
     if args.is_empty() {
         usage("delete <service name>");
-        return;
     }
     let svc_name = args[0];
     require_registered(svc_name);
@@ -593,7 +625,6 @@ fn extend_command() {
 fn check_command(args: &[&str]) {
     if args.is_empty() {
         usage("check <config path | service name>");
-        return;
     }
     let arg = args[0];
     // 已注册服务名 → 用部署配置路径（平台 svcs\<name>\<name>.osiml；inplace exe 旁同名 toml）
@@ -644,7 +675,6 @@ fn check_command(args: &[&str]) {
 fn sign_config_command(args: &[&str]) {
     if args.is_empty() {
         usage("sign-config <config path>");
-        return;
     }
     let config_path = std::fs::canonicalize(args[0]).unwrap_or_else(|_| PathBuf::from(args[0]));
     if !config_path.exists() {
@@ -667,6 +697,9 @@ fn status_all_command() {
         println!("{CLI_PREFIX}: No registered services in registry");
         return;
     }
+    // 批量定位全部服务的子进程 PID: 单次全进程枚举（逐服务调用会对全量进程重复扫描 N 次）
+    let name_refs: Vec<&str> = services.iter().map(|s| s.as_str()).collect();
+    let pid_map = crate::service_host::service_process_pids_batch(&name_refs);
     for s in &services {
         let state = crate::service_core::get_status(s).unwrap_or_else(|_| "Unknown".into());
         println!("{0}: {1}", s, state);
@@ -675,8 +708,9 @@ fn status_all_command() {
                 println!("  {0}: {1}", k, v);
             }
         }
-        let pids = crate::service_host::service_process_pids(s);
-        if !pids.is_empty() {
+        if let Some(pids) = pid_map.get(s)
+            && !pids.is_empty()
+        {
             let list: Vec<String> = pids.iter().map(|p| p.to_string()).collect();
             println!("  Child PIDs: {}", list.join(", "));
         }
@@ -736,7 +770,6 @@ static TEST_CTRL_C: AtomicBool = AtomicBool::new(false);
 fn test_command(args: &[&str]) {
     if args.is_empty() {
         usage("test <config path>");
-        return;
     }
     let config_path = std::fs::canonicalize(args[0]).unwrap_or_else(|_| PathBuf::from(args[0]));
     if !config_path.exists() {
@@ -772,7 +805,8 @@ fn test_command(args: &[&str]) {
 
 // ==================== 底层辅助 ====================
 
-fn usage(syntax: &str) {
+/// 输出用法错误并退出进程（发散函数: 调用点其后无需 return，编译器保证不可达）
+fn usage(syntax: &str) -> ! {
     eprintln!("{}", red(&f("Usage: -m --{0}", &[syntax])));
-    process::exit(1);
+    process::exit(1)
 }

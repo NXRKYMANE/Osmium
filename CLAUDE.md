@@ -19,6 +19,81 @@
 - 重大修改和调优前记得备份一个,已经多次发生翻车事故造成项目从头来的情况
 # 项目记录
 
+## v26.11.0（2026-08-25）· 批次 1-5 修复真机测试（发现并修复 query_service_details 历史 bug + 补 S2/S6 单测）
+- 静默方式真机回归批次 1-5 全部修复项，验证通过清单：S1 junction 根删除（svcs 下 junction 孤儿目录 → 目标内容保留）、S2 zip/spawn_raw reparse 防护、F1 不安全下载进 --check 拦截、F3 钩子 SCM 停止中断（只报 aborted 不再误报 timed out）、F4 %ProgramFiles(x86)% 展开、F4 health_check 内嵌 basic 凭据（有凭据 200 成功/无凭据 401 失败对照）、F5 亲和性 checked_shl、F6 多实例补足（无空配置错误）、批次3 F1 URL 百分号转义保留、批次4 F1 不安全下载预检、批次5 S6 错位 Content-Range 拒绝回退
+- **真机新发现 bug（已修复）**：query_service_details 的 QueryServiceConfigW 第一次"查大小"调用返回 ERROR_INSUFFICIENT_BUFFER(122) 被 windows crate 映射为 Err → --status Details query failed（该 bug 在 U1 权限降级前就存在，一直未被真机触发）；修复为容忍 122 错误码（needed 仍返回所需大小），真机验证 --status 完整显示 Start type/Run as/Failure actions/Child PIDs/Job Object
+- 补单测 +2：zip_backup_file_refuses_reparse_target（S2 zip 归档 symlink 拒绝 + 不写穿）、download_chunk_rejects_mismatched_content_range（S6 错位片段拒绝后回退重下内容纯净）
+- 真机部署流程注意：hydride_svc64 共享宿主占用 os.exe，须 sc stop 服务 + 强杀 os 进程后覆盖再重启服务；--test 前台模式会弹控制台窗口，测试用 -WindowStyle Hidden
+- 测试 189→**191** 全过；clippy 零告警、fmt clean
+
+## v26.11.0（2026-08-24）· 审计修复批次 5：junction 根删除 / 304 死特性打通 / 纵深防御收尾
+- 第五轮全量审查（主项目 5 文件 + kits 3 文件 + BUILD.ps1/installer.iss/CI），按 S1+S2 → F1/F2/F3/F5 → 其余顺序修复
+- **S1** delete_dir_tree 根路径自身是 junction 时拒绝递归删除（子项 file_type 检查拦不住根是 reparse 的场景，read_dir 枚举的是目标内容）——刷新器注册时顺带加固 Osmium 根目录与 svcs 目录；新增 junction 实测测试
+- **S2** 两处落点补 reparse 写穿防护: spawn_raw_reader（扩展钩子 stdout/stderr 重定向）与 zip_backup_file（{file}.zip 归档目标）创建前检查 is_reparse_path
+- **S6** download_chunk 校验 Content-Range 与请求区间一致（恶意/异常服务器回错位片段静默拼坏文件，仅 sha 配置时兜底）
+- **S5** BUILD.ps1 开发证书密码改 OSMIUM_DEV_CERT_PASSWORD 环境变量优先（未设置回退固定值并告警，密码不再只随仓库走）
+- **F1** 304/If-Modified-Since 死特性打通: run_download_entry 对"无 sha 且 target 存在"不再提前跳过，走下载流程带 IMS（服务器 304 保留原文件，忽略 IMS 回 200 则重下——README 承诺的语义真正可达）
+- **F2** osx:// 探针只匹配前缀大小写，spec 其余部分（payload 值）保持原样——整体 to_ascii_lowercase 破坏大小写敏感的主机名/token
+- **F3** wait_child_terminate 改三态返回（code/aborted/timed_out），钩子被 SCM 停止请求中断时不再误报 "timed out after Ns, killing"
+- **F4** percent_pair_is_var 放宽标识符限制: Windows 环境变量名允许括号（%ProgramFiles(x86)%），仅拦数字开头与两位 hex 两类 URL 转义
+- **F5** set_process_affinity 用 checked_shl 防 32 位构建 + >32 核移位溢出（1usize << c panic / release 静默错误掩码）
+- **F6** 多实例补足不再 current_config().unwrap_or_default()（空配置启动报混乱错误）——缓存缺失时明确告警跳过
+- **F7** kits sspi 报错文案去掉错误的 "(10)"（循环上限 12 混合重定向+挑战）；notify webhook 单独构建可跟随重定向的 agent（build_agent 的 max_redirects=0 是给 sspi 防令牌中继的）
+- **H6** syslog hostname（COMPUTERNAME）清洗空格/CR/LF（防破坏 RFC5424 帧）
+- **O 系列**: write_job_state 内容未变跳过重写、check_schedules reload/restart 分支合并、run_plugin 按文件名排序（多插件同名 kit 行为确定）、cached_agent 单槽改 8 槽小 map
+- **R2/R3** SCM waitHint/sleep 默认值常量化（SCM_WAIT_HINT_DEFAULT_MS/SCM_SLEEP_DEFAULT_MS）、failure_action_chain 与 SCM set_failure_actions 分工注释说明
+- 明确不做: S3 凭据广播收敛（架构级，kit→文件映射留后续）、S4 DPAPI fail-open 开关（已有红色告警）、H1 停止路径跳过 after_stop 下载（waitHint 兜底足够）、H2 插件超时配置化、H3 SMTP 明文告警、H4 退出码结构化上报、H5 完成位图、R1 巨型 struct 拆模块、R4 kits 共享 lib（刻意隔离）
+- 新增 PLUGIN_CACHE 测试清理函数（clear_plugin_cache，并行测试动态增删插件目录时 mtime 相同内容不同）
+- 测试 +1（junction 根删除实测）共 **189 + 35/2** 全过；clippy 零告警、fmt clean
+
+## v26.11.0（2026-08-24）· 审计报告修复批次 4：SDDL 令牌实证 + 预检补全 + 性能优化收尾
+- 对审计报告逐项实证核验（S1 位值用 Windows ConvertStringSecurityDescriptorToSecurityDescriptor 实测: 报告称 "0x20=FILE_ADD_FILE / 0x100000=FILE_ADD_SUBDIRECTORY / 字母缺 cc" **均不属实**——0x20 是 FILE_EXECUTE、0x100000 是 SYNCHRONIZE（只读位，加入会把 RX 只读目录误判可写）、"cc"=0x1 列出目录也非创建令牌；但字母令牌漏判方向属实：Windows 实测 `dc`=0x2(创建文件)/`lc`=0x4(创建子目录)/`dt`=0x40(删除子项)/`sd`=0x10000(DELETE) 中 lc/dt/sd 不在列表 → 补入并加测试断言 0x100020 保持不可写）
+- **S2** --export 导出含 DPAPI 密文（enc:OSMIUM1:）时红色告警（机器级密文本机任意账户可解，目标目录须受限）
+- **S3** kits syslog MSG 补滤 \r（原只滤 \n，\r 可注入 RFC5424 帧）
+- **S4** kits redact_webhook_url 补去 query/fragment（与宿主 redact_url 口径对齐，防 ?token= 进日志）
+- **F1** warn_if_insecure_download 去 #[cfg(test)] 转正式 API 并入 validate_config（--check 安装前即拦 http 无 sha / basic+http）
+- **F2** service_process_pids 注释明确非管理员下 --status Child PIDs 为空属预期（SeDebugPrivilege 限制）
+- **F3** validate_config 数值字段校验: 负值/越界报错（0=未配置合法），含 download_threads/retries/log_* /health_check_*/process_count/stop_timeout/rate_limit
+- **F4** health_check_url 内嵌 basic 凭据（http://user:pass@host）提取为 Authorization 头（ureq 不自动发 userinfo）
+- **S5** --check 校验 osmium-sign.key 文件/目录被非管理员可写时告警（密钥可被替换替任意配置签名）
+- **O 系列**：O1 插件发现 mtime 缓存（PLUGIN_CACHE，目录树 mtime 失效）+ run_plugin 位数过滤（32 位宿主跳过 64 位插件免 spawn 失败）；O2 start/stop_service 等待循环复用 svc 句柄（原每 200ms 重开 SCM）；O3 download_core Agent 按 (timeout,proxy) 缓存复用（连接池/DNS）；O4 collect_descendants 建 parent→children 映射表（O(n²)→O(n)）；O5 提取 wait_child_terminate 公共轮询函数（run_hook/run_stop_command 共用）；O6 collect_unsafe_paths_from 共享实现（validate_config 与安装校验同源）；O7 rollback_registration 回滚 helper（4 处失败分支合并）；O8 is_user_writable 缓存键大小写归一；O9 插件超时 kill 后 try_wait 轮询兜底 2s（PPL 保护进程 kill 失败不再无限 wait）；O10 CI 加 i686 cargo check 步骤；O11 restart_service sleep 常量化、validate_config 空块删除
+- 明确不改：BUILD.ps1 测试 --release 保留（release 测试更接近发布行为，kits 已用 debug 折中）
+- 测试 +1（sddl lc/dt/sd/0x100020 断言扩展、validate_config 不安全下载+数值校验）共 **188 + 35/2** 全过；clippy 零告警、fmt clean
+
+## v26.11.0（2026-08-24）· 审计修复批次 3：URL 转义损坏实证修复 + sspi 插件安全对齐 + 相对路径逃逸防护 + 只读命令免提权
+- 第三轮全量审查（主项目 5 文件 + kits 3 文件 + BUILD.ps1/installer.iss/CI 通读），产出分级报告后**全部修复**（改前留 service_core/service_host/service_cli/kits_core/kits_tests/installer.iss/BUILD.ps1/ci.yml 八份 .bak）
+- **F1 expand_env_value 吞掉 URL 百分号转义（临时 rustc 程序实证）**：%..% 一律当环境变量展开，`app%20v2%2Fbuild` → `app2Fbuild`、`token=a%3Db%26c` → `a26c`、`%E4%B8%AD.zip` → `B8E687.zip`——含 ≥2 个连续转义的 download_url 经 expand_config 展开后必然损坏；新增 percent_pair_is_var（字母/_ 开头标识符 + 恰好两位全十六进制如 %E4/%B8 视为转义保留，真实环境变量极少取这种名）；%% 与 %PID% 原样保留语义不变（首次实现把非法名分支移出保留块导致 "%%BASE%" 回归为 "%"+base，测试拦住后修正顺序）
+- **F2 kits sspi 下载补齐两道防线**：①build_agent 加 max_redirects(0)，3xx 手动跟随（相对 Location RFC3986 join、拒绝 https→http 降级、跨源 DeleteSecurityContext 重置后重新协商、令牌不发往重定向目标），SPN 改按当前源每轮计算；②200 分支加 Content-Length 截断对照（短响应删 tmp 报错，Peer disconnected 写失败路径同样清理）——与宿主下载器 bug⑧ 修复对齐
+- **S1 断点归属标记改 URL 哈希**：原 redact_url(url)+长度会剥离 query——仅换查询串的换源（CDN cache-busting）被误判同源复用旧块混合污染；改为完整 URL 的 SHA-256+长度（不落明文凭据又精确判异），download_resume_keeps_valid_partial_tmp 测试同步预填哈希标记
+- **S2 认证 URL 分块下载打通**：HEAD 探测 401/403 时带 Basic 凭据重试一次——此前认证资源永远探测失败回退单线程且跳过磁盘预检
+- **H1 相对路径逃逸防护（纵深防御）**：新增 escapes_deploy_dir（词法规范化折叠 ..、分隔符感知防 svc/svc2 前缀兄弟误放行）+ resolve_within_deploy；接入点：downloads[].to/download_to（prepare_download 与 run_download_entry 双入口报配置错误）、working_directory（拒绝启动）、log_dir（回退默认 logs）、metrics_file/runaway_pid_file（忽略该配置项）、stop_executable（禁用）、extensions stdout/stderr 重定向（回落宿主日志）；绝对路径为管理员显式指定不限制
+- **U1 只读命令免管理员**：main_entry 管理员门移到 effective_cmd 判定后（tag==-m 取 rest[0]），is_readonly_command 覆盖 help/list/status/status-all/extend/check/test/sign-config 及别名；get_status_raw/query_service_details 的 SCM 句柄从 ALL_ACCESS 降为 SC_MANAGER_CONNECT（写操作路径保持 ALL_ACCESS）——--list/--status/--check/--test 等普通用户可用
+- **L1 WinVerifyTrust 状态句柄泄漏**：VERIFY 后补 WTD_STATEACTION_CLOSE 二次调用释放策略提供方状态数据（此前每次签名校验泄漏一次）
+- P2 批次：syslog tag 清洗 CR/LF/空格（防 RFC5424 帧注入，与 smtp 同源）；log_auto_roll_at 补 --check 预检 + auto_roll_logs 字符串比较改 parse_daily_time 后的 NaiveTime 比较（"9:00" 不再误判早于 "07:00"，非补零格式合法化）；check_health HTTP 探针 Agent 复用（apply_runtime_fields 按 health_check_timeout 构建一次存 health_agent 字段，连接池/DNS 复用）；zip_backup_file 整文件读内存改 io::copy 流式压缩；chunk_already_done 全零块重复下载取舍注释说明
+- CI：workflow 名乱码 "𝗪𝗶𝗻𝗱𝗼𝘀𝗪𝗢𝗢--" 改 "Windows CI"；clippy/test 加 --locked；新增 rustsec/audit-check 步骤。BUILD.ps1：installer.iss 版本注入改 try/finally 编译后还原（构建不再把受跟踪文件弄脏）。installer.iss：Get-WmiObject 全部换 Get-CimInstance（方法经 Invoke-CimMethod 调用，WMI 受损系统兼容）；InitializeUninstall 新增 ConfirmUninstallWithServices——只读枚举 ImagePath exe 段等于本体的服务并列出确认，用户取消即中止卸载（共享宿主托管服务卸载后无法启动的警示）
+- 重构收尾：run_stop_command 内遮蔽的 pid 更名 cmd_pid（停止命令自身 PID vs 注入给它的子进程 %PID%）；明确不做——collect_descendants PPID 复用窗口（WinSW 同款理论风险，加创建时间核对复杂度不成比例）、凭据广播给全部插件的 kit→文件映射（架构级，留后续批次）、ServiceHost::new() derive Default（大量 true 默认值 derive 语义不符）
+- 测试 +5（只读命令门控集合、URL 百分号转义保留 6 断言、逃逸边界 5 断言、数组/旧模式下载目标逃逸双拦截、仅换查询串换源整体重下——自建 206 服务器伪造异 URL 哈希标记断言内容纯净）+ 插件 +2（302 相对 Location 手动跟随到最终源且请求数 ≥2、截断响应拒落盘且 tmp 清理）共 **187 + 35** 全过；clippy -D warnings 零告警、fmt clean；BUILD.ps1 Parser 语法 0 错、ISCC 编译通过；真机冒烟：--check 拦截 '25:99'（exit=1）、含 %20b%2Fc 的下载配置通过预检、--extend 正常
+- 2 README 同步：只读免提权命令清单、配置全局展开段补变量名规则/URL 转义保护/相对路径越界后果分级说明、下载安全提示补 sspi 插件重定向策略与认证探测重试、download_to/log_auto_roll_at 行更新、测试数 187/35；表格 CJK 宽度重排（列数校验 0 不一致）
+
+## v26.11.0（2026-08-24）· 审计修复批次 2：安装器停服误伤 / SDDL 组合权限漏判 / 续传跨源污染 + prometheus 可采集性
+- 第二轮全量审查（core/host/config/cli/kits/BUILD.ps1/installer.iss/CI 逐文件通读 + junction 检测与 Inno BOM 疑点 websearch 实证），产出分级报告后按优先级修复前三项（改前留 service_core.rs.bak / service_host.rs.bak / installer.iss.bak 三份备份）
+- **B1 安装器停服误伤第三方服务**：PrepareToInstall 的 `PathName -match 'os\.exe'` 大小写不敏感子串匹配会把路径含 "os.exe" 的无关服务（VideoOS.exe/KioskOS.exe 等）一并停止并等 3 分钟 → 改为 ImagePath exe 段剥离引号/参数后与 `{app}\os.exe` **精确相等**判定（大小写不敏感）；本体路径经 {tmp}\osmium-exe-path.txt 传递规避命令行引号转义，PS 内用 [char]34 避免双引号嵌套；PS 命令 Parser 语法校验 + ISCC 编译通过；语义抽查：带引号带参/纯引号命中、裸无空格路径命中、VideoOS/KioskOS 排除
+- **S1 SDDL 写权限漏判（提权防线缺口）**：sddl_rights_include_write 对 rights 精确等值匹配，组合字母令牌（如 GRGW/FRFW）不匹配 → 该 ACE 被跳过，低权限用户实际可写的目录被误判"安全"放行安装；hex 分支未映射 GENERIC_WRITE/GENERIC_ALL 位 → 改子串扫描（小写化兼容混排，只读组合 GRGX/FR 不含写令牌不误伤）+ hex 叠加通用写位（0x40000000|0x10000000）
+- **B2 断点续传跨 URL 污染**：download_core 复用非空 tmp 不校验归属——更换 download_url 但目标不变时，旧资源的数据块被 chunk_already_done（区间全非零判定）当作已完成跳过 → 新旧内容混合，无 sha 配置时静默损坏并被执行；复用前校验 tmp 长度 == HEAD Content-Length，不符清零整体重下
+- **B3 指标可采集性 + 无限增长**：prometheus 每 30s 追加一块 # TYPE 行，违反文本协议"每个 family 的 TYPE 唯一"，textfile collector 解析失败形同虚设；json 只追加永不滚动占满磁盘 → 抽出 write_metrics_file：prometheus 改**整文件重写**（抓取语义天然正确）、json 超 METRICS_ROTATE_BYTES(5MB) 滚动为 .1（仅保留一份，命名与日志滚动一致）
+- 测试 +5（SDDL 组合令牌与 hex 通用位、管理员 Deny ACE 视为不可信、陈旧断点跨源重下——自建 Range 206 本地服务器伪造 512KB 残留 tmp 断言内容纯净、合法断点保留续传、prometheus 重写去重 + json 滚动）共 **182** 全过；clippy -D warnings 零告警、fmt clean
+- 明确不改：2 README 无需同步（metrics_file/prometheus 行表述在修复后仍然准确，断点续传内部机制文档未涉及）；审查报告其余项（凭据广播给全部插件、DPAPI fail-open、CLI 只读命令免管理员等）留待后续批次
+
+## v26.11.0（2026-08-24）· 全面审计修复批次：10 真 bug + 4 安全项 + 健壮性/重构收尾
+- 全量通读审计（config/cli/core/host/kits 约 1.6 万行 + ReportEventW 等关键 API 签名核对 + percent_decode 越界用临时程序实证），确认项全部修复（改前 src 下留 7 份 .bak 备份）
+- **真 bug**：①percent_decode 残缺转义越界 panic——边界 `i+2<=len` 放过 `i+2==len`，`%X` 结尾的 osx:// 探针 URL 必 panic 且 SCM 模式 unwind 穿越 extern "system" 即 abort，改严格 `<`；②插件超时路径 reader/writer 无条件 join 可无限挂起（插件派生继承句柄子进程时管道不关闭）→ 新增 reap_plugin_threads 限时 1s 回收、未结束线程放弃，正常/超时路径统一走它；③process_env_var 硬编码 x64 PEB 布局致 **32 位构建恒失效**（--kill 找不到进程/runaway pid 清理恒跳过/--status PIDs 空）→ cfg(target_pointer_width) 双分支（x86 peb+0x10 / params+0x48）+ size_of::<usize>() 读指针；④多实例优雅停止只管主实例，次实例靠 Job 关闭硬杀 → WM_CLOSE/Ctrl+C 成功后对剩余实例兜底强杀；⑤stop_child_process 主实例 PID 在 stop_cmd 阶段前捕获存在 PID 复用误伤窗口 → 移到该阶段后捕获；⑥kits mysql 探针检查 buf[0] 而非 buf[4]（握书包前有 4 字节包头，真实 MySQL 恒误报）→ 包头感知 + n<5 回退；⑦last_metrics_line 固定读 svcs 部署配置 → inplace 分支（与 job_state_path 对齐）；⑧下载无完整性校验：download_chunk 补区间字节数断言、single_download 对照 Content-Length，截断响应一律失败（防无 sha 时静默损坏）；⑨install 更新失败回滚把还原的 logs 一并删除 → 备份还原后置到成功分支与各失败分支（take()）；⑩快速安装 tmp 配置失败残留累积 → sweep_stale_quick_configs 超 1h 清理
+- **安全**：①Basic 凭据跨源重定向泄漏——手动跟随重定向每轮重发 Authorization 只拦了 https→http 降级，现按 (scheme,host,port) 同源三元组判定（same_origin_key），跨源不带凭据（回归测试首版抓出漏端口判定，127.0.0.1 两端口被误判同源）；②分块下载限速失效为 ×N——RateLimitedReader 每 worker 独立令牌桶，新增共享 AtomicU64 配额（聚合带宽≈rate_bps）；③=bug②（恶意插件可拖住 SYSTEM 宿主停止流程）；④DPAPI 解密失败静默当明文用 → 带前缀但解密失败显式红色告警（跨机迁移/密文损坏可排查）
+- **功能修正**：event_log 不再逐条镜像 host 日志（ID 0 刷爆事件日志风险，保留结构化 1000-1005，README 本就只承诺结构化 ID）；--check 校验 service_start_mode 未知值（旧实现静默落 automatic）；build_dependency_string 去掉 ':' 分隔符（SCM 服务名可含冒号，既有测试断言同步更新）；磁盘预检改 free_to_caller（配额卷感知）；health_check_expected_status u16 范围钳制；帮助 "DEB Mode" 笔误改 "BATCH Mode"
+- **重构/优化**：启动配置缓存 start_config 字段——停止阶段插件/after_stop 下载/unmap 复用启动时配置而非重读磁盘（语义不随运行中配置改动漂移；on_start/热刷新/异常重启三处同步刷新）；sha256_matches 流式分块计算（多 GB 文件不再整载内存）；chunked_download 取消标志（单块终败其余 worker 快速退出不再白拉）；install_service_scm 创建后配置步骤闭包化统一关句柄（修错误路径 svc/scm 泄漏）；--status-all 批量定位 service_process_pids_batch（单次全进程枚举，原逐服务 N 次全量扫描）；expand_config 补 metrics_file 的 %VAR% 展开；usage 改发散函数 -> ! 并清理全部 unreachable return；prometheus final 行尾随空格/probe_via_plugin 死参数清理
+- 明确不做：is_user_writable/secure_directory 的 PowerShell→Win32 API 重写（回归风险高、已有进程内缓存收益有限）；x86 编译验证由 BUILD.ps1 流水线覆盖（本机 cargo check --target i686 因宿主构建脚本环境限制不可用）
+- 测试 +6：残缺转义不 panic / 截断下载失败 / 跨源剥离凭据 / quick 残留清理 / start_mode 预检（主项目 172→177）/ mysql 包头探针（kits 32→33）全过；clippy -D warnings 零告警、fmt clean
+- 2 README 同步：下载安全提示补"重定向凭据同源策略"、测试数 177/33
+
 ## v26.11.0（2026-08-23）· BUILD.ps1 提速重构（53s 全流程，原 5-10 分钟级）
 - **根因**：①第 7 段 UPX 为切 opt-level=z 改根 Cargo.toml → 触发**整个依赖树重编译**（64+32 位各 1-2 次全量）+ 改回 3 下次普通构建又全量重编；②插件压缩用 `--ultra-brute --lzma`（40s/文件）实际与 `--lzma`（1s）体积几乎一致
 - **改动 1（最大提速）**：第 7 段不再 opt-level=z 重建，直接用已构建产物 `--lzma` 压缩（实测普通版 4.3MB→1.43MB，与 z 版 1.19MB 差异很小）；删除根 Cargo.toml opt-level 切换/恢复逻辑

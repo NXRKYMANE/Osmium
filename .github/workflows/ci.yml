@@ -12,7 +12,7 @@ env:
 
 jobs:
   check:
-    name: fmt + clippy + test
+    name: fmt + clippy + test + audit
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +36,17 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Lint (clippy, warnings as errors)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
+
+      - name: Check 32-bit target compiles
+        run: |
+          rustup target add i686-pc-windows-msvc
+          cargo check --locked --workspace --target i686-pc-windows-msvc
+
+      - name: Security audit (RustSec advisories)
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

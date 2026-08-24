@@ -178,7 +178,7 @@ pub struct ServiceConfig {
     #[serde(rename = "log_zip_date_format")]
     pub log_zip_date_format: Option<String>,
 
-    /// 日志脱敏正则列表（每条匹配的文本替换为 ***，应用于宿主/钩子/子进程日志写入前）
+    /// 日志脱敏字面串列表（每条匹配的子串替换为 ***，应用于宿主/钩子/子进程日志写入前）
     #[serde(rename = "log_redact", default)]
     pub log_redact: Option<Vec<String>>,
 

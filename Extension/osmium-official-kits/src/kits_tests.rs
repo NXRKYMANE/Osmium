@@ -1,4 +1,4 @@
-﻿// ==================== 单元 + 协议集成测试（覆盖 kits_core 全部功能与协议分发） ====================
+// ==================== 单元 + 协议集成测试（覆盖 kits_core 全部功能与协议分发） ====================
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -938,4 +938,113 @@ fn probe_redis_and_tcp_via_local_server() {
         probe_target("tcp", "127.0.0.1", 1, 2).is_err(),
         "关闭端口应失败"
     );
+}
+
+#[test]
+fn probe_mysql_honors_packet_header_offset() {
+    // B6 回归: MySQL 初始握书包 payload 前有 4 字节包头（3 长度 + 1 序号），
+    // 协议版本 0x0a 在 buf[4]——旧实现检查 buf[0]（长度字节低位）恒误报
+    use crate::kits_core::probe_target;
+    use std::net::TcpListener;
+    use std::thread;
+    // 标准握手包: 长度=0x0a+负载（此处简化），序号 0，payload[0]=0x0a
+    let handshake = [0x14, 0x00, 0x00, 0x00, 0x0a, 0x38, 0x2e, 0x30];
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = stream.write_all(&handshake);
+    });
+    assert!(
+        probe_target("mysql", "127.0.0.1", addr.port(), 5).is_ok(),
+        "带包头的握手包应识别协议版本"
+    );
+    handle.join().unwrap();
+    // 错误包: payload[0]=0xff（buf[4]），错误消息从 buf[5] 开始
+    let err_pkt = [0x03, 0x00, 0x00, 0x00, 0xff, 0x64];
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = stream.write_all(&err_pkt);
+    });
+    let result = probe_target("mysql", "127.0.0.1", addr.port(), 5);
+    assert!(result.is_err(), "0xff 错误包应失败");
+    assert!(
+        result.unwrap_err().contains("mysql server error"),
+        "错误消息应取自包头之后"
+    );
+    handle.join().unwrap();
+}
+
+#[test]
+fn sspi_download_follows_redirect_manually_to_final_source() {
+    // max_redirects=0 后由插件手动跟随: 首响应 302（相对 Location）→ 最终 200 内容落地；
+    // 未实现手动跟随会直接报 "server returned HTTP 302"
+    let body = b"redirected payload".to_vec();
+    let body2 = body.clone();
+    let (addr, stop, count) = spawn_http_server(move |_method, lines| {
+        let path = lines
+            .iter()
+            .find(|l| l.to_ascii_lowercase().starts_with("get "))
+            .map(|l| l.split_whitespace().nth(1).unwrap_or("").to_string())
+            .unwrap_or_default();
+        if path.ends_with("/final") {
+            return (
+                "200 OK".to_string(),
+                vec![("Content-Length".into(), body2.len().to_string())],
+                body2.clone(),
+            );
+        }
+        // 相对 Location: 验证 RFC 3986 join 解析
+        (
+            "302 Found".to_string(),
+            vec![("Location".into(), "/final".into())],
+            vec![],
+        )
+    });
+    let url = format!("http://{}:{}/start", addr.ip(), addr.port());
+    let target = std::env::temp_dir().join("osmium-kit-sspi-redirect.bin");
+    let _ = std::fs::remove_file(&target);
+    let result = sspi_download_to_file(&url, target.to_str().unwrap(), None, None, None, 5);
+    stop.store(true, Ordering::Relaxed);
+    assert!(
+        result.is_ok(),
+        "302 应被手动跟随到最终源，实际 {:?}",
+        result
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), body);
+    assert!(
+        count.load(Ordering::Relaxed) >= 2,
+        "重定向链应产生至少两次请求"
+    );
+    let _ = std::fs::remove_file(&target);
+}
+
+#[test]
+fn sspi_download_truncated_body_fails_and_leaves_no_target() {
+    // 截断对照: 声明 Content-Length 大于实际响应体（连接干净关闭）→ 按失败处理，
+    // 目标文件不得落地、tmp 不得残留（无 sha 配置时防静默损坏被执行）
+    let body = b"short".to_vec();
+    let (addr, stop, _count) = spawn_http_server(move |_m, _l| {
+        (
+            "200 OK".to_string(),
+            vec![("Content-Length".into(), "1024".to_string())],
+            body.clone(),
+        )
+    });
+    let url = format!("http://{}:{}/trunc.bin", addr.ip(), addr.port());
+    let target = std::env::temp_dir().join("osmium-kit-sspi-trunc.bin");
+    let _ = std::fs::remove_file(&target);
+    let result = sspi_download_to_file(&url, target.to_str().unwrap(), None, None, None, 5);
+    stop.store(true, Ordering::Relaxed);
+    let err = result.unwrap_err();
+    // 截断的两种表现: 长度对照命中（truncated）或对端断开导致写失败（Peer disconnected）——均拒绝落盘
+    assert!(
+        err.contains("truncated") || err.contains("failed to write"),
+        "应按截断失败处理，实际: {err}"
+    );
+    assert!(!target.exists(), "截断下载不得改名落盘");
+    let tmp_path = format!("{}.download.tmp", target.display());
+    assert!(!std::path::Path::new(&tmp_path).exists(), "tmp 应被清理");
 }
