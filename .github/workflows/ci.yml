@@ -15,7 +15,7 @@ jobs:
     name: fmt + clippy + test + audit
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain (stable, rustfmt + clippy)
         uses: dtolnay/rust-toolchain@stable
