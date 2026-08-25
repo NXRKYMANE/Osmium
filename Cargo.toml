@@ -1,0 +1,20 @@
+# 仓库根 workspace: 同时管理主程序与官方插件两个 Cargo 项目，
+# 使 IDE（RustRover/CLion）能一并识别，产物统一到根 target 目录
+[workspace]
+members = [
+    "Project",
+    "Extension/osmium-official-kits",
+]
+resolver = "3"
+
+# 发布构建（全成员共用）: 速度优先优化 + 裁剪符号 + 链接期优化；
+# 不能用 panic="abort": 代码依赖 catch_unwind 做配置解析兜底
+[profile.release]
+opt-level = 3
+strip = true
+lto = true
+codegen-units = 1
+
+# 插件体积优先: 仅插件包自身 opt-level=z（依赖与主程序共享 opt-3 缓存, 插件增量构建几乎零成本）
+[profile.release.package.osmium-official-kits]
+opt-level = "z"

@@ -1,0 +1,55 @@
+[package]
+name = "osmium"
+version = "26.12.0"
+edition = "2024"
+
+[[bin]]
+name = "osmium64"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.4"
+chrono = "0.4.45"
+# 启动前下载: 轻量阻塞 HTTP 客户端（ureq，零 tokio/hyper 依赖，免 OpenSSL 系统依赖）
+ureq = { version = "3.4.0", default-features = false, features = ["rustls", "gzip"] }
+# URL 解析/去敏（ureq 不内置 Url 类型）
+url = "2.5.8"
+# 下载文件 SHA-256 校验
+sha2 = "0.11.0"
+# 日志 zip 归档（仅 deflate，避免重依赖；下载解压已迁 osmium-kit-unzip 插件）
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+# Basic 认证头拼接 + DPAPI 密文 base64 编码
+base64 = "0.23.1"
+# 配置签名（RSA-SHA256）: 部署配置防篡改校验（require_signed_config）；pkcs8 支持默认内置
+rsa = { version = "0.9.10", features = ["sha2", "pem"] }
+
+[dependencies.windows]
+version = "=0.62.2"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_EventLog",
+    "Win32_System_JobObjects",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_Services",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_Security_WinTrust",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Storage_FileSystem",
+    "Wdk_System_Threading",
+]
+
+[build-dependencies]
+winresource = "0.1.31"
+chrono = "0.4.45"

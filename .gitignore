@@ -1,0 +1,8 @@
+.vscode/
+.build/
+target/
+Publish/
+.tmp*/
+.idea/
+# 代码签名私钥（证书库，切勿提交）
+Misc/codesign.pfx

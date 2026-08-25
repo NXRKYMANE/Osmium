@@ -1,0 +1,36 @@
+[package]
+name = "osmium-official-kits"
+version = "2.1.0"
+edition = "2024"
+
+# 官方工具包: 单一 bin（构建后改名为 .osx），按 stdin JSON 的 kit 字段分发到各功能
+[[bin]]
+name = "osmium-kit"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+# 认证下载/HTTP 相关: 轻量阻塞客户端（ureq，零 tokio/hyper 依赖）
+ureq = { version = "3.4.0", default-features = false, features = ["rustls", "gzip"] }
+# Negotiate token 的 base64 编解码
+base64 = "0.23.1"
+# URL 解析（SPN 提取 host/port）
+url = "2.5.8"
+# zip 解压（kit-unzip，仅 deflate）
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+
+[dependencies.windows]
+version = "0.62.2"
+features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_WNet",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Credentials",
+    "Win32_System_Shutdown",
+    "Win32_System_SystemInformation",
+]
+
+[build-dependencies]
+winresource = "0.1.31"
+chrono = "0.4.45"
