@@ -31,7 +31,7 @@ fn main() {
     res.set("ProductVersion", version);
     res.set("CompanyName", "NXRKYMANE SOFTWARE");
     res.set("ProductName", "Osmium");
-    res.set("FileDescription", "osmium64");
+    res.set("FileDescription", "osmium");
     res.set(
         "LegalCopyright",
         &format!("Copyright (C) {} NXRKYMANE SOFTWARE", year),

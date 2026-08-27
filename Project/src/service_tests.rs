@@ -1508,7 +1508,7 @@ fn roll_if_needed_zips_oldest_backup() {
 
 #[test]
 fn unzip_missing_plugin_reports_error() {
-    // zip 解压经 osmium-kit-unzip 插件执行: 无插件时 run_plugin 必须明确报错（宿主侧安全降级）
+    // zip 解压经官方 unzip kit 执行: 无插件时 run_plugin 必须明确报错（宿主侧安全降级）
     let err = crate::service_host::run_plugin(
         "unzip",
         &serde_json::json!({ "src": "C:\\x.zip", "dest": "C:\\out" }),
@@ -2629,7 +2629,7 @@ fn process_samples_work_for_self() {
 
 #[test]
 fn netmap_missing_plugin_reports_error() {
-    // 共享目录映射经 osmium-kit-netmap 插件执行: 无插件时 run_plugin 必须明确报错（宿主侧安全降级）
+    // 共享目录映射经官方 netmap kit 执行: 无插件时 run_plugin 必须明确报错（宿主侧安全降级）
     let err = crate::service_host::run_plugin(
         "netmap",
         &serde_json::json!({ "action": "map", "mappers": [] }),
@@ -2641,7 +2641,7 @@ fn netmap_missing_plugin_reports_error() {
 
 #[test]
 fn sspi_missing_plugin_reports_error() {
-    // sspi 认证下载经 osmium-kit-sspi 插件执行: 无插件时 run_plugin 必须明确报错（宿主侧安全降级）
+    // sspi 认证下载经官方 sspi kit 执行: 无插件时 run_plugin 必须明确报错（宿主侧安全降级）
     let err = crate::service_host::run_plugin(
         "sspi",
         &serde_json::json!({ "url": "http://x", "to": "C:\\x" }),
@@ -2653,7 +2653,7 @@ fn sspi_missing_plugin_reports_error() {
 
 #[test]
 fn reboot_missing_plugin_reports_error() {
-    // 系统重启经 osmium-kit-reboot 插件执行: 无插件时 run_plugin 必须明确报错（宿主侧安全降级）
+    // 系统重启经官方 reboot kit 执行: 无插件时 run_plugin 必须明确报错（宿主侧安全降级）
     let err = crate::service_host::run_plugin("reboot", &serde_json::json!({}), 5);
     assert!(err.is_err(), "未安装插件时重启必须失败");
     assert!(err.unwrap_err().contains("reboot"), "错误信息应含插件名");
@@ -2972,7 +2972,7 @@ fn build_child_command_injects_env_and_passes_args() {
 
 #[test]
 fn sspi_download_missing_plugin_fails_clearly() {
-    // download_auth=sspi 经 osmium-kit-sspi 插件完成: 插件缺失时必须启动失败并给出明确原因
+    // download_auth=sspi 经官方 sspi kit 完成: 插件缺失时必须启动失败并给出明确原因
     // （禁止静默降级为无认证下载，防凭据/完整性保护被静默关闭）
     let dir = unique_temp_dir("sspirej");
     let cfg_path = dir.join("svc.toml");

@@ -159,17 +159,17 @@ $publishDir = Join-Path $ProjectRoot "Publish"
 New-Item -ItemType Directory -Force -Path $publishDir | Out-Null
 Get-ChildItem $publishDir -Force | Remove-Item -Recurse -Force
 # 主程序: 直接以 osmium64.exe 输出（安装时改名为 os.exe）
-Copy-Item (Join-Path $ProjectRoot "target\release\osmium64.exe") (Join-Path $publishDir "osmium64.exe") -Force
-# 官方插件: osmium-kit.exe → UPX 压缩 → exts\osmium64-official-kits-v<KITS_VERSION>.osx（文件名带插件自身版本）
+Copy-Item (Join-Path $ProjectRoot "target\release\osmium.exe") (Join-Path $publishDir "osmium64.exe") -Force
+# 官方插件: osmium-kits.exe → UPX 压缩 → exts\osmium64-official-kits-v<KITS_VERSION>.osx（文件名带插件自身版本）
 # 插件发行版直接以 opt-level=z + UPX 压缩产物发布（不再区分 UPX/原版；upx 不可用则回退未压缩并告警）
 $extDir = Join-Path $publishDir "exts"
 New-Item -ItemType Directory -Force -Path $extDir | Out-Null
 $kitOsxName = "osmium64-official-kits-v$kitsVersion.osx"
 if (Test-Path $upxPath) {
-    Compress-Upx (Join-Path $ProjectRoot "target\release\osmium-kit.exe") (Join-Path $extDir $kitOsxName) "kits 64-bit"
+    Compress-Upx (Join-Path $ProjectRoot "target\release\osmium-kits.exe") (Join-Path $extDir $kitOsxName) "kits 64-bit"
 } else {
     Write-Warning "UPX not found, kits shipped uncompressed."
-    Copy-Item (Join-Path $ProjectRoot "target\release\osmium-kit.exe") (Join-Path $extDir $kitOsxName) -Force
+    Copy-Item (Join-Path $ProjectRoot "target\release\osmium-kits.exe") (Join-Path $extDir $kitOsxName) -Force
 }
 
 # 4.3 32 位构建 (i686): Publish\osmium32.exe + Publish\exts\osmium32-official-kits-v<VERSION>.osx（不生成安装包）
@@ -200,13 +200,13 @@ if ($build32) {
             if ($LASTEXITCODE -ne 0) { throw "32-bit build failed (workspace)" }
         } finally { Pop-Location }
         $kitOsx32Name = "osmium32-official-kits-v$kitsVersion.osx"
-        Copy-Item "$ProjectRoot\target\i686-pc-windows-msvc\release\osmium64.exe" (Join-Path $publishDir "osmium32.exe") -Force
+        Copy-Item "$ProjectRoot\target\i686-pc-windows-msvc\release\osmium.exe" (Join-Path $publishDir "osmium32.exe") -Force
         # 32 位插件同样 UPX 压缩（发行版即压缩版）
         if (Test-Path $upxPath) {
-            Compress-Upx "$ProjectRoot\target\i686-pc-windows-msvc\release\osmium-kit.exe" (Join-Path $extDir $kitOsx32Name) "kits 32-bit"
+            Compress-Upx "$ProjectRoot\target\i686-pc-windows-msvc\release\osmium-kits.exe" (Join-Path $extDir $kitOsx32Name) "kits 32-bit"
         } else {
             Write-Warning "UPX not found, 32-bit kits shipped uncompressed."
-            Copy-Item "$ProjectRoot\target\i686-pc-windows-msvc\release\osmium-kit.exe" (Join-Path $extDir $kitOsx32Name) -Force
+            Copy-Item "$ProjectRoot\target\i686-pc-windows-msvc\release\osmium-kits.exe" (Join-Path $extDir $kitOsx32Name) -Force
         }
         Write-Host "Done: Publish\osmium32.exe" -ForegroundColor Green
         Write-Host "Done: Publish\exts\$kitOsx32Name" -ForegroundColor Green

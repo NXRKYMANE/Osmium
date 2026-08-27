@@ -6,7 +6,7 @@ edition = "2024"
 
 # 官方工具包: 单一 bin（构建后改名为 .osx），按 stdin JSON 的 kit 字段分发到各功能
 [[bin]]
-name = "osmium-kit"
+name = "osmium-kits"
 path = "src/main.rs"
 
 [dependencies]

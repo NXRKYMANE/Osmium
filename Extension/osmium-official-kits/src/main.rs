@@ -1,4 +1,4 @@
-//! osmium-kit — 官方工具包插件入口（构建后改名为 .osx）
+//! osmium-kits — 官方工具包插件入口（构建后改名为 .osx）
 //! 协议: stdin 单行 JSON（含 kit 字段分发到各功能）→ stdout 单行 JSON 响应，退出码 0/非0
 
 mod kits_core;
@@ -299,7 +299,7 @@ fn ok() {
 /// 输出失败响应并退出（退出码非 0 供宿主判定异常）;
 /// 同时向 stderr 抛出错误详情（宿主调用时丢弃、手动运行/调试时可见）
 fn fail(msg: &str) -> ! {
-    eprintln!("osmium-kit error: {msg}");
+    eprintln!("osmium-kits error: {msg}");
     let resp = Response {
         ok: false,
         error: Some(msg.to_string()),

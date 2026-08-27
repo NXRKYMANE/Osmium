@@ -1,4 +1,4 @@
-﻿# ✨ Osmium — Windows Service Generator Framework
+﻿# ✨ Osmium — Windows Service Generative Framework
 
 <p align="center">
   <img src="https://img.shields.io/github/followers/NXRKYMANE?style=social" />
@@ -11,7 +11,7 @@
   <img src="https://vbr.nathanchung.dev/badge?page_id=NXRKYMANE.Osmium&color=FFFFFF&leftColor=555555&label=Views" />
 </p>
 
-将任意可执行文件或脚本注册为 Win32 系统服务。 [SEE ENGLISH DOCS](README.md)
+将任意可执行文件或脚本注册为 Win32 系统服务 —— Windows 服务生成式框架。 [SEE ENGLISH DOCS](README.md)
 
 > Osmium 使用 **Rust** 语言编写，一些高级功能采用 OSX 插件化，以便需要的时候可以扩展。
 
@@ -225,7 +225,7 @@ service_executable_path = 'C:\app\myapp.exe'
 | `download_to`                     | string       | 无                   | 下载目标路径；相对路径基于服务部署目录（不得越出部署目录）                                                                                                                                                                                                          |
 | `download_sha256`                 | string       | 无                   | 下载文件 SHA-256（小写十六进制）                                                                                                                                                                                                                                    |
 | `download_fail_on_error`          | bool         | `true`               | 下载失败是否导致服务启动失败                                                                                                                                                                                                                                        |
-| `download_auth`                   | string       | 无                   | 下载认证方式：`basic`（用户名/密码），或 `sspi`（Windows 集成认证 Negotiate/NTLM/Kerberos）——`sspi` 由官方 `osmium-kit-sspi` 插件处理（随官方插件提供：64 位宿主用 `osmium64-official-kits.osx`、32 位用 `osmium32-official-kits.osx`）；未装插件时下载会明确报错   |
+| `download_auth`                   | string       | 无                   | 下载认证方式：`basic`（用户名/密码），或 `sspi`（Windows 集成认证 Negotiate/NTLM/Kerberos）——`sspi` 由官方插件的 `sspi` kit 处理（随官方插件提供：64 位宿主用 `osmium64-official-kits.osx`、32 位用 `osmium32-official-kits.osx`）；未装插件时下载会明确报错        |
 | `download_username`               | string       | 无                   | `basic` 认证用户名                                                                                                                                                                                                                                                  |
 | `download_password`               | string       | 无                   | `basic` 认证密码                                                                                                                                                                                                                                                    |
 | `download_proxy`                  | string       | 无                   | 下载使用的代理（http/https 均可）                                                                                                                                                                                                                                   |
@@ -493,7 +493,7 @@ to = "extra.bin"
 
 ## 脚本作为服务（解释器 + 脚本路径）
 
-Osmium 的服务目标是「可执行程序」。要让 .py / .jar / .js / .lua / .ps1 / .bat / .cmd 脚本作为服务，只需把**解释器**填进 `service_executable_path`，脚本路径与参数填进 `service_executable_args`——宿主按普通进程管理，退出码、自动重启、日志、优雅关闭全部照常生效。
+Osmium 的服务目标是「可执行程序」。要让 .py / .jar / .js / .rb / .lua / .ps1 / .bat / .cmd 脚本作为服务，只需把**解释器**填进 `service_executable_path`，脚本路径与参数填进 `service_executable_args`——宿主按普通进程管理，退出码、自动重启、日志、优雅关闭全部照常生效。
 
 > [!TIP]
 > 服务进程默认工作目录是 `C:\Windows\System32`，脚本内请用绝对路径（或自行 `cd`，或配 `working_directory`）。
@@ -544,6 +544,20 @@ working_directory = 'C:\app'
 ```
 
 脚本需要常驻（事件循环不退出），不要写成执行完就结束的一次性脚本；优雅停止时 `Ctrl+C` 会触发 `process.on('SIGINT')` 回调，可在此做清理。Windows 版 Node 用 `node.exe`（不带窗口运行时请用 `node.exe` 而非 `nodevars.bat`）。
+
+### Ruby 脚本
+
+```toml
+service_name = "ruby-worker"
+service_display_name = "Ruby Worker"
+service_description = "Ruby 脚本服务"
+service_executable_path = 'C:\Ruby33-x64\bin\ruby.exe'
+service_executable_args = 'C:\app\worker.rb'
+service_start_mode = "automatic"
+working_directory = 'C:\app'
+```
+
+用 RubyInstaller 的 `ruby.exe`（64 位装 `C:\Ruby33-x64\bin\ruby.exe`）。脚本需常驻：`loop { sleep 1 ... }` 或事件循环（如 `TCPServer`/`Sinatra`）；优雅停止时 `Ctrl+C` 触发 `Signal.trap('INT')` / `at_exit` 清理；业务退出用 `exit(code)` 返回真实退出码，供宿主故障恢复判定。
 
 ### Lua 脚本
 
@@ -643,7 +657,7 @@ Osmium 支持万物皆插件：官方的高级功能、第三方的扩展能力�
 > [!IMPORTANT]
 > **插件位数必须与宿主匹配**：32 位进程无法启动 64 位可执行文件（反之 64 位宿主可跑 32 位插件）——32 位宿主请用 `osmium32-official-kits.osx`（或你自行编译的 32 位插件），否则调用直接失败（`--extend` 红点；名称后的位数标记 `[64]` / `[32]` / `[unknown]` 可用来核对）。
 
-- 插件就是一个普通程序，把扩展名改成 `.osx` 就行（比如 `osmium-kit.exe` → `osmium64-official-kits.osx`）
+- 插件就是一个普通程序，把扩展名改成 `.osx` 就行（比如 `osmium-kits.exe` → `osmium64-official-kits.osx`）
 - 插件放在宿主 exe 所在目录的任意位置——宿主递归发现所有 `.osx`（跳过 `.` 开头的隐藏目录），独立部署可以直接把插件放在 exe 旁；平台安装仍装 `%ProgramFiles%\Osmium\exts\`
 - 宿主启动时递归扫描 exe 目录下所有 `.osx`，按请求里的 `kit` 字段分发调用
 - **插件不常驻**：每次调用临时拉起，处理完一个请求就退出
@@ -710,7 +724,7 @@ os --ext
 1. **宿主内置字段**（最省事）：解压、共享映射、重启、sspi 下载、以及崩溃告警（Webhook / 邮件 / syslog）都有现成配置字段，宿主自动调对应插件，不用写 `[[plugins]]`：
 
 ```toml
-# sspi 认证下载（经 osmium-kit-sspi 插件完成）
+# sspi 认证下载（经官方 sspi kit 完成）
 download_url = "https://server/app.exe"
 download_auth = "sspi"
 
@@ -781,7 +795,7 @@ payload = { url = "https://hooks.example.com/osmium", text = "my service started
 
 ## 第三方插件开发
 
-写一个插件其实很简单：实现协议、放进 `exts\`、配置里声明、`--extend` 看绿点。下面给出 6 种语言的完整示例，都是同一个 backup 能力，逻辑完全一致，挑你顺手的抄。
+写一个插件其实很简单：实现协议、放进 `exts\`、配置里声明、`--extend` 看绿点。下面给出 10 种语言的完整示例，都是同一个 backup 能力，逻辑完全一致，挑你顺手的抄。
 
 ### Rust 示例
 
@@ -808,7 +822,7 @@ fn main() {
 }
 
 fn fail(msg: &str) -> ! {
-    eprintln!("osmium-kit error: {msg}");          // stderr: 给人看的
+    eprintln!("osmium-kits error: {msg}");          // stderr: 给人看的
     println!(r#"{{"ok":false,"error":"{msg}"}}"#); // stdout: 协议响应
     std::process::exit(1);
 }
@@ -839,7 +853,7 @@ static void extract_kit(const char *json, char *out, size_t out_size) {
 }
 
 static int fail(const char *msg) {
-    fprintf(stderr, "osmium-kit error: %s\n", msg);      // stderr: 给人看的
+    fprintf(stderr, "osmium-kits error: %s\n", msg);      // stderr: 给人看的
     printf("{\"ok\":false,\"error\":\"%s\"}\n", msg);    // stdout: 协议响应
     return 1;
 }
@@ -879,7 +893,7 @@ int main(void) {
 using json = nlohmann::json;
 
 int fail(const std::string& msg) {
-    std::cerr << "osmium-kit error: " << msg << std::endl;         // stderr: 给人看的
+    std::cerr << "osmium-kits error: " << msg << std::endl;         // stderr: 给人看的
     std::cout << "{\"ok\":false,\"error\":\"" << msg << "\"}" << std::endl; // stdout: 协议响应
     return 1;
 }
@@ -921,7 +935,7 @@ class Plugin
 {
     static int Fail(string msg)
     {
-        Console.Error.WriteLine("osmium-kit error: " + msg);           // stderr: 给人看的
+        Console.Error.WriteLine("osmium-kits error: " + msg);           // stderr: 给人看的
         Console.WriteLine("{\"ok\":false,\"error\":\"" + msg + "\"}"); // stdout: 协议响应
         return 1;
     }
@@ -964,7 +978,7 @@ import (
 
 // 失败响应: stderr 给人看，stdout 走协议（json.Marshal 自动转义特殊字符）
 func fail(msg string) {
-    fmt.Fprintf(os.Stderr, "osmium-kit error: %s\n", msg)
+    fmt.Fprintf(os.Stderr, "osmium-kits error: %s\n", msg)
     out, _ := json.Marshal(map[string]any{"ok": false, "error": msg})
     fmt.Println(string(out))
     os.Exit(1)
@@ -1033,7 +1047,7 @@ public class Plugin {
     }
 
     private static void fail(String msg) {
-        System.err.println("osmium-kit error: " + msg);                 // stderr: 给人看的
+        System.err.println("osmium-kits error: " + msg);                 // stderr: 给人看的
         System.out.println("{\"ok\":false,\"error\":\"" + msg + "\"}"); // stdout: 协议响应
         System.exit(1);
     }
@@ -1050,7 +1064,7 @@ import sys
 
 
 def fail(msg):
-    print(f"osmium-kit error: {msg}", file=sys.stderr)      # stderr: 给人看的
+    print(f"osmium-kits error: {msg}", file=sys.stderr)      # stderr: 给人看的
     print(json.dumps({"ok": False, "error": msg}))          # stdout: 协议响应
     sys.exit(1)
 
@@ -1111,10 +1125,88 @@ process.stdin.on('end', () => {
 });
 
 function fail(msg) {
-    console.error('osmium-kit error: ' + msg);               // stderr: 给人看的
+    console.error('osmium-kits error: ' + msg);               // stderr: 给人看的
     console.log(JSON.stringify({ ok: false, error: msg }));  // stdout: 协议响应
     process.exit(1);
 }
+```
+
+### Ruby 示例
+
+标准库就够，`JSON` 内置。
+
+```ruby
+#!/usr/bin/env ruby
+require 'json'
+
+# 失败响应: stderr 给人看，stdout 走协议（JSON.generate 自动转义特殊字符）
+def fail(msg)
+  warn "osmium-kits error: #{msg}"
+  puts JSON.generate({ ok: false, error: msg })
+  exit 1
+end
+
+# 限制输入大小: 只读前 1MB
+input = STDIN.read(1024 * 1024) || ''
+if input.strip.empty?
+  exit 0 # 无调用方（双击）: 静默退出
+end
+
+begin
+  req = JSON.parse(input)
+rescue JSON::ParserError => e
+  fail("invalid request: #{e.message}")
+end
+
+kit = req['kit']
+if kit == 'backup'
+  # 执行业务
+  puts JSON.generate({ ok: true })
+else
+  fail("unknown kit: #{kit}")
+end
+```
+
+### Lua 示例
+
+标准库无 JSON 解析，这里给一个不依赖任何库的极简 `kit` 字段提取（不解析完整 JSON，字段顺序无所谓）；生产环境建议配 lua-cjson 等库。
+
+```lua
+-- plugin.lua — lua.exe plugin.lua（Ruby/Node 同款 backup 能力）
+-- 极简提取 "kit":"xxx"（不解析完整 JSON，字段顺序无所谓）
+local function extract_kit(json)
+  local p = string.find(json, '"kit"', 1, true)
+  if not p then return "" end
+  p = string.find(json, ':', p)
+  if not p then return "" end
+  p = string.find(json, '"', p)
+  if not p then return "" end
+  p = p + 1
+  local q = string.find(json, '"', p)
+  if not q then return "" end
+  return string.sub(json, p, q - 1)
+end
+
+local function fail(msg)
+  io.stderr:write("osmium-kits error: " .. msg .. "\n") -- stderr: 给人看的
+  io.stdout:write('{"ok":false,"error":"' .. msg .. '"}') -- stdout: 协议响应
+  os.exit(1)
+end
+
+-- 限制输入大小: 只读前 1MB
+local input = io.read(1024 * 1024) or ""
+input = input:gsub("^%s+", ""):gsub("%s+$", "")
+if input == "" then
+  os.exit(0) -- 无调用方（双击）: 静默退出
+end
+
+local kit = extract_kit(input)
+if kit == "backup" then
+  -- 执行业务
+  print('{"ok":true}')
+else
+  fail("unknown kit: " .. kit)
+end
 ```
 
 ### 接入步骤
@@ -1268,7 +1360,7 @@ Copy-Item ..\target\i686-pc-windows-msvc\release\osmium64.exe ..\Publish\osmium3
 - 自动注册开机服务刷新程序（`--install-refresher`）
 - 注册控制面板卸载条目
 - 自动检测旧版本：高版本静默升级、同版本询问重装、低版本警告降级
-- 替换 os.exe 前自动停止使用它的服务，安装完成后自动重启，无重启提示
+- 替换 os.exe 前经 **os.exe 自身管理接口**停止服务（`--stop-all` 停全部平台服务 + `--uninstall-refresher` 移除刷新程序），安装完成后 `--start-all` 自动重启，无重启提示——不直接 WMI/SCM 直停（保持宿主优雅停止语义，避免停止时序/残留问题）；更新时旧版卸载器以 `/UPDATE` 参数静默清理（跳过宿主服务确认框，防静默更新卡住）
 
 ### Inno Setup 集成注意事项
 
@@ -1278,6 +1370,7 @@ Copy-Item ..\target\i686-pc-windows-msvc\release\osmium64.exe ..\Publish\osmium3
 2. **PATH 时效** — 安装后当前进程可能仍找不到 `os.exe`，应从注册表读取：`HKLM\Software\Microsoft\Windows\CurrentVersion\App Paths\os.exe`。
 3. **提权子进程** — Inno 的 `Exec` 直接启动 requireAdministrator 子进程会返回 `ERROR_ACCESS_DENIED`，需经 `cmd.exe` 中转。
 4. **静默安装语言** — `/VERYSILENT` 静默安装必须显式传 `/LANG=`（优先级最高），否则语言选择框仍会弹出卡住。
+5. **停止 Osmium 托管服务** — 停止宿主服务请用 `os.exe --stop-all`（完成后 `--start-all` 恢复），不要用 WMI/SCM 直停——托管服务必须走宿主优雅停止语义；若在更新流程中调用 Osmium 卸载器做清理，请传 `/UPDATE` 参数（跳过"宿主服务确认"弹框——静默更新场景该弹框无人点击会卡住安装流程）。
 
 ## 环境要求
 

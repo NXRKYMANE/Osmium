@@ -17,14 +17,14 @@ use crate::kits_core::{
 /// 定位插件二进制: 集成测试环境用 CARGO_BIN_EXE 编译期路径；
 /// 单元测试（deps 目录）向上一级取 target`<profile>`\ 下的同名产物
 fn kit_bin() -> PathBuf {
-    if let Some(p) = option_env!("CARGO_BIN_EXE_osmium-kit") {
+    if let Some(p) = option_env!("CARGO_BIN_EXE_osmium-kits") {
         return PathBuf::from(p);
     }
     let exe = std::env::current_exe().expect("current exe 应可获取");
     exe.parent()
         .and_then(|p| p.parent())
         .expect("deps 目录向上一级应为 target 配置目录")
-        .join("osmium-kit.exe")
+        .join("osmium-kits.exe")
 }
 
 /// 调用插件: 传入 stdin JSON（空串表示无输入），返回 (退出码, stdout, stderr)
@@ -399,7 +399,7 @@ fn netmap_empty_input_succeeds_and_bad_share_reports_error() {
     }]);
 }
 
-// ==================== 协议层集成测试（真实调用 osmium-kit 二进制） ====================
+// ==================== 协议层集成测试（真实调用 osmium-kits 二进制） ====================
 
 #[test]
 fn ping_returns_ok() {
@@ -413,7 +413,10 @@ fn invalid_json_fails_with_stderr_and_ok_false() {
     let (code, out, err) = invoke("this is not json");
     assert_ne!(code, 0, "非法 JSON 应非零退出");
     assert!(out.contains(r#""ok":false"#), "stdout 应带 ok:false: {out}");
-    assert!(err.contains("osmium-kit error"), "stderr 应抛出详情: {err}");
+    assert!(
+        err.contains("osmium-kits error"),
+        "stderr 应抛出详情: {err}"
+    );
 }
 
 #[test]
@@ -424,7 +427,7 @@ fn unknown_kit_fails() {
         out.contains("unknown kit"),
         "stdout 应含 unknown kit: {out}"
     );
-    assert!(err.contains("osmium-kit error"));
+    assert!(err.contains("osmium-kits error"));
 }
 
 #[test]
@@ -432,7 +435,7 @@ fn sspi_missing_to_field_fails() {
     let (code, out, err) = invoke(r#"{"kit":"sspi","url":"http://x"}"#);
     assert_ne!(code, 0);
     assert!(out.contains("missing 'to'"), "{out}");
-    assert!(err.contains("osmium-kit error"));
+    assert!(err.contains("osmium-kits error"));
 }
 
 #[test]
@@ -440,7 +443,7 @@ fn sspi_missing_url_field_fails() {
     let (code, out, err) = invoke(r#"{"kit":"sspi","to":"C:\\x"}"#);
     assert_ne!(code, 0);
     assert!(out.contains("missing 'url'"), "{out}");
-    assert!(err.contains("osmium-kit error"));
+    assert!(err.contains("osmium-kits error"));
 }
 
 #[test]
@@ -508,7 +511,7 @@ fn stdin_over_limit_truncates_and_fails_fast() {
     let (code, out, err) = invoke_large(&data);
     assert_ne!(code, 0, "超限输入应非零退出");
     assert!(out.contains("invalid request"), "应报解析失败: {out}");
-    assert!(err.contains("osmium-kit error"), "stderr 应抛详情: {err}");
+    assert!(err.contains("osmium-kits error"), "stderr 应抛详情: {err}");
 }
 
 #[test]
@@ -527,7 +530,7 @@ fn netmap_empty_mappers_fails_with_clear_message() {
     let (code, out, err) = invoke(r#"{"kit":"netmap","action":"unmap","mappers":[]}"#);
     assert_ne!(code, 0, "空 mappers 应失败: {out}");
     assert!(out.contains("no mappers"), "{out}");
-    assert!(err.contains("osmium-kit error"));
+    assert!(err.contains("osmium-kits error"));
 }
 
 #[test]
@@ -537,7 +540,7 @@ fn netmap_unknown_action_fails() {
     );
     assert_ne!(code, 0);
     assert!(out.contains("unknown action"), "{out}");
-    assert!(err.contains("osmium-kit error"));
+    assert!(err.contains("osmium-kits error"));
 }
 
 #[test]
@@ -590,7 +593,7 @@ fn unzip_extracts_and_blocks_traversal() {
     assert_ne!(code, 0, "zip-slip 必须拒绝: {out}");
     assert!(out.contains(r#""ok":false"#));
     assert!(
-        err.contains("osmium-kit error"),
+        err.contains("osmium-kits error"),
         "stderr 应抛出错误详情: {err}"
     );
     assert!(!dir.join("evil.txt").exists(), "穿越文件不得写出");
@@ -655,7 +658,7 @@ fn sspi_401_without_challenge_fails_with_details() {
     stop.store(true, Ordering::Relaxed);
     assert_ne!(code, 0, "401 无挑战应失败: {out}");
     assert!(out.contains("without Negotiate"), "{out}");
-    assert!(err.contains("osmium-kit error"));
+    assert!(err.contains("osmium-kits error"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

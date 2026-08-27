@@ -494,7 +494,7 @@ end;
 // 停止所有引用 os.exe 的服务并等待其退出（避免覆盖运行中的文件）
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  OldVer, OldUninst, SvcList, ExePathFile: String;
+  OldVer, OldUninst: String;
   ResultCode: Integer;
 begin
   Result := '';
@@ -508,29 +508,28 @@ begin
       Exit;
     end;
 
-    // 2. 运行旧版卸载器（不弹旧 UI），清理旧服务、旧文件与旧注册表键
+    // 2. 运行旧版卸载器（不弹旧 UI），清理旧服务、旧文件与旧注册表键。
+    // 传 /UPDATE: 新版卸载器据此跳过宿主服务确认框（更新场景无需用户确认，只做清理——
+    // 旧版卸载器在静默更新时弹确认框会卡住安装流程）。限时 60 秒兜底: 更旧的卸载器
+    // 不认识 /UPDATE 仍可能卡住，超时强杀后继续（容忍模式）
     if RegQueryStringValue(HKLM, UninstallKey, 'UninstallString', OldUninst) and
        (OldUninst <> '') then
     begin
       AddLog('Running old uninstaller: ' + OldUninst);
-      Exec(OldUninst, '/VERYSILENT /SUPPRESSMSGBOX /NORESTART', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Exec('powershell.exe', '-NoProfile -NonInteractive -Command "$p = Start-Process -FilePath ' + OldUninst + ' -ArgumentList ''/VERYSILENT /SUPPRESSMSGBOX /NORESTART /UPDATE'' -PassThru -WindowStyle Hidden; if (-not $p.WaitForExit(60000)) { $p.Kill(); Write-Output ''[timed-out, killed]'' } else { Write-Output ''[done]'' }"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end;
   end;
 
-  // 3. 停止所有以本产品 os.exe 为宿主的服务（共享宿主/刷新程序运行时占用文件无法覆盖），
-  // 并把服务名记录到临时文件，安装完成后由 ssPostInstall 重新启动。
-  // 判定方式: ImagePath 的 exe 段剥离引号/参数后与本体路径精确相等（大小写不敏感）——
-  // 旧实现的 'os\.exe' 子串匹配会误伤第三方同名结尾服务（如 VideoOS.exe）。
-  // WMI StopService() 异步触发：所有服务并行停止（不等单个服务走完优雅流程），
-  // 随后轮询等待全部进入 Stopped（总超时 3 分钟，覆盖 poststop 钩子/停止超时），失败容忍
-  SvcList := ExpandConstant('{tmp}\osmium-svc-list.txt');
-  // 本体 exe 路径写入临时文件供 PS 读取比对（避免路径拼入命令行的转义问题）
-  ExePathFile := ExpandConstant('{tmp}\osmium-exe-path.txt');
-  SaveStringToFile(ExePathFile, ExpandConstant('{app}\os.exe'), True);
-  AddLog('Stopping services that use os.exe...');
-  // Get-CimInstance 替代已弃用的 Get-WmiObject（WMI 损坏/精简系统下后者不可用）；
-  // CIM 实例方法须经 Invoke-CimMethod 调用（StopService/StartService）
-  Exec('powershell.exe', '-NoProfile -NonInteractive -Command "$p = (Get-Content -LiteralPath ''' + ExePathFile + ''' -Raw).Trim(); $svcs = @(Get-CimInstance Win32_Service | Where-Object { $pn = [string]$_.PathName; if ($pn) { $n = $pn.Trim(); if ($n.StartsWith([string][char]34)) { $q = $n.IndexOf([char]34, 1); if ($q -gt 0) { $n = $n.Substring(1, $q - 1) } } elseif ($n.Contains('' '')) { $n = $n.Split('' '')[0] }; $n.Trim() -eq $p } }; $svcs.Name | Set-Content ''' + SvcList + '''; $svcs | ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName StopService } | Out-Null; $deadline = (Get-Date).AddMinutes(3); do { $running = @(Get-CimInstance Win32_Service | Where-Object { $svcs.Name -contains $_.Name -and $_.State -ne ''Stopped'' }); if (-not $running) { break }; Start-Sleep -Seconds 2 } while ((Get-Date) -lt $deadline)"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // 3. 停止所有以本产品 os.exe 为宿主的服务（共享宿主/刷新程序运行时占用文件无法覆盖）。
+  // 经 os.exe 自身管理接口停止: --stop-all 先停全部平台服务（并行下发、等待 Stopped，
+  // 保持宿主优雅停止语义与状态上报），再 -internal --uninstall-refresher 停止并移除刷新程序。
+  // 不用 WMI StopService 直接停——绕过宿主管理链路会造成停止时序/残留等奇怪问题。
+  // PowerShell 限时兜底（180s）: 旧版 os.exe 的停止流程可能较慢，超时强杀后继续（容忍模式）
+  AddLog('Stopping services via os.exe --stop-all...');
+  Exec('powershell.exe', '-NoProfile -NonInteractive -Command "$p = Start-Process -FilePath ''' + ExpandConstant('{app}\os.exe') + ''' -ArgumentList ''--stop-all'' -PassThru -WindowStyle Hidden; if (-not $p.WaitForExit(180000)) { $p.Kill(); Write-Output ''[timed-out, killed]'' } else { Write-Output ''[done]'' }"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // 刷新程序不在平台服务列表内（ImagePath 为 os.exe -internal --refresher），单独停止并移除
+  AddLog('Removing boot-time service refresher...');
+  Exec('powershell.exe', '-NoProfile -NonInteractive -Command "$p = Start-Process -FilePath ''' + ExpandConstant('{app}\os.exe') + ''' -ArgumentList ''-internal --uninstall-refresher'' -PassThru -WindowStyle Hidden; if (-not $p.WaitForExit(60000)) { $p.Kill(); Write-Output ''[timed-out, killed]'' } else { Write-Output ''[done]'' }"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   // 4. 等待旧 os.exe 完全退出（最长 30 秒），避免覆盖运行中的 exe
   AddLog('Waiting for os.exe to exit...');
@@ -568,7 +567,6 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
-  SvcList: String;
 begin
   if CurStep = ssInstall then
     AddLog('Starting installation...')
@@ -579,14 +577,10 @@ begin
     SecureExtsDir;
     ConfigureService;
     // 重新启动安装前被停止的服务（共享宿主/刷新程序已由新版 os.exe 接管，无需重启系统）。
-    // WMI StartService() 异步触发即返回：安装器不被慢启动服务阻塞（宿主自身在 SCM 下完成
-    // 下载/钩子等流程），失败容忍
-    SvcList := ExpandConstant('{tmp}\osmium-svc-list.txt');
-    if FileExists(SvcList) then
-    begin
-      AddLog('Restarting previously stopped services...');
-      Exec('powershell.exe', '-NoProfile -NonInteractive -Command "if (Test-Path ''' + SvcList + ''') { Get-Content ''' + SvcList + ''' | Where-Object { $_.Trim() -ne '''' } | ForEach-Object { $n = $_.Trim(); $s = Get-CimInstance Win32_Service | Where-Object { $_.Name -eq $n }; if ($s) { Invoke-CimMethod -InputObject $s -MethodName StartService | Out-Null } } }"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    end;
+    // 经 os.exe --start-all 并行启动全部平台服务（与 PrepareToInstall 的 --stop-all 对称），
+    // WMI StartService() 异步触发即返回：安装器不被慢启动服务阻塞，失败容忍
+    AddLog('Restarting services via os.exe --start-all...');
+    Exec('powershell.exe', '-NoProfile -NonInteractive -Command "$p = Start-Process -FilePath ''' + ExpandConstant('{app}\os.exe') + ''' -ArgumentList ''--start-all'' -PassThru -WindowStyle Hidden; $p.WaitForExit(120000) | Out-Null; if (-not $p.HasExited) { $p.Kill() }"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end
   else if CurStep = ssDone then
     AddLog('Installation complete.');
@@ -625,11 +619,17 @@ end;
 // ── 卸载：移除服务刷新程序；失败弹「终止 / 重试 / 忽略」──
 function InitializeUninstall: Boolean;
 begin
-  // 共享宿主托管的服务确认（用户拒绝则中止卸载）
-  if not ConfirmUninstallWithServices() then
+  // 更新场景（PrepareToInstall 传 /UPDATE）跳过确认框: 更新时卸载器只做清理，
+  // 宿主服务由新安装包继续托管，无需用户确认——旧版卸载器在静默更新时弹此框
+  // 会卡住安装流程（窗口闪烁且无超时等待）
+  if Pos('/UPDATE', UpperCase(GetCmdTail)) = 0 then
   begin
-    Result := False;
-    Exit;
+    // 共享宿主托管的服务确认（用户拒绝则中止卸载）
+    if not ConfirmUninstallWithServices() then
+    begin
+      Result := False;
+      Exit;
+    end;
   end;
   Result := True;
 

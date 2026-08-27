@@ -567,7 +567,7 @@ impl ServiceHost {
         }
     }
 
-    /// 共享目录映射: shared_directory_mappers 配置时经 osmium-kit-netmap 插件执行；
+    /// 共享目录映射: shared_directory_mappers 配置时经官方 netmap kit 执行；
     /// action 区分 map（启动时）/ unmap（停止时），插件缺失或失败仅告警不阻断
     fn netmap_via_plugin(&self, config: &crate::service_config::ServiceConfig, action: &str) {
         let Some(mappers) = config.shared_directory_mappers.as_deref() else {
@@ -1129,7 +1129,7 @@ impl ServiceHost {
                 Err(e) => self.write_log("host", &f("Child restart failed: {0}", &[&e])),
             },
             "reboot" => {
-                // 系统重启经 osmium-kit-reboot 插件执行；插件缺失时仅告警
+                // 系统重启经官方 reboot kit 执行；插件缺失时仅告警
                 self.write_log("host", "Failure policy: rebooting system");
                 match run_plugin(
                     "reboot",
@@ -3437,14 +3437,14 @@ pub(crate) fn run_download_entry(
             ));
         }
     }
-    // zip 解压（可选，经 osmium-kit-unzip 插件）: 下载文件为 .zip 且 unzip=true 时解压到目标目录
+    // zip 解压（可选，经官方 unzip kit）: 下载文件为 .zip 且 unzip=true 时解压到目标目录
     if entry.unzip.unwrap_or(config.download_unzip) && target.to_lowercase().ends_with(".zip") {
         write_log_entry(log_dir, "host", &f("Extracting zip: {0}", &[&target]), opts);
         let dest = Path::new(&target)
             .parent()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| deploy_dir.to_string());
-        // 解压经 osmium-kit-unzip 插件（大 zip 解压耗时，超时按下载上限放宽）
+        // 解压经官方 unzip kit（大 zip 解压耗时，超时按下载上限放宽）
         match run_plugin(
             "unzip",
             &serde_json::json!({ "src": target, "dest": dest }),
@@ -3585,7 +3585,7 @@ pub(crate) fn http_date_from_mtime(path: &str) -> Option<String> {
 }
 
 /// 从下载条目映射认证方式: basic（手动拼头）| 其他/未知方式 → 无认证；
-/// sspi 不经此映射（try_download_entry 提前分流给 osmium-kit-sspi 插件）
+/// sspi 不经此映射（try_download_entry 提前分流给官方 sspi kit）
 pub(crate) fn download_auth_from_entry(
     entry: &crate::service_config::DownloadConfig,
 ) -> crate::service_core::DownloadAuth<'_> {
@@ -3628,7 +3628,7 @@ fn try_download_entry(
         .unwrap_or_else(|| PathBuf::from("."));
     let _ = std::fs::create_dir_all(&parent);
 
-    // sspi 认证下载经 osmium-kit-sspi 插件完成: 插件完成 401 挑战-响应循环并原子落盘，
+    // sspi 认证下载经官方 sspi kit 完成: 插件完成 401 挑战-响应循环并原子落盘，
     // 宿主侧随后做 sha 校验（插件缺失/失败按 fail_on_error 由调用方处理）
     if entry
         .auth
@@ -3752,7 +3752,7 @@ fn try_download_entry(
     }
 }
 
-/// sspi 认证下载（经 osmium-kit-sspi 插件）: 插件完成 401 挑战-响应循环并原子落盘，
+/// sspi 认证下载（经官方 sspi kit）: 插件完成 401 挑战-响应循环并原子落盘，
 /// 宿主侧随后做 sha 校验（失败仅告警，由调用方决定是否阻断）
 fn sspi_download_via_plugin(
     entry: &crate::service_config::DownloadConfig,

@@ -1,4 +1,4 @@
-﻿# ✨ Osmium — Windows Service Generator Framework
+﻿# ✨ Osmium — Windows Service Generative Framework
 
 <p align="center">
   <img src="https://img.shields.io/github/followers/NXRKYMANE?style=social" />
@@ -11,7 +11,7 @@
   <img src="https://vbr.nathanchung.dev/badge?page_id=NXRKYMANE.Osmium&color=FFFFFF&leftColor=555555&label=Views" />
 </p>
 
-Register any executable or script as a Win32 system service. [中文文档](README_CN.md)
+Register any executable or script as a Win32 system service — a Windows service generative framework. [中文文档](README_CN.md)
 
 > Osmium is written in **Rust**, with some advanced features provided through OSX plugins so they can be extended whenever needed.
 
@@ -225,7 +225,7 @@ On a child-process crash the host automatically calls the official alert plugins
 | `download_to`                     | string       | none                 | Download destination; relative paths resolve against the service directory (must not escape it)                                                                                                                                                                                                                                                            |
 | `download_sha256`                 | string       | none                 | SHA-256 of the downloaded file (lowercase hex)                                                                                                                                                                                                                                                                                                             |
 | `download_fail_on_error`          | bool         | `true`               | Whether a failed download fails service startup                                                                                                                                                                                                                                                                                                            |
-| `download_auth`                   | string       | none                 | Download authentication: `basic` (user/password), or `sspi` (Windows integrated Negotiate/NTLM/Kerberos) — `sspi` is handled by the official `osmium-kit-sspi` plugin (shipped in the official plugin: `osmium64-official-kits.osx` on 64-bit hosts, `osmium32-official-kits.osx` on 32-bit); without the plugin the download fails with a clear error     |
+| `download_auth`                   | string       | none                 | Download authentication: `basic` (user/password), or `sspi` (Windows integrated Negotiate/NTLM/Kerberos) — `sspi` is handled by the official plugin (`sspi` kit, shipped as: `osmium64-official-kits.osx` on 64-bit hosts, `osmium32-official-kits.osx` on 32-bit); without the plugin the download fails with a clear error                               |
 | `download_username`               | string       | none                 | Username for `basic` authentication                                                                                                                                                                                                                                                                                                                        |
 | `download_password`               | string       | none                 | Password for `basic` authentication                                                                                                                                                                                                                                                                                                                        |
 | `download_proxy`                  | string       | none                 | Proxy used for downloads (http or https)                                                                                                                                                                                                                                                                                                                   |
@@ -494,7 +494,7 @@ to = "extra.bin"
 
 ## Scripts as Services (Interpreter + Script Path)
 
-Osmium treats the service target as an "executable". To run a .py / .jar / .js / .lua / .ps1 / .bat / .cmd script as a service, simply put the **interpreter** in `service_executable_path` and the script path plus arguments in `service_executable_args` — the host manages it like any other process: exit codes, auto-restart, logging and graceful shutdown all work as usual.
+Osmium treats the service target as an "executable". To run a .py / .jar / .js / .rb / .lua / .ps1 / .bat / .cmd script as a service, simply put the **interpreter** in `service_executable_path` and the script path plus arguments in `service_executable_args` — the host manages it like any other process: exit codes, auto-restart, logging and graceful shutdown all work as usual.
 
 > [!TIP]
 > The service process default working directory is `C:\Windows\System32`; always use absolute paths inside scripts (or `cd` yourself, or set `working_directory`).
@@ -545,6 +545,20 @@ working_directory = 'C:\app'
 ```
 
 The script must stay resident (the event loop must not exit) — don't write a one-shot script that finishes immediately. On graceful stop, `Ctrl+C` triggers a `process.on('SIGINT')` callback where you can clean up. Use the Windows `node.exe` (not `nodevars.bat`).
+
+### Ruby Scripts
+
+```toml
+service_name = "ruby-worker"
+service_display_name = "Ruby Worker"
+service_description = "Ruby script service"
+service_executable_path = 'C:\Ruby33-x64\bin\ruby.exe'
+service_executable_args = 'C:\app\worker.rb'
+service_start_mode = "automatic"
+working_directory = 'C:\app'
+```
+
+Use RubyInstaller's `ruby.exe` (64-bit installs to `C:\Ruby33-x64\bin\ruby.exe`). Keep the script resident with `loop { sleep 1 ... }` or an event loop (e.g. `TCPServer` / Sinatra); on graceful stop `Ctrl+C` fires `Signal.trap('INT')` / `at_exit` cleanup; return a real exit code with `exit(code)` for the host's failure-recovery logic.
 
 ### Lua Scripts
 
@@ -644,7 +658,7 @@ Osmium is plugin-everything: official advanced features and third-party extensio
 > [!IMPORTANT]
 > **The plugin architecture must match the host**: a 32-bit process cannot start a 64-bit executable (a 64-bit host can run 32-bit plugins) — on a 32-bit host use `osmium32-official-kits.osx` (or your own 32-bit plugin), otherwise calls fail outright (`--extend` red dot; the architecture tag `[64]` / `[32]` / `[unknown]` after the name lets you check).
 
-- A plugin is just an ordinary program with its extension renamed to `.osx` (e.g. `osmium-kit.exe` → `osmium64-official-kits.osx`)
+- A plugin is just an ordinary program with its extension renamed to `.osx` (e.g. `osmium-kits.exe` → `osmium64-official-kits.osx`)
 - Plugins live anywhere under the host exe's directory — the host recursively discovers every `.osx` (skipping dot-hidden folders), so standalone deployments can put plugins directly next to the exe; the platform installer still ships the official kit to `%ProgramFiles%\Osmium\exts\`
 - At startup the host recursively scans every `.osx` under the executable's directory and dispatches requests by the `kit` field
 - **Plugins are not resident**: each call launches a fresh process, which handles one request and exits
@@ -711,7 +725,7 @@ The official plugin ships in **both 64-bit and 32-bit builds** (`osmium64-offici
 1. **Host built-in fields** (easiest): unzip, share mapping, reboot, sspi download and crash alerts (webhook / email / syslog) all have ready-made config fields — the host calls the matching plugin automatically, no `[[plugins]]` needed:
 
 ```toml
-# sspi-authenticated download (done via the osmium-kit-sspi plugin)
+# sspi-authenticated download (via the official sspi kit)
 download_url = "https://server/app.exe"
 download_auth = "sspi"
 
@@ -785,7 +799,7 @@ All plugins share one protocol, independent of language (Rust / C / Go / Python 
 
 ## Third-Party Plugin Development
 
-Writing a plugin is actually simple: implement the protocol, drop it into `exts\`, declare it in the config, and check the green dot with `--extend`. Below are complete examples in 6 languages — all implementing the same `backup` capability with identical logic; pick whichever you're comfortable with.
+Writing a plugin is actually simple: implement the protocol, drop it into `exts\`, declare it in the config, and check the green dot with `--extend`. Below are complete examples in 10 languages — all implementing the same `backup` capability with identical logic; pick whichever you're comfortable with.
 
 ### Rust Example
 
@@ -812,7 +826,7 @@ fn main() {
 }
 
 fn fail(msg: &str) -> ! {
-    eprintln!("osmium-kit error: {msg}");          // stderr: for humans
+    eprintln!("osmium-kits error: {msg}");          // stderr: for humans
     println!(r#"{{"ok":false,"error":"{msg}"}}"#); // stdout: protocol response
     std::process::exit(1);
 }
@@ -843,7 +857,7 @@ static void extract_kit(const char *json, char *out, size_t out_size) {
 }
 
 static int fail(const char *msg) {
-    fprintf(stderr, "osmium-kit error: %s\n", msg);      // stderr: for humans
+    fprintf(stderr, "osmium-kits error: %s\n", msg);      // stderr: for humans
     printf("{\"ok\":false,\"error\":\"%s\"}\n", msg);    // stdout: protocol response
     return 1;
 }
@@ -883,7 +897,7 @@ Needs the single-header library [nlohmann/json](https://github.com/nlohmann/json
 using json = nlohmann::json;
 
 int fail(const std::string& msg) {
-    std::cerr << "osmium-kit error: " << msg << std::endl;         // stderr: for humans
+    std::cerr << "osmium-kits error: " << msg << std::endl;         // stderr: for humans
     std::cout << "{\"ok\":false,\"error\":\"" << msg << "\"}" << std::endl; // stdout: protocol response
     return 1;
 }
@@ -925,7 +939,7 @@ class Plugin
 {
     static int Fail(string msg)
     {
-        Console.Error.WriteLine("osmium-kit error: " + msg);           // stderr: for humans
+        Console.Error.WriteLine("osmium-kits error: " + msg);           // stderr: for humans
         Console.WriteLine("{\"ok\":false,\"error\":\"" + msg + "\"}"); // stdout: protocol response
         return 1;
     }
@@ -968,7 +982,7 @@ import (
 
 // failure response: stderr for humans, stdout for the protocol (json.Marshal escapes special chars)
 func fail(msg string) {
-    fmt.Fprintf(os.Stderr, "osmium-kit error: %s\n", msg)
+    fmt.Fprintf(os.Stderr, "osmium-kits error: %s\n", msg)
     out, _ := json.Marshal(map[string]any{"ok": false, "error": msg})
     fmt.Println(string(out))
     os.Exit(1)
@@ -1037,7 +1051,7 @@ public class Plugin {
     }
 
     private static void fail(String msg) {
-        System.err.println("osmium-kit error: " + msg);                 // stderr: for humans
+        System.err.println("osmium-kits error: " + msg);                 // stderr: for humans
         System.out.println("{\"ok\":false,\"error\":\"" + msg + "\"}"); // stdout: protocol response
         System.exit(1);
     }
@@ -1054,7 +1068,7 @@ import sys
 
 
 def fail(msg):
-    print(f"osmium-kit error: {msg}", file=sys.stderr)      # stderr: for humans
+    print(f"osmium-kits error: {msg}", file=sys.stderr)      # stderr: for humans
     print(json.dumps({"ok": False, "error": msg}))          # stdout: protocol response
     sys.exit(1)
 
@@ -1115,10 +1129,88 @@ process.stdin.on('end', () => {
 });
 
 function fail(msg) {
-    console.error('osmium-kit error: ' + msg);               // stderr: for humans
+    console.error('osmium-kits error: ' + msg);               // stderr: for humans
     console.log(JSON.stringify({ ok: false, error: msg }));  // stdout: protocol response
     process.exit(1);
 }
+```
+
+### Ruby Example
+
+The standard library is enough — `JSON` is built in.
+
+```ruby
+#!/usr/bin/env ruby
+require 'json'
+
+# Failure response: stderr for humans, stdout for the protocol (JSON.generate escapes special chars)
+def fail(msg)
+  warn "osmium-kits error: #{msg}"
+  puts JSON.generate({ ok: false, error: msg })
+  exit 1
+end
+
+# Cap the input: read at most 1 MB
+input = STDIN.read(1024 * 1024) || ''
+if input.strip.empty?
+  exit 0 # no caller (double-click): exit silently
+end
+
+begin
+  req = JSON.parse(input)
+rescue JSON::ParserError => e
+  fail("invalid request: #{e.message}")
+end
+
+kit = req['kit']
+if kit == 'backup'
+  # do the business work
+  puts JSON.generate({ ok: true })
+else
+  fail("unknown kit: #{kit}")
+end
+```
+
+### Lua Example
+
+The standard library has no JSON parsing, so here is a minimal `kit` extractor with zero dependencies (no full JSON parse, field order irrelevant); for production, consider lua-cjson or similar.
+
+```lua
+-- plugin.lua — run with lua.exe (same backup capability as the Ruby/Node examples)
+-- Minimal "kit":"xxx" extraction (no full JSON parse, field order irrelevant)
+local function extract_kit(json)
+  local p = string.find(json, '"kit"', 1, true)
+  if not p then return "" end
+  p = string.find(json, ':', p)
+  if not p then return "" end
+  p = string.find(json, '"', p)
+  if not p then return "" end
+  p = p + 1
+  local q = string.find(json, '"', p)
+  if not q then return "" end
+  return string.sub(json, p, q - 1)
+end
+
+local function fail(msg)
+  io.stderr:write("osmium-kits error: " .. msg .. "\n") -- stderr: for humans
+  io.stdout:write('{"ok":false,"error":"' .. msg .. '"}') -- stdout: protocol response
+  os.exit(1)
+end
+
+-- Cap the input: read at most 1 MB
+local input = io.read(1024 * 1024) or ""
+input = input:gsub("^%s+", ""):gsub("%s+$", "")
+if input == "" then
+  os.exit(0) -- no caller (double-click): exit silently
+end
+
+local kit = extract_kit(input)
+if kit == "backup" then
+  -- do the business work
+  print('{"ok":true}')
+else
+  fail("unknown kit: " .. kit)
+end
 ```
 
 ### Getting Started
@@ -1271,7 +1363,7 @@ The installer places `os.exe` (64-bit) in `%ProgramFiles%\Osmium\` and registers
 - Automatically registers the boot-time Service Refresher (`--install-refresher`)
 - Registers an uninstall entry in Windows Control Panel
 - Auto-detects old versions: silently upgrades on newer, prompts to reinstall on identical, warns on downgrade
-- Stops services that use `os.exe` before replacing it, then restarts them automatically after install — no reboot prompt
+- Stops services that use `os.exe` **via Osmium's own management interface** before replacing it (`--stop-all` stops all platform services + `--uninstall-refresher` removes the refresher), then `--start-all` restarts them automatically after install — no reboot prompt. It never stops services directly via WMI/SCM (the host's graceful-stop semantics must be preserved, avoiding stop-ordering/residue issues); on update the old uninstaller runs in silent cleanup mode with the `/UPDATE` flag (skips the hosted-services confirmation dialog that would otherwise hang a silent update)
 
 ### Inno Setup Integration Tips
 
@@ -1281,6 +1373,7 @@ When embedding Osmium in your own Inno Setup installer, watch out for these pitf
 2. **PATH staleness** — the installer process may not find `os.exe` even after installation; read the full path from registry: `HKLM\Software\Microsoft\Windows\CurrentVersion\App Paths\os.exe`.
 3. **Elevated child process** — Inno's `Exec` returns `ERROR_ACCESS_DENIED` when directly starting a requireAdministrator child; route through `cmd.exe`.
 4. **Silent-install language dialog** — `/VERYSILENT` silent installs must pass `/LANG=` explicitly (highest precedence); otherwise the language dialog still pops up and hangs.
+5. **Stopping Osmium-hosted services** — stop hosted services with `os.exe --stop-all` (and restore with `--start-all`), never via WMI/SCM directly — hosted services must go through the host's graceful-stop semantics. If your update flow calls the Osmium uninstaller for cleanup, pass `/UPDATE` to skip the hosted-services confirmation dialog (in silent update scenarios that dialog sits unclicked and hangs the installer).
 
 ## Requirements
 

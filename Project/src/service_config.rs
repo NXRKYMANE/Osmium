@@ -247,7 +247,7 @@ pub struct ServiceConfig {
     pub preshutdown: bool,
 
     // ==================== 下载增强（可选） ====================
-    /// 下载认证方式: basic（用户名/密码）| sspi（Windows 集成认证，经官方 osmium-kit-sspi 插件完成）
+    /// 下载认证方式: basic（用户名/密码）| sspi（Windows 集成认证，经官方插件 sspi kit 完成）
     #[serde(rename = "download_auth", default)]
     pub download_auth: Option<String>,
 

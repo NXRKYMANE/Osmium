@@ -1,4 +1,4 @@
-# 项目规则
+﻿# 项目规则
 
 ## 注释
 - 注释块不超过两行；单行注释过长时折叠为两行
@@ -18,6 +18,12 @@
 - 2个readme必须保持同步
 - 重大修改和调优前记得备份一个,已经多次发生翻车事故造成项目从头来的情况
 # 项目记录
+
+## v26.12.1（2026-08-29）· bin 改名（osmium64→osmium / osmium-kit→osmium-kits）+ CHANGELOG 更名 CLAUDE
+- 主程序 bin 名 `osmium64` → `osmium`、插件 bin 名 `osmium-kit` → `osmium-kits`（两个 Cargo.toml；Publish 产物名保持不变，installer.iss 无需改）
+- BUILD.ps1 对齐 6 处 target 取产物路径（64/32 位 exe 与 kits 的 UPX 及回退路径）；kits_tests 定位二进制同步（CARGO_BIN_EXE_osmium-kits + 回退 osmium-kits.exe）
+- 旧名清理：插件错误前缀 "osmium-kit error" → "osmium-kits error"（main.rs fail() + 协议测试断言 + 2 README 的 7 语言插件示例）；build.rs FileDescription "osmium64" → "osmium"；注释/文档中多 bin 时代的 "osmium-kit-sspi/netmap/unzip/reboot 插件" 措辞统一为 "官方 xx kit"（README download_auth 表格行同步且列宽不变）
+- CHANGELOG.md 更名为 CLAUDE.md（内容 100% 不变，项目规则 + 历史记录同文件）；测试 200 + 38/2 全过、release 构建通过；推送 GitHub + Gitea 双远程
 
 ## v26.12.1（2026-08-26）· 版本升级 + 完整带 UPX 构建
 - 主程序与插件统一升至 26.12.1（Project/Extension Cargo.toml + Cargo.lock + installer.iss MyAppVersion/KitsVersion 手动先行对齐，BUILD.ps1 自动注入）

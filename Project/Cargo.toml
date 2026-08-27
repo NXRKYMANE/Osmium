@@ -4,7 +4,7 @@ version = "26.12.1"
 edition = "2024"
 
 [[bin]]
-name = "osmium64"
+name = "osmium"
 path = "src/main.rs"
 
 [dependencies]
@@ -18,7 +18,7 @@ ureq = { version = "3.4.0", default-features = false, features = ["rustls", "gzi
 url = "2.5.8"
 # 下载文件 SHA-256 校验
 sha2 = "0.11.0"
-# 日志 zip 归档（仅 deflate，避免重依赖；下载解压已迁 osmium-kit-unzip 插件）
+# 日志 zip 归档（仅 deflate，避免重依赖；下载解压已迁官方 unzip kit）
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 # Basic 认证头拼接 + DPAPI 密文 base64 编码
 base64 = "0.23.1"
