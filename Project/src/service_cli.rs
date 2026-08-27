@@ -42,7 +42,11 @@ pub fn main_entry() {
             });
     }));
 
-    let args: Vec<String> = std::env::args().collect();
+    // args_os + lossy: env::args() 对含非法 UTF-16 的参数会直接 panic（位于 catch_unwind 之前，
+    // 用户只能看到裸崩溃而非可读错误——其他工具创建的怪名配置可触发）
+    let args: Vec<String> = std::env::args_os()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
 
     // 最先启用 ANSI 渲染（错误红色 + 插件绿点/红点），保证后续任何输出都有颜色；
     // 无控制台/被重定向时静默失败退化为无色
@@ -69,7 +73,42 @@ pub fn main_entry() {
     } else {
         tag.clone()
     };
-    if !is_readonly_command(&effective_cmd) && !is_administrator() {
+    // 权限门置于路由前但须先排除"未知命令": 非管理员执行 `os -m badcmd` 应得到
+    // Unknown argument（拼写/用法错误）而非误导性的"Administrator privileges required"——
+    // 未知命令对任何用户都是无效输入，与权限无关
+    let known_write = !is_readonly_command(&effective_cmd)
+        && matches!(
+            effective_cmd.trim_start_matches('-'),
+            "install"
+                | "ins"
+                | "uninstall"
+                | "uin"
+                | "start"
+                | "str"
+                | "stop"
+                | "stp"
+                | "restart"
+                | "rst"
+                | "delete"
+                | "del"
+                | "import"
+                | "imp"
+                | "export"
+                | "exp"
+                | "refresh"
+                | "rfs"
+                | "reload"
+                | "rld"
+                | "kill"
+                | "kil"
+                | "start-all"
+                | "stra"
+                | "stop-all"
+                | "stpa"
+                | "restart-all"
+                | "rsta"
+        );
+    if known_write && !is_administrator() {
         eprintln!("{}", red("Error: Administrator privileges required."));
         eprintln!(
             "{}",
@@ -172,27 +211,29 @@ fn print_help() {
 // ==================== 辅助判定 ====================
 
 /// 只读/本地命令集合（免管理员）: 帮助、查询类（list/status/status-all）、插件列表、
-/// 配置预检、前台调试、配置签名——均不做 SCM 写操作（tag 已小写化）
+/// 配置预检、前台调试、配置签名——均不做 SCM 写操作。
+/// 前导 '-' 归一化: `-m sts`（裸别名）与 `-m --sts`、`--sts` 三种写法判定一致，
+/// 避免同一只读命令因写法不同被误要求提权
 pub(crate) fn is_readonly_command(tag: &str) -> bool {
+    let normalized = tag.trim_start_matches('-');
     matches!(
-        tag,
+        normalized,
         "help"
-            | "-h"
-            | "--help"
-            | "--list"
-            | "--lst"
-            | "--status"
-            | "--sts"
-            | "--status-all"
-            | "--stsa"
-            | "--extend"
-            | "--ext"
-            | "--check"
-            | "--chk"
-            | "--test"
-            | "--tst"
-            | "--sign-config"
-            | "--sigc"
+            | "h"
+            | "list"
+            | "lst"
+            | "status"
+            | "sts"
+            | "status-all"
+            | "stsa"
+            | "extend"
+            | "ext"
+            | "check"
+            | "chk"
+            | "test"
+            | "tst"
+            | "sign-config"
+            | "sigc"
     )
 }
 
@@ -274,9 +315,18 @@ fn print_installed_extensions() {
 
 /// 是否为交互式终端（WinSta0 窗口站）: 无参数运行时决定打印帮助还是进入 SCM 宿主
 fn is_user_interactive() -> bool {
-    // 交互式窗口站（WinSta0）→ 手动运行。
-    // 不能用 GetConsoleWindow —— ConPTY 终端下返回 NULL 会误判为 SCM 宿主
+    // 会话 0 内运行的是 SCM 上下文（服务宿主），即使窗口站名为 WinSta0 也是
+    // SERVICE_INTERACTIVE_PROCESS 的交互式服务（session 0 也有 WinSta0）——
+    // 判定为交互会把 interactive=true 的服务误判成手动运行，启动即打印帮助退出
     unsafe {
+        use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+        use windows::Win32::System::Threading::GetCurrentProcessId;
+        let mut session = 0u32;
+        if ProcessIdToSessionId(GetCurrentProcessId(), &mut session).is_ok() && session == 0 {
+            return false;
+        }
+        // 交互式窗口站（WinSta0）→ 手动运行。
+        // 不能用 GetConsoleWindow —— ConPTY 终端下返回 NULL 会误判为 SCM 宿主
         use windows::Win32::System::StationsAndDesktops::{
             GetProcessWindowStation, GetUserObjectInformationW, UOI_NAME,
         };
@@ -379,6 +429,16 @@ fn install_command(args: &[&str]) {
         usage("install <config path> | <name> --pth <exe path>");
     }
     // 快速安装: install <name> --pth/--path <exe path>，自动生成配置并平台部署
+    //（--pth 显式出现但缺 exe 路径时单独报用法错误——旧实现静默落入普通安装分支
+    // 把名字当配置文件报 "not found"，误导排障）
+    // 长度守卫必须在前: 普通安装仅 1 个参数，无守卫时 args[1] 直接越界 panic
+    //（catch_unwind 兜住变 "Application error: index out of bounds"，安装不可用）
+    if args.len() >= 2
+        && (args[1].eq_ignore_ascii_case("--pth") || args[1].eq_ignore_ascii_case("--path"))
+        && args.len() < 3
+    {
+        usage("install <name> --pth <exe path>");
+    }
     if args.len() >= 3
         && (args[1].eq_ignore_ascii_case("--pth") || args[1].eq_ignore_ascii_case("--path"))
     {
@@ -727,21 +787,41 @@ fn batch_command(action: &str) {
         println!("{CLI_PREFIX}: No registered services in registry");
         return;
     }
+    // 并行下发（每服务独立线程）: 串行执行时 N 个僵死服务会叠加 N×SCM_OP_TIMEOUT_SECS
+    // 超时（stop-all 等批量操作被单个僵死服务拖死整批）; SCM 操作彼此独立，并发安全
+    let results: Vec<(String, Result<(), String>)> = services
+        .iter()
+        .cloned()
+        .map(|s| {
+            let action = action.to_string();
+            thread::spawn(move || {
+                let result = match action.as_str() {
+                    "start" => crate::service_core::start_service(
+                        &s,
+                        Duration::from_secs(SCM_OP_TIMEOUT_SECS),
+                    ),
+                    "stop" => crate::service_core::stop_service(
+                        &s,
+                        Duration::from_secs(SCM_OP_TIMEOUT_SECS),
+                    ),
+                    _ => crate::service_core::restart_service(
+                        &s,
+                        Duration::from_secs(SCM_OP_TIMEOUT_SECS),
+                        Duration::from_secs(SCM_OP_TIMEOUT_SECS),
+                    ),
+                };
+                (s, result)
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|h| {
+            h.join()
+                .unwrap_or_else(|_| (String::new(), Err("thread panic".into())))
+        })
+        .collect();
     let mut failed = Vec::new();
-    for s in &services {
-        let result = match action {
-            "start" => {
-                crate::service_core::start_service(s, Duration::from_secs(SCM_OP_TIMEOUT_SECS))
-            }
-            "stop" => {
-                crate::service_core::stop_service(s, Duration::from_secs(SCM_OP_TIMEOUT_SECS))
-            }
-            _ => crate::service_core::restart_service(
-                s,
-                Duration::from_secs(SCM_OP_TIMEOUT_SECS),
-                Duration::from_secs(SCM_OP_TIMEOUT_SECS),
-            ),
-        };
+    for (s, result) in &results {
         match result {
             Ok(()) => println!("{CLI_PREFIX}: {0}: {1} OK", action, s),
             Err(e) => {
@@ -787,6 +867,8 @@ fn test_command(args: &[&str]) {
         let _ = SetConsoleCtrlHandler(Some(on_ctrl), true);
     }
     let mut host = crate::service_host::ServiceHost::new();
+    // 注入 Ctrl+C 探测: 恢复延迟分段等待期间（故障恢复 delay 最长 60s）也能立即响应
+    host.set_stop_probe(|| TEST_CTRL_C.load(Ordering::SeqCst));
     if !host.on_start_from(&config_path) {
         process::exit(1);
     }

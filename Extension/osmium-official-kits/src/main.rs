@@ -118,13 +118,15 @@ fn dispatch_sspi(req: &Request) {
     let Some(to) = req.to.as_deref() else {
         fail("sspi: missing 'to'")
     };
+    // timeout 钳制下限 1 秒（与 notify/smtp/syslog/probe 口径一致）: 0 使 ureq 全局
+    // 超时为 ZERO 每个请求立即超时失败，错误信息无法指向真实原因（配置了 0）
     match sspi_download_to_file(
         url,
         to,
         req.username.as_deref(),
         req.password.as_deref(),
         req.proxy.as_deref(),
-        req.timeout_secs.unwrap_or(300),
+        req.timeout_secs.unwrap_or(300).max(1),
     ) {
         Ok(()) => ok(),
         Err(e) => fail(&e),

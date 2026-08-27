@@ -19,6 +19,67 @@
 - 重大修改和调优前记得备份一个,已经多次发生翻车事故造成项目从头来的情况
 # 项目记录
 
+## v26.12.1（2026-08-26）· 版本升级 + 完整带 UPX 构建
+- 主程序与插件统一升至 26.12.1（Project/Extension Cargo.toml + Cargo.lock + installer.iss MyAppVersion/KitsVersion 手动先行对齐，BUILD.ps1 自动注入）
+- `.\BUILD.ps1 -Upx` 全流程通过（exit=0）：64 位 + 32 位 workspace 构建、测试 200 + 38/2 全过、插件 UPX 压缩（64 位 0.89 MB / 32 位 0.68 MB）、ISCC 安装包 `osmium-win-x64-setup-v26.12.1.exe`（版本资源 26.12.1.0）、主程序 UPX（`osmium64-upx.exe` 1.49 MB / `osmium32-upx.exe` 1.24 MB）、全部 7 产物 Authenticode 签名（dev 证书）
+- 冒烟：osmium64-upx.exe / osmium64.exe --help 均显示 "Osmium 64 v26.12.1"
+- 注意：BUILD.ps1 每次运行开头清空 Publish；管道截断（Select-Object -First N）会中断脚本导致 UPX 段缺失——查看构建日志用重定向到文件而非截断管道
+
+## 插件版本与主项目统一（2026-08-26）· 插件 2.1.0 → 26.12.0
+- 官方插件（osmium-official-kits）版本号统一使用主项目版本，不再独立编号：Cargo.toml `version = "26.12.0"` + Cargo.lock 同步 + installer.iss `#define KitsVersion` 同步（BUILD.ps1 从插件 Cargo.toml 自动注入，手动先行对齐）
+- 产物名随之变化：`osmium64-official-kits-v26.12.0.osx` / `osmium32-official-kits-v26.12.0.osx`（README 用占位符 `<KITS_VERSION>` 无需改）；kits 代码内无版本号引用
+- 200 + 38/2 全过、clippy 零告警、fmt clean、release 构建通过
+
+## 第六/七轮修复真机回归（2026-08-26）· 发现并修复 3 个真 bug（1 个第七轮引入的功能致命 + 2 个历史误判）
+- **审查第七轮改动**（diff .20260826-013014.bak）：P1 四项（monitor_kill_pending 双条件/restart_with_fallback 先克隆旧配置/invoke_plugin 统一 try_wait/reap_reader_threads）、P2 关键项（TOCTOU 单次读取链/OsmiumInplace 标记/proxy fail-closed/1073 错误码）、kits display 脱敏——实现均与记录一致；基线 199+38/2 全过
+- **真机发现 bug①（第七轮引入，普通安装完全不可用）**：install_command 加"--pth 缺参报用法错误"时 `args[1]` 无长度守卫，`os --install <config>`（仅 1 参数）直接 index out of bounds panic（catch_unwind 兜成 Application error）；修复为 `args.len() >= 2` 前置守卫。真机：panic → 安装成功 → DPAPI 密文落盘验证 ✓
+- **真机发现 bug②（第六轮引入，更新安装必挂 39s 且服务永久丢失）**：capture_service_snapshot 成功路径漏关 svc/scm 句柄（三个 early-return 都关了，唯独 Some(...) 返回没关——第六轮新增、第七轮重构 query_service_config_aligned 时未察觉）；泄漏句柄使 SCM 拒绝完成 DeleteService，wait_service_deleted 等 20s + CreateServiceW 重试 15.5s 全撞 1072，进程退出才释放。定位过程：sc.exe 对照 0s 排除系统行为 → P/Invoke 复刻挂 30s 排除 Rust 特有 → 分步二分测试（OSMIUM_DIAG_STEPS 思路）锁定 step2=capture_service_snapshot。修复后 update 4.2s "Service updated successfully"，日志保留、卸载干净
+- **真机发现 bug③（历史遗留，Program Files 新目录 inplace 全部误拒）**：sddl_owner_is_administrative 的 owner SID 截断未处理 G: 段——O:BA G:<本地用户组SID> 布局把组 SID 拼进 owner 串（"BAG:S-1-5-21-..."）永不匹配管理员模式 → 目录误判"用户可写"；TrustedInstaller 拥有的 System32 文件因脏串恰好以 S-1-5-80- 开头而侥幸放行（掩盖了 bug）。修复为截断到 G: 段前 + 回归单测（3 断言含反例）。真机：inplace 安装成功 + OsmiumInplace 标记落盘/卸载随服务键消失 ✓
+- 真机回归通过清单（第六轮+第七轮）：A1 健康检查强杀走崩溃恢复链（Health failed → code -1 → restart 循环 5 轮稳定，P1-3+P1-1 双生效）、A2 短健康 URL 不 panic（失败计数累加不崩）、A3 once 模式 metrics final 行带正确 pid 落盘、A4 SMTP 多收件人逐条 RCPT×2 + 完整会话 + crash 上下文注入 + 宿主日志零凭据泄漏、B4 --check 拦截 6 类非法配置（failure_action 白名单/delay_secs 年上限/download_stage/eco_qos/runaway 负值/syslog 范围）且合法配置零误伤、B5 DPAPI 密文落盘（smtp_password enc:OSMIUM1:）、B6 刷新器扫描不误删（正常+%SystemRoot% 配置双保留 + 孤儿目录顺带清理）、B7 --start-all 并行 0.2s（旧串行 2s+）、B8 --status 详情完整、B9 inplace 全生命周期 + OsmiumInplace 强锚点、B2 更新保日志 + B3 并发同名安装无破坏（第二方明确报错）
+- 注意：--install 的 inplace 检查针对"当前运行的 exe 自身"可写性（target 开发目录被拦属正确行为），inplace 正确姿势是受保护位置的宿主 exe 自己运行 --install；inplace 要求配置与 exe 同名 .toml
+- 测试 199→**200 + 38/2** 全过（+1 sddl owner G: 段回归）；clippy 零告警、fmt clean；共享宿主 os.exe 已更新为最新构建、hydride_svc64 恢复 Running
+
+## 第七轮审查修复批次（2026-08-26）· 5 P1 + 8 P2 + 10 P3 + kits 11 项 + 重构 6 项 + 优化 6 项
+- 四代理并行通读（core/host/config+cli/kits），全部发现逐项读码实证后修复（改前留 service_core/service_host/service_config/service_cli/service_tests/kits_core/kits_tests/main 八份 .20260826-013014.bak）
+- **P1-1 monitor_kill_pending 同 tick 复活误判**：强杀后同 tick 内 check_schedules/check_reload_flag 可能拉起新健康子进程，tick 条件 `exited_codes.is_empty() && pending` 无法区分"运行中"与"无子进程" → 下个 tick 对健康进程推 -1 走完整伪崩溃链（失败计数推进/crash 插件误告警/序列耗尽停服）；修复为 `self.child.is_empty() && pending` + start_child_process 成功后清 pending 双保险
+- **P1-2 restart_with_fallback 兜底配置被覆盖**：try_restart_child 在启动前就覆盖 start_config 缓存，失败后兜底读到的正是刚失败的同一份新配置（"失败保持旧配置运行"承诺落空，二次失败服务整体下线）；修复为先克隆旧配置，失败后回滚缓存并按旧配置兜底
+- **P1-3 invoke_plugin 非空输出分支 wait() 无超时**：reader EOF（插件关闭 stdout 仍存活做清理/网络操作）≠ 进程退出，else 分支无条件 wait 使整体超时机制被旁路；修复为统一 try_wait 限时轮询（2s 超时补 kill）
+- **P1-4 run_hook/run_stop_command 无条件 join() 日志线程**：钩子/停止命令派生的孙进程继承管道写句柄时 read 永不 EOF → join 无限挂起停止流程；新增 reap_reader_threads 限时回收（复用插件 reap_plugin_threads 思路）
+- **P1-5 kits SMTP AUTH PLAIN 凭据泄漏进宿主日志**：base64("\0user\0pass") 拼入 smtp_expect 错误消息回传宿主落日志，一行解码即还原；smtp_expect 新增 display 参数脱敏（AUTH PLAIN credentials (redacted)）
+- **P2-6 安装 TOCTOU（校验对象≠落盘对象）**：install 校验基于第一次 load_config，write_deployed_config 落盘前独立二次读源文件——校验通过后源文件被替换可绕过全部 P0 检查；重构为入口单次 read_config_limited + parse_config_content，write_deployed_config_content 基于同一内容
+- **P2-7/8 刷新器瞬时读失败误删服务 + 非原子写盘**：load_config 对 IO 错误与解析错误同一 panic 文案，cleanup_invalid_service 无法区分——杀软独占句柄一次 sharing violation = 服务连同 logs 被删光；新增 read_config_retry（重试一次 + 区分 IO 错误跳过本轮扫描），refresh 用 parse_config_content 纯解析；write_deployed_config/sign_config_file 改 tmp+rename 原子写（掉电留撕裂 .osiml 同样触发误删）
+- **P2-9 平台共享宿主回退路径无 P0 校验**：框架未安装时 ImagePath 回退当前 exe，从可写目录（桌面/Downloads）注册 = 预置提权；补 is_user_writable 检查拒绝
+- **P2-10 is_inplace_service 身份锚点**：纯"ImagePath 文件名==服务名"启发式把同名第三方服务（nginx→nginx.exe）误认自家托管，--refresh 可按攻击者预置 toml 改写其 SCM 属性；install inplace 成功时写注册表服务键 OsmiumInplace 标记（强锚点，删服务键即消失），旧版无标记退回启发式 + 要求 exe 旁同名 toml 存在
+- **P2-11/12 枚举/数值校验缺口**：validate_config 补 failure_action/failure_actions[].action 白名单 + delay_secs 1 年上限、download_stage（配置级+条目级）、extensions/plugins phase 白名单、eco_qos 模式白名单、runaway_cpu_limit/eco_qos 阈值（负值/NaN/无穷/idle>=busy）；host 侧 delay_secs 消费钳制（Instant+Duration 溢出 panic = SCM abort）、runaway/eco_qos 阈值 sanitize 兜底、scm_wait_hint/sleep i64→u32 截断钳制
+- **P2-13 单线程下载完整性缺口**：无 Content-Length 且非 chunked 的响应（连接关闭定界）截断无法验证 → 拒绝；单线程路径补磁盘预检（disk_space_ok 原只覆盖分块分支）
+- **P3**：backup_logs_dir 改 ProgramData\Osmium 同卷（跨卷 rename 失败静默丢日志）、QueryServiceConfigW/Config2W 缓冲对齐 UB 修复（Vec<u64> + align_to，收口 query_service_config_aligned）、dpapi_decrypt null-ptr 补告警、并发同名安装 CreateServiceW 1073 不再破坏性回滚（install_service_scm 返回错误码；部署配置改为注册成功后再写，防晚到进程覆盖对方 .osiml）、--refresh SDDL 移除显式提示（只增不减）、env::args→args_os+lossy（catch_unwind 前 panic）、wait_service_deleted 非 1060 提前返回、svcs 三级目录 junction 预置拒防、do_uninstall force_delete 真实语义（停止失败也强删，--delete 面向僵死服务）
+- **kits**：SMTP QUIT 失败忽略（qmail 类 250 后断连不误报发信失败）、smtp_expect 多行响应 64 行上限、proxy 解析失败 fail-closed（原静默直连旁路出网管控）、sspi 错误消息 URL 去敏（redact_webhook_url）、MySQL 探针循环读满 5 字节包头（TCP 分段假阴性）、SMTP 正文裸 CR 清洗、sspi timeout 下限钳制 1s、reboot 启用 SeShutdownPrivilege（虚拟账户上下文下 reboot 动作静默失效）、unzip 失败清理本次已解压文件 + 条目数上限 100k、syslog 全地址遍历（双栈 AAAA 优先丢失告警）、redact 解析失败回退剥 userinfo、sspi rename 失败清 tmp
+- **重构**：f() guard 绑定消除二次 parse、Basic token 编码 ×4 收口 basic_token、map_virtual_account/apply_service_description/apply_delayed_auto_start helper 收口 install/refresh 重复、QueryServiceConfigW 两段式查询收口（含对齐修复）；SC_HANDLE RAII 全面替换未做（现有"打开→闭包统一关闭"模式已防泄漏，全面替换引入 double-close UB 风险、收益边际）
+- **优化**：批量命令（start-all/stop-all/restart-all）并行下发（原 N 个僵死服务串行叠加 N×超时）、chunk_already_done worker 缓冲复用（免每块 1MB 分配）、service_log_zip 轻量解析（免 DPAPI 全量解密）、load_config metadata→read TOCTOU 根治（File::open+take(1MB+1)）、HEAD 探测手动跟随重定向 5 跳（CDN 场景恢复分块/续传/磁盘预检；凭据仅同源重试）、test 模式恢复延迟期间 Ctrl+C 可中断（stop_probe 闭包注入）
+- CLI 边角：--pth 缺参单独报用法错误、未知命令不再误导性报"需要管理员"（known_write 门控）、README 补"配置安全提示"（字段拼写静默忽略 + SDDL 只增不减，O7 文档化）
+- 测试 +4 主项目（validate 枚举/阈值全拦截、原子写无 tmp 残留、延迟钳制保底、合法配置不误伤）+2 kits（AUTH 凭据脱敏断言、DATA 250 后服务器断连视为成功）共 **199 + 38/2** 全过；clippy -D warnings 零告警、fmt clean、release 构建通过；真机 --check 拦截负值 runaway_cpu_limit ✓
+- 2 README 同步（配置安全提示章节，表格未动）
+
+## v26.12.0（2026-08-26）· 第六轮全量审查修复批次：3 P1 + 10 P2 + 14 P3（宿主健壮性 + 防御纵深收尾）
+- 三代理并行全量通读（core 4360 行 + host 5279 行 + config/cli/kits），逐项读码实证后全部修复（改前留 service_host/service_core/service_cli/service_config/kits_core 五份 .bak）
+- **P1-1 check_health URL 切片 panic**：`url[..6]` 对短 URL（如 "abc"）/多字节截断 panic，宿主运行路径不经过 validate_config → panic 穿越 extern "system" abort 无限重启；修复为 `len() >= 6` 守卫 + 合并大小写不敏感 osx:// 分支
+- **P1-2 强杀失败后 `child.wait()` 无界阻塞**：PPL 保护/拒绝终止的子进程使 force_kill/run_hook 超时/run_stop_command 超时三条路径永久挂死 → 新增 reap_killed_child（kill 后 try_wait 轮询 2s 兜底，与 invoke_plugin 同款）
+- **P1-3 Runaway/健康检查强杀后服务静默停止**：force_kill 消费退出码并清空子进程 → 下个 tick 见空按正常停止——承诺的 onfailure 动作序列/crash 告警插件/事件 1002 全部不触发且绕过 stop 清理 → 新增 monitor_kill_pending 标志 + kill_for_monitor_failure，tick 视同异常退出走完整崩溃恢复（真机级集成测试：未监听端口健康检查 → 强杀 → failure_actions restart 自动拉起）
+- **P2-4 download_threads 运行时无钳制**：validate_config 只 --check 用，宿主直接透传 → chunked_download 硬钳 MAX_DOWNLOAD_WORKERS=64（防线程爆炸 spawn panic abort）
+- **P2-5 热刷新/--reload/调度重启失败服务整体下线**：注释称"失败保持旧配置运行"实际不成立（旧进程已停新进程没起）→ 新增 restart_with_fallback（try_restart_child 失败按启动缓存配置兜底重启），check_config_refresh 失败回退旧配置还原字段重启
+- **P2-6 更新中途失败旧服务无法恢复**：force_remove 删除旧服务后任一步失败回滚只清理目录 → 新增 ServiceRegSnapshot 快照（capture_service_snapshot 在删除前捕获 ImagePath/显示名/账户/启动类型，QueryServiceConfigW 122 容忍）+ rollback 时 restore_service_snapshot 尽力重建（密码不可恢复，自定义账户明确提示手动重装）
+- **P2-7 配置缺失/解析失败零日志**：on_start_from 失败分支执行时 log_dir/event_log 尚未应用 → 新增 report_startup_failure（eprintln + 强制写事件日志 1004，不经过 event_log 开关——SCM 模式唯一可排查通道）
+- **P2-8 最终指标行永不写入/pid 错误**：tick 先移除已退出实例再 write_metrics → first() 拿不到 pid 直接 return → 退出 pid 在移除前捕获传入；同批多实例退出码任一非零即按故障处理（顺序无关，崩溃不被正常退出掩盖）
+- **P2-9 插件 stdout 无界读取**：read_to_string 无上限（1s 超时窗口可灌数百 MB）→ take(1MB+1) 截断 + 超限判失败（与 kits stdin 1MB 口径一致）
+- **P2-10 日志行读取无上限**：spawn_log_reader/spawn_raw_reader 的 read_until 对无换行超长行内存无界增长 → 单行 1MB 上限 + 超限丢弃行剩余
+- **P2-11 SMTP 多收件人必失败**：README 承诺逗号分隔但代码拼单条 RCPT TO（RFC 5321 要求逐条）→ to.split(',') 逐条发送
+- **P2-12 https→http 降级检查首跳可绕过**：current 首跳为配置原文未归一化，大写 HTTPS:// 前缀匹配漏判 → 宿主 single_download 与 kits sspi 两处 to_ascii_lowercase 后判定
+- **P2-13 日志备份落 Users 可写 temp**：备份名固定可预测（还原窗口内 junction 替换 → 还原后 svcs\<name>\logs 变链接，SYSTEM 写穿面）→ 备份名加进程 PID 后缀 + restore_logs_dir 对 reparse 备份拒绝还原（mklink /J 实测）
+- **P3 修复**：wait_service_deleted 的 OpenServiceW 句柄泄漏（100 轮询最多 100 个）、install_service_scm CreateServiceW 失败 scm 句柄泄漏、cached_agent FIFO 驱逐（HashMap 无序 keys().next() 删任意项 → VecDeque 记录插入序）、safe_log_name 拒绝 "."/".."、reset_current_logs 补 reparse 检查、try_send_ctrl_c FreeConsole 后恢复附加父控制台（test 模式后续 Ctrl+C 不再失效）、restart_delay_ms<1000 保底 1 秒、TCP 探针 DNS 解析放子线程 recv_timeout（慢 DNS 不阻塞 tick）、kits probe 遍历全部解析地址（双栈误报修复）、SMTP connect_timeout + 欢迎行 8KB 上限、unzip 解压目标 reparse 拒防 + 拒绝 NTFS ADS 条目（name 含 ':'）、netmap 加 CONNECT_TEMPORARY/unmap 加 CONNECT_UPDATE_PROFILE（防持久化映射残留）、is_user_interactive 加 session 0 判定（interactive=true 服务 SCM 启动即打印帮助退出的功能 bug）、is_readonly_command 前导 '-' 归一化（-m sts 裸别名与 --sts 判定一致）、syslog_facility/severity 补 --check 范围校验、kits build_agent 三参统一（max_redirects 参数化合并 notify/sspi 两处构造）、check_reload_flag 借用免每 tick 克隆
+- 明确不改/核实不成立：write_log_line 静默吞 IO 错误（设计如此）、refresh_service failure_reset 恒正（与 install 同源，agent 报告有误）、tick try_wait Err 停止服务（保守）
+- 测试 +7 主项目（failure_action_chain 保底 1s、is_readonly_command 归一化、backup PID 后缀、restore reparse 拒防、safe_log_name 点路径、health_check 强杀走崩溃恢复集成测试、短 URL 不 panic）+1 kits（smtp 多收件人逐条 RCPT 断言）共 **198 + 36/2** 全过；clippy -D warnings 零告警、fmt clean、release 构建通过
+- 2 README 无需同步（全部为内部修复，无接口/文档承诺变化）
+
 ## v26.11.0（2026-08-25）· 批次 1-5 修复真机测试（发现并修复 query_service_details 历史 bug + 补 S2/S6 单测）
 - 静默方式真机回归批次 1-5 全部修复项，验证通过清单：S1 junction 根删除（svcs 下 junction 孤儿目录 → 目标内容保留）、S2 zip/spawn_raw reparse 防护、F1 不安全下载进 --check 拦截、F3 钩子 SCM 停止中断（只报 aborted 不再误报 timed out）、F4 %ProgramFiles(x86)% 展开、F4 health_check 内嵌 basic 凭据（有凭据 200 成功/无凭据 401 失败对照）、F5 亲和性 checked_shl、F6 多实例补足（无空配置错误）、批次3 F1 URL 百分号转义保留、批次4 F1 不安全下载预检、批次5 S6 错位 Content-Range 拒绝回退
 - **真机新发现 bug（已修复）**：query_service_details 的 QueryServiceConfigW 第一次"查大小"调用返回 ERROR_INSUFFICIENT_BUFFER(122) 被 windows crate 映射为 Err → --status Details query failed（该 bug 在 U1 权限降级前就存在，一直未被真机触发）；修复为容忍 122 错误码（needed 仍返回所需大小），真机验证 --status 完整显示 Start type/Run as/Failure actions/Child PIDs/Job Object

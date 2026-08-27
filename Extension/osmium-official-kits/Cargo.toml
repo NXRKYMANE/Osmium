@@ -1,6 +1,7 @@
 [package]
 name = "osmium-official-kits"
-version = "2.1.0"
+# 版本与主项目统一（随主程序同版本发布，不再独立编号）
+version = "26.12.1"
 edition = "2024"
 
 # 官方工具包: 单一 bin（构建后改名为 .osx），按 stdin JSON 的 kit 字段分发到各功能
@@ -27,8 +28,10 @@ features = [
     "Win32_NetworkManagement_WNet",
     "Win32_Security_Authentication_Identity",
     "Win32_Security_Credentials",
+    "Win32_Storage_FileSystem",
     "Win32_System_Shutdown",
     "Win32_System_SystemInformation",
+    "Win32_System_Threading",
 ]
 
 [build-dependencies]

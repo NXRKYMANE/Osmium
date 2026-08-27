@@ -1,4 +1,4 @@
-# ✨ Osmium — Windows Service Generator Framework
+﻿# ✨ Osmium — Windows Service Generator Framework
 
 <p align="center">
   <img src="https://img.shields.io/github/followers/NXRKYMANE?style=social" />
@@ -34,8 +34,9 @@ Osmium is written in modern Rust (edition 2024) and compiles into **both 64-bit 
 > Don't want the platform framework? Embedding into your own project? I'd recommend the UPX builds (`osmium64-upx.exe` / `osmium32-upx.exe`) — tiny, extensible and very lightweight, and cold start is barely different from the original.
 >
 > Missing a feature? The project is plugin-everything: write your own plugin in any language and place it under the executable (e.g. `exts\` on platform installs) — see the [Extension Guide](#plugin-system) for full plugin development and usage; a green dot on `os --extend` means your plugin is usable.
->
-> Note: platform deployment needs the framework installed via the installer (lifecycle / logging / management are done by os.exe; without it services cannot start); an `osiml` file is just TOML renamed for convenience.
+
+> [!TIP]
+> Platform deployment needs the framework installed via the installer — lifecycle / logging / management are done by `os.exe`, without it services cannot start; an `osiml` file is just TOML renamed for convenience.
 
 ## Quick Start
 
@@ -54,6 +55,9 @@ os --list
 # Run in foreground for debugging (no install)
 os --test <svc.toml>
 ```
+
+> [!WARNING]
+> Write operations (install / uninstall / start / stop / ...) require **Administrator privileges**; for platform deployment the framework must be installed first via the installer — without `os.exe` (which carries the lifecycle / logging / management logic) the service cannot start. For embedding into your own project use inplace mode, which works without the framework directory (see [Embedded Mode (inplace)](#embedded-mode-inplace)).
 
 ## Commands
 
@@ -104,7 +108,11 @@ service_description = "Service description"
 service_executable_path = 'C:\app\myapp.exe'
 ```
 
-> TOML note: paths containing backslashes must use **single-quoted literal strings** (as above) — in a basic string like `"C:\app\..."` the `\a` is an illegal escape and parsing fails.
+> [!TIP]
+> Paths containing backslashes must use **single-quoted literal strings** (as above) — in a basic string like `"C:\app\..."` the `\a` is an illegal escape and parsing fails.
+
+> [!WARNING]
+> In TOML, top-level keys written **after an array table** (`[[...]]`) become elements of that array — put all `[[extensions]]` / `[[plugins]]` / `[[schedules]]` / `[[failure_actions]]` / `[[downloads]]` tables at the **end** of the file (see the notes in the [full example](#full-example)).
 
 ### Basic Features
 
@@ -189,6 +197,9 @@ On a child-process crash the host automatically calls the official alert plugins
 | `health_check_failures`              | int          | `3`           | Consecutive failures that count as a crash                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `health_check_expected_status`       | int          | `200`         | Expected HTTP status code (anything else counts as failure; unused for `tcp://` probes)                                                                                                                                                                                                                                                                                                                                                                                                            |
 
+> [!TIP]
+> When health checks fail past the threshold or the runaway killer terminates the child, the host does **not silently stop the service** — it treats the kill as an abnormal exit and runs the full failure-recovery flow: the `failure_actions` chain (restart by default), the crash alert plugins (built-in notify / smtp / syslog channels) and event-log 1002.
+
 ### Advanced — Scheduled Tasks
 
 | Field             | Type        | Default       | Description                                                                                                                                                                                                                                                                                              |
@@ -226,8 +237,13 @@ On a child-process crash the host automatically calls the official alert plugins
 | `downloads`                       | array        | none                 | Multiple download entries: `[{ from, to, sha256?, fail_on_error?, auth?, username?, password?, unsecure_auth?, proxy?, unzip?, stage? }]` — omitted fields fall back to the top-level `download_*` values; when configured, the array takes precedence over the single `download_url` entry and the executable path stays `service_executable_path`        |
 | `download_unsecure_auth`          | bool         | `false`              | Explicitly allow `basic` authentication over plain `http://`; default refuses because credentials would be sent in cleartext                                                                                                                                                                                                                               |
 
-> Security note: with `http://` and no `download_sha256`, `fail_on_error=true` refuses to start (protects against tampering in transit). `basic` auth over plain `http://` is refused unless `download_unsecure_auth = true`. Redirects are followed manually: `https→http` downgrade is refused, and `basic` credentials are only re-sent to the same origin (scheme+host+port) — never forwarded to a cross-host redirect target. The `sspi` plugin follows redirects manually too (downgrades refused, negotiation restarts per origin, tokens never sent to redirect targets) and verifies response length against Content-Length. Probe requests for authenticated URLs retry once with credentials on 401/403, so authenticated large files get chunked parallel downloads as well.
+> [!WARNING]
+> With `http://` and no `download_sha256`, `fail_on_error=true` refuses to start (protects against tampering in transit). `basic` auth over plain `http://` is refused unless `download_unsecure_auth = true`. Redirects are followed manually: `https→http` downgrade is refused, and `basic` credentials are only re-sent to the same origin (scheme+host+port) — never forwarded to a cross-host redirect target. The `sspi` plugin follows redirects manually too (downgrades refused, negotiation restarts per origin, tokens never sent to redirect targets) and verifies response length against Content-Length. Probe requests for authenticated URLs retry once with credentials on 401/403, so authenticated large files get chunked parallel downloads as well.
+> [!IMPORTANT]
 > Secrets: `service_password`, `download_password` and mapper `password` are DPAPI-encrypted (machine scope, ciphertext marked with the versioned `enc:OSMIUM1:` prefix) in the deployed `.osiml` — plaintext never lands on disk; legacy plaintext configs keep working.
+
+> [!WARNING]
+> `--export` writes the config **including DPAPI ciphertext** — machine-scoped ciphertext can be decrypted by any account on this machine, so the export directory must be restricted to SYSTEM / Administrators only (e.g. a protected directory under `C:\ProgramData`). Never export to shared or public locations.
 
 ### Advanced — Logging
 
@@ -279,6 +295,13 @@ The deployed config can be signed with RSA-SHA256 so the host refuses to run tam
 - **Auto-sign on install**: when `osmium-sign.key` exists next to the exe, `--install` signs the deployed config automatically (`<name>.sig` for platform, `<exe-name>.toml.sig` for inplace). Manual signing is available via `--sign-config <config>`.
 - **Enforcement**: set `require_signed_config = true` in the config — the host then verifies the signature with `osmium-public.pem` at start, hot-reload and crash-restart; a missing/invalid signature is logged and the service refuses to start (fail-closed).
 - Keep `osmium-sign.key` private (Administrators only) — anyone with the key can sign configs the host will trust.
+
+### Configuration Safety Notes
+
+> [!WARNING]
+> **Misspelled field names are silently ignored** (lenient unknown-key parsing, a TOML compatibility design) — a misspelled safety switch such as `require_signed_config = ture` silently falls back to the default; a misspelled enum (`download_stage` / `extensions.phase` / `plugins.phase` / `failure_actions` / `eco_qos` and friends) disables the whole feature chain. Always run `--check <config>` before installing (it validates every enum value and numeric range).
+
+- **`security_descriptor` is additive only**: `--refresh` rewrites registration properties from the config, but removing the SDDL from the config keeps the previous DACL on the service (there is no safe "reset to default" semantics); the refresh prints a note. Reinstall the service to reset it.
 
 ### Developer Features — Embedded Mode (inplace)
 
@@ -473,6 +496,7 @@ to = "extra.bin"
 
 Osmium treats the service target as an "executable". To run a .py / .jar / .js / .lua / .ps1 / .bat / .cmd script as a service, simply put the **interpreter** in `service_executable_path` and the script path plus arguments in `service_executable_args` — the host manages it like any other process: exit codes, auto-restart, logging and graceful shutdown all work as usual.
 
+> [!TIP]
 > The service process default working directory is `C:\Windows\System32`; always use absolute paths inside scripts (or `cd` yourself, or set `working_directory`).
 
 ### Python Scripts
@@ -591,6 +615,9 @@ On stop or system shutdown: GUI processes receive `WM_CLOSE` (sent to every top-
 
 With `deploy_inplace: true`, `--install` registers the current exe **in place**:
 
+> [!IMPORTANT]
+> The exe must live in a location only SYSTEM / Administrators can write (e.g. your own directory under Program Files) — writable locations such as Downloads / Public / a dev workspace are **refused at install time** (nobody must be able to swap the exe and gain SYSTEM execution); `service_name` must equal the exe file name (otherwise SCM cannot dispatch the service).
+
 - No copy to ProgramData; the ImagePath points directly at the current exe;
 - `service_name` must equal the actual exe file name (e.g. `os`; if you rename the exe, use its actual name), otherwise SCM cannot dispatch the service;
 - Designed for embedding Osmium into your own project; excluded from boot-time host upgrades and cleanup. Developers must manually upgrade `os.exe` from the [official Releases](https://github.com/NXRKYMANE/Osmium/releases).
@@ -614,8 +641,10 @@ Osmium is plugin-everything: official advanced features and third-party extensio
 
 ## What a Plugin Is
 
+> [!IMPORTANT]
+> **The plugin architecture must match the host**: a 32-bit process cannot start a 64-bit executable (a 64-bit host can run 32-bit plugins) — on a 32-bit host use `osmium32-official-kits.osx` (or your own 32-bit plugin), otherwise calls fail outright (`--extend` red dot; the architecture tag `[64]` / `[32]` / `[unknown]` after the name lets you check).
+
 - A plugin is just an ordinary program with its extension renamed to `.osx` (e.g. `osmium-kit.exe` → `osmium64-official-kits.osx`)
-- **The plugin architecture must match the host**: a 32-bit process cannot start a 64-bit executable (a 64-bit host can run 32-bit plugins) — on a 32-bit host use `osmium32-official-kits.osx` (or your own 32-bit plugin), otherwise calls fail outright (`--extend` red dot; the architecture tag `[64]` / `[32]` / `[unknown]` after the name lets you check)
 - Plugins live anywhere under the host exe's directory — the host recursively discovers every `.osx` (skipping dot-hidden folders), so standalone deployments can put plugins directly next to the exe; the platform installer still ships the official kit to `%ProgramFiles%\Osmium\exts\`
 - At startup the host recursively scans every `.osx` under the executable's directory and dispatches requests by the `kit` field
 - **Plugins are not resident**: each call launches a fresh process, which handles one request and exits
@@ -1148,7 +1177,7 @@ Osmium/
 │       ├── service_core.rs    # Core: SCM API, deployment, Service Refresher, download engine
 │       ├── service_host.rs    # Service host: launches target process + plugin calls
 │       ├── service_config.rs  # TOML config model (serde)
-│       └── service_tests.rs   # Unit tests (191, incl. process-tree integration)
+│       └── service_tests.rs   # Unit tests (200, incl. process-tree integration)
 ├── Extension/                 # Official kits (external plugin executables, shipped as .osx)
 │   └── osmium-official-kits/  # Single bin (64-bit builds as osmium64-official-kits.osx; BUILD.ps1 cross-builds the 32-bit osmium32-official-kits.osx)
 │       ├── Cargo.toml         # Kit config (same format as Project)
@@ -1157,7 +1186,7 @@ Osmium/
 │           ├── main.rs        # Protocol entry: stdin JSON dispatch (kit field) → stdout JSON
 │           ├── kits_core.rs   # Shared implementations (same as Project service_core.rs):
 │           │                  # SSPI download / share mapping / unzip / reboot / notify / smtp / syslog / probe
-│           └── kits_tests.rs  # Unit + integration tests (33 + 2 ignored)
+│           └── kits_tests.rs  # Unit + integration tests (38 + 2 ignored)
 ├── Misc/                      # Icon resources (referenced by build.rs / installer)
 │   ├── Osmium.ico             # Installer / distribution icon (SetupIconFile)
 │   ├── Osmium.png             # Program icon source
@@ -1169,9 +1198,8 @@ Osmium/
 │   └── Extension.png          # .osx icon source
 ├── Publish/                   # Build artifacts (exe + installer, not committed)
 ├── BUILD.ps1                  # One-click build script (Rust build & tests + installer)
-├── .gitlab-ci.yml             # GitLab CI (fmt/clippy/test/32-bit/audit, Windows runner)
 ├── .github/                   # GitHub community templates (issues / PR)
-├── CHANGELOG.md               # Changelog (development log / version history)
+├── CLAUDE.md                  # AI assistant rules + development log / version history
 ├── CODE_OF_CONDUCT.md         # Code of conduct
 ├── CONTRIBUTING.md            # Contributing guidelines
 ├── SECURITY.md                # Security policy
@@ -1185,7 +1213,7 @@ Osmium/
 Rust automated tests cover input validation, startup-mode parsing, log cleanup, process-tree collection, ACL permission checks, downloading, and other core logic:
 
 ```powershell
-# Rust (191 tests + 35 plugin tests + 2 ignored, incl. a real process-tree integration test)
+# Rust (200 tests + 38 plugin tests + 2 ignored, incl. a real process-tree integration test)
 Set-Location Project
 cargo test
 ```
@@ -1256,6 +1284,9 @@ When embedding Osmium in your own Inno Setup installer, watch out for these pitf
 
 ## Requirements
 
+> [!IMPORTANT]
+> Installing and managing services requires **Administrator privileges**; the Service Refresher and the shared host run as SYSTEM (platform deployment only).
+
 - Windows 10+ (64-bit builds run on x64/x86 systems; 32-bit builds target x86 systems or embedding scenarios — match the host bitness)
 - Administrator privileges
   - Rust stable (edition 2024) + MSVC linker (Visual Studio C++ Build Tools) — to build the Rust binary; the 32-bit build needs `rustup target add i686-pc-windows-msvc` (with the x86 cross linker)
@@ -1271,7 +1302,7 @@ When embedding Osmium in your own Inno Setup installer, watch out for these pitf
 >
 > Realizing the problem, I decided to write an automated service management platform named WSF (Windows Service Framework). It was pure Python too, still calling WinSW underneath. As development went on, the framework turned out to be extremely bloated, and security issues were hard to handle — basically usable but crippled. And as a purely interpreted language, Python's cold start was painfully slow, and the packaged size was shocking.
 >
-> To fix this once and for all, during the summer of 2026 I went out of my way to learn Rust, and with the help of the mysterious fat blue fish that eats free meals plus the WinSW source code, I directly built the first truly usable framework. As a chemistry fan, I also picked a name rarely used in the open-source community — Silanes, the silicon hydrides — for the first generation. But after deep development to cover all of WinSW's features (details are all in CHANGELOG.md), I felt Silanes didn't fit the project anymore, so I officially renamed it to Osmium (osmium, the element). At the same time, that half-rotten memory-management project evolved into a Rust-based project called Hydride.
+> To fix this once and for all, during the summer of 2026 I went out of my way to learn Rust, and with the help of the mysterious fat blue fish that eats free meals plus the WinSW source code, I directly built the first truly usable framework. As a chemistry fan, I also picked a name rarely used in the open-source community — Silanes, the silicon hydrides — for the first generation. But after deep development to cover all of WinSW's features (details are all in CLAUDE.md), I felt Silanes didn't fit the project anymore, so I officially renamed it to Osmium (osmium, the element). At the same time, that half-rotten memory-management project evolved into a Rust-based project called Hydride.
 
 ## Sponsor
 

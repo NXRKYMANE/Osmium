@@ -865,6 +865,144 @@ fn smtp_reports_server_error() {
 }
 
 #[test]
+fn smtp_sends_one_rcpt_per_recipient() {
+    // 多收件人（逗号分隔）必须逐条 RCPT TO（RFC 5321）——拼成单条 RCPT 会被多数 MTA 拒绝
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 65536];
+        let mut sent = String::new();
+        let mut read_cmd = |stream: &mut std::net::TcpStream, sent: &mut String| {
+            let n = stream.read(&mut buf).unwrap();
+            if n == 0 {
+                return false;
+            }
+            sent.push_str(&String::from_utf8_lossy(&buf[..n]));
+            true
+        };
+        stream.write_all(b"220 localhost ESMTP\r\n").unwrap();
+        // EHLO / MAIL / RCPT×2 / DATA / body / QUIT
+        let replies: [&[u8]; 7] = [
+            b"250 OK\r\n",
+            b"250 OK\r\n",
+            b"250 OK\r\n",
+            b"250 OK\r\n",
+            b"354 go\r\n",
+            b"250 OK\r\n",
+            b"221 Bye\r\n",
+        ];
+        for reply in replies {
+            if !read_cmd(&mut stream, &mut sent) {
+                break;
+            }
+            stream.write_all(reply).unwrap();
+        }
+        sent
+    });
+    send_email_smtp(
+        &format!("127.0.0.1:{}", addr.port()),
+        "alerts@example.com",
+        "ops@example.com, dev@example.com",
+        "Test",
+        "body",
+        None,
+        None,
+        10,
+    )
+    .expect("多收件人会话应成功");
+    let sent = handle.join().unwrap();
+    assert!(
+        sent.contains("RCPT TO:<ops@example.com>\r\n"),
+        "应逐条发 RCPT: {sent}"
+    );
+    assert!(
+        sent.contains("RCPT TO:<dev@example.com>\r\n"),
+        "应逐条发 RCPT: {sent}"
+    );
+    assert!(
+        !sent.contains("RCPT TO:<ops@example.com, dev@example.com>"),
+        "不得拼成单条 RCPT: {sent}"
+    );
+}
+
+#[test]
+fn smtp_auth_error_redacts_credentials() {
+    // AUTH PLAIN 失败时错误消息不得含 base64 凭据（错误经宿主 run_plugin 落日志，
+    // 一行解码即还原密码）——display 参数脱敏
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        stream.write_all(b"220 localhost ESMTP\r\n").unwrap();
+        let _ = stream.read(&mut buf).unwrap();
+        stream.write_all(b"250 OK\r\n").unwrap();
+        let _ = stream.read(&mut buf).unwrap();
+        stream.write_all(b"334 VXNlcm5hbWU6\r\n").unwrap();
+        let _ = stream.read(&mut buf).unwrap();
+        stream.write_all(b"535 authentication failed\r\n").unwrap();
+    });
+    let err = send_email_smtp(
+        &format!("127.0.0.1:{}", addr.port()),
+        "a@b.c",
+        "d@e.f",
+        "t",
+        "m",
+        Some("user1"),
+        Some("sup3r-secret-pass"),
+        5,
+    )
+    .expect_err("认证失败应报错");
+    // 错误消息可含脱敏回显（AUTH PLAIN credentials (redacted)），但绝不出现凭据的
+    // base64（base64("\0user1\0sup3r-secret-pass")）或其组成部分
+    assert!(
+        !err.contains("AHVzZXIxAHN1cDNyLXNlY3JldC1wYXNz"),
+        "错误消息不得含凭据 base64: {err}"
+    );
+    assert!(!err.contains("sup3r-secret-pass"), "不得含明文密码: {err}");
+    assert!(err.contains("535"), "应含状态码: {err}");
+    handle.join().unwrap();
+}
+
+#[test]
+fn smtp_data_accepted_then_server_closes_is_success() {
+    // DATA 收到 250 后服务器（qmail 类 MTA/反垃圾网关）立即断连不等 QUIT——
+    // 邮件已被接收，QUIT 读/写失败不得误报"发信失败"
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 65536];
+        stream.write_all(b"220 localhost ESMTP\r\n").unwrap();
+        let _ = stream.read(&mut buf).unwrap();
+        stream.write_all(b"250 OK\r\n").unwrap();
+        let _ = stream.read(&mut buf).unwrap();
+        stream.write_all(b"250 OK\r\n").unwrap();
+        let _ = stream.read(&mut buf).unwrap();
+        stream.write_all(b"250 OK\r\n").unwrap();
+        let _ = stream.read(&mut buf).unwrap();
+        stream.write_all(b"354 go\r\n").unwrap();
+        let _ = stream.read(&mut buf).unwrap();
+        stream.write_all(b"250 message accepted\r\n").unwrap();
+        // 不回 QUIT: 直接关闭连接（模拟 250 后立即断开）
+        drop(stream);
+    });
+    send_email_smtp(
+        &format!("127.0.0.1:{}", addr.port()),
+        "a@b.c",
+        "d@e.f",
+        "t",
+        "m",
+        None,
+        None,
+        5,
+    )
+    .expect("DATA 250 后服务器断开仍应视为发送成功");
+    handle.join().unwrap();
+}
+
+#[test]
 fn syslog_sends_rfc5424_udp_frame() {
     // syslog kit: 本地 UDP 收包，断言 PRI/TAG/内容与 RFC 5424 结构
     use std::net::UdpSocket;

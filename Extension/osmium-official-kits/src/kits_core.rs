@@ -16,20 +16,26 @@ use windows::Win32::Security::Authentication::Identity::{
 use windows::Win32::Security::Credentials::SecHandle;
 use windows::core::PCWSTR;
 
-/// 构造下载 Agent（全局超时覆盖整个下载；4xx/5xx 不转错误，
-/// 401/200 均需读取原始响应）。max_redirects=0: 重定向由 sspi 流程手动跟随——
-/// 自动跟随会把 Negotiate/NTLM 令牌发给重定向目标（凭据中继面），与宿主下载器策略对齐
-fn build_agent(timeout_secs: u64, proxy: Option<&str>) -> ureq::Agent {
+/// 构造 HTTP Agent（全局超时覆盖整个请求；4xx/5xx 不转错误，调用方按状态码处理）。
+/// max_redirects=0: 重定向手动跟随——sspi 的 Negotiate/NTLM 令牌不随自动跟随中继到
+/// 重定向目标（凭据中继面，与宿主下载器策略对齐）；notify 无凭据可传非零值允许自动跟随。
+/// proxy 解析失败必须 fail-closed 返回 Err: 管理员配代理往往就是做出网管控，
+/// 静默放弃代理直连目标等于旁路管控且无任何告警
+fn build_agent(
+    timeout_secs: u64,
+    proxy: Option<&str>,
+    max_redirects: u32,
+) -> Result<ureq::Agent, String> {
     let mut builder = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(timeout_secs)))
-        .max_redirects(0);
-    if let Some(proxy_url) = proxy
-        && let Ok(p) = ureq::Proxy::new(proxy_url)
-    {
+        .max_redirects(max_redirects);
+    if let Some(proxy_url) = proxy {
+        let p =
+            ureq::Proxy::new(proxy_url).map_err(|e| format!("invalid proxy '{proxy_url}': {e}"))?;
         builder = builder.proxy(Some(p));
     }
-    ureq::Agent::new_with_config(builder.build())
+    Ok(ureq::Agent::new_with_config(builder.build()))
 }
 
 /// 执行一次带 SSPI 认证的完整下载（URL → 目标文件）: 401 挑战-响应循环（最多 3 轮），
@@ -45,7 +51,7 @@ pub fn sspi_download_to_file(
 ) -> Result<(), String> {
     use base64::Engine as _;
 
-    let client = build_agent(timeout_secs, proxy);
+    let client = build_agent(timeout_secs, proxy, 0)?;
 
     // tmp 原子创建: 拒绝预创建文件替换；残留同名文件清理后重试一次
     let tmp = format!("{}.download.tmp", to);
@@ -132,7 +138,7 @@ pub fn sspi_download_to_file(
         }
         let resp = req
             .call()
-            .map_err(|e| format!("request failed for {current}: {e}"))?;
+            .map_err(|e| format!("request failed for {0}: {e}", redact_webhook_url(&current)))?;
         // 手动跟随重定向（max_redirects=0 时 3xx 原样返回）: 拒绝 https→http 降级；
         // 跨源后旧协商上下文/令牌作废，对新源从零开始挑战（令牌不带给第三方）
         if (300..400).contains(&resp.status().as_u16()) {
@@ -144,8 +150,16 @@ pub fn sspi_download_to_file(
                 .map(str::to_string)
                 .ok_or_else(|| format!("redirect without Location header (HTTP {status})"))?;
             let next = resolve_redirect_url(&current, &loc);
-            if current.starts_with("https://") && next.starts_with("http://") {
-                return Err(format!("insecure redirect refused: {current} -> {next}"));
+            // scheme 大小写不敏感: current 首跳为调用方原始字符串（未归一化），
+            // 大写 HTTPS:// 会让前缀匹配漏判——统一小写后判定
+            if current.to_ascii_lowercase().starts_with("https://")
+                && next.to_ascii_lowercase().starts_with("http://")
+            {
+                return Err(format!(
+                    "insecure redirect refused: {0} -> {1}",
+                    redact_webhook_url(&current),
+                    redact_webhook_url(&next)
+                ));
             }
             let _ = std::io::copy(&mut resp.into_body().into_reader(), &mut std::io::sink());
             if let Some(old) = guard.ctx.take() {
@@ -182,13 +196,18 @@ pub fn sspi_download_to_file(
                 ));
             }
             drop(file);
-            std::fs::rename(&tmp, to).map_err(|e| format!("rename failed for '{to}': {e}"))?;
+            std::fs::rename(&tmp, to).map_err(|e| {
+                // rename 失败（目标被占用等）: 清理 tmp 防残留累积
+                let _ = std::fs::remove_file(&tmp);
+                format!("rename failed for '{to}': {e}")
+            })?;
             return Ok(());
         }
         if resp.status().as_u16() != 401 {
             return Err(format!(
-                "server returned HTTP {} for {current}",
-                resp.status().as_u16()
+                "server returned HTTP {} for {}",
+                resp.status().as_u16(),
+                redact_webhook_url(&current)
             ));
         }
         challenges += 1;
@@ -354,8 +373,8 @@ fn to_wide(s: &str) -> Vec<u16> {
 
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::NetworkManagement::WNet::{
-    NET_CONNECT_FLAGS, NET_RESOURCE_SCOPE, NETRESOURCEW, RESOURCETYPE_DISK, WNetAddConnection2W,
-    WNetCancelConnection2W,
+    CONNECT_TEMPORARY, CONNECT_UPDATE_PROFILE, NET_CONNECT_FLAGS, NET_RESOURCE_SCOPE, NETRESOURCEW,
+    RESOURCETYPE_DISK, WNetAddConnection2W, WNetCancelConnection2W,
 };
 
 /// 单条映射配置（与主程序 SharedMapperConfig 字段一致）
@@ -394,7 +413,9 @@ pub fn map_shared_directories(mappers: &[MapperSpec]) -> Vec<String> {
                 user.as_ref()
                     .map(|w| PCWSTR::from_raw(w.as_ptr()))
                     .unwrap_or(PCWSTR::null()),
-                NET_CONNECT_FLAGS(0),
+                // CONNECT_TEMPORARY: 映射仅服务生命周期内有效——不写账户 profile 持久化记录，
+                // 防服务停止后凭据背书的共享在下次登录时被系统自动重建
+                NET_CONNECT_FLAGS(CONNECT_TEMPORARY.0),
             );
             if result != ERROR_SUCCESS {
                 errors.push(format!(
@@ -415,7 +436,8 @@ pub fn unmap_shared_directories(mappers: &[MapperSpec]) -> Vec<String> {
             let local = to_wide(&m.local_path);
             let result = WNetCancelConnection2W(
                 PCWSTR::from_raw(local.as_ptr()),
-                NET_CONNECT_FLAGS(0),
+                // CONNECT_UPDATE_PROFILE: 同时清除 profile 中残留的持久化映射记录
+                NET_CONNECT_FLAGS(CONNECT_UPDATE_PROFILE.0),
                 true,
             );
             if result != ERROR_SUCCESS {
@@ -436,8 +458,24 @@ use std::path::{Path, PathBuf};
 
 /// 解压总大小上限（8 GiB）: 防恶意 zip 炸弹填满磁盘（下载资源为管理员配置，仅作兜底）
 const UNZIP_TOTAL_LIMIT: u64 = 8 * 1024 * 1024 * 1024;
+/// 单 zip 条目数上限: 海量零字节条目不触发体积上限但同样可耗尽 inode/拖慢循环（纵深防御）
+const UNZIP_ENTRY_LIMIT: usize = 100_000;
 
-/// 解压 zip 到目标目录（防 zip-slip: 条目路径规范化后必须仍位于目标目录内）
+/// 路径是否为 reparse 点（symlink/junction）: Win32 属性查询（std 的 is_symlink 覆盖不了 junction）
+fn is_reparse_path(p: &Path) -> bool {
+    use windows::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+    };
+    let wide = to_wide(&p.to_string_lossy());
+    unsafe {
+        let attrs = GetFileAttributesW(PCWSTR::from_raw(wide.as_ptr()));
+        attrs != INVALID_FILE_ATTRIBUTES && attrs & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+    }
+}
+
+/// 解压 zip 到目标目录（防 zip-slip: 条目路径规范化后必须仍位于目标目录内）。
+/// 中途失败清理本次已解压的文件（防新旧产物混杂与炸弹场景的垃圾残留——与 sspi
+/// 路径失败清 tmp 对称; 目录保持不动，仅删本次创建的文件）
 pub fn unzip_to_dir(zip_path: &str, target_dir: &str) -> Result<(), String> {
     let file = std::fs::File::open(zip_path)
         .map_err(|e| format!("cannot open zip '{0}': {e}", zip_path))?;
@@ -446,14 +484,42 @@ pub fn unzip_to_dir(zip_path: &str, target_dir: &str) -> Result<(), String> {
     // canonicalize 可能带 \\?\ 前缀，比较时必须统一基准（直接用其拼接出绝对目标路径）
     let canon_base =
         std::fs::canonicalize(target_dir).unwrap_or_else(|_| PathBuf::from(target_dir));
+    // 本次已解压的文件清单（失败时逆序清理）: 条目顺序中父目录先于子文件的情况
+    // 无需处理——只删文件，不删目录（目录可能预存在或含其他内容）
+    let mut written_files: Vec<PathBuf> = Vec::new();
     let mut total_written: u64 = 0;
+    let mut result: Result<(), String> = Ok(());
+    if archive.len() > UNZIP_ENTRY_LIMIT {
+        return Err(format!(
+            "zip '{0}' contains {1} entries, exceeding the {2} safety limit",
+            zip_path,
+            archive.len(),
+            UNZIP_ENTRY_LIMIT
+        ));
+    }
     for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|e| format!("cannot read zip entry #{0} in '{1}': {e}", i, zip_path))?;
+        let mut entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(e) => {
+                result = Err(format!(
+                    "cannot read zip entry #{0} in '{1}': {e}",
+                    i, zip_path
+                ));
+                break;
+            }
+        };
         let name = entry.name().replace('\\', "/");
         if name.ends_with('/') {
             continue;
+        }
+        // 拒绝 NTFS 备用数据流条目（如 "legit.dll:evil"）: File::create 会静默创建 ADS
+        // 而非报错，可污染目标目录内既有文件（写入面畸形输入未拒绝）
+        if name.contains(':') {
+            result = Err(format!(
+                "zip entry '{0}' contains ':' (NTFS alternate data stream not allowed)",
+                name
+            ));
+            break;
         }
         // 规范化解压目标: 消除 . / .. 组件后再做前缀校验，杜绝 "..\evil" 类穿越绕过
         let raw = if Path::new(&name).is_absolute() {
@@ -463,38 +529,65 @@ pub fn unzip_to_dir(zip_path: &str, target_dir: &str) -> Result<(), String> {
         };
         let out_path = normalize_zip_path(&raw);
         if !out_path.starts_with(&canon_base) {
-            return Err(format!(
+            result = Err(format!(
                 "zip entry '{0}' escapes target directory '{1}'",
                 name, target_dir
             ));
+            break;
         }
         if let Some(parent) = out_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let mut out = std::fs::File::create(&out_path).map_err(|e| {
-            format!(
-                "cannot create '{0}' while extracting '{1}': {e}",
-                out_path.display(),
-                name
-            )
-        })?;
-        let written = std::io::copy(&mut entry, &mut out).map_err(|e| {
-            format!(
-                "failed writing '{0}' while extracting '{1}': {e}",
-                out_path.display(),
-                name
-            )
-        })?;
-        total_written = total_written.saturating_add(written);
+        // reparse 写穿防护（与宿主落点同款）: 解压目标自身是 symlink/junction 时拒绝——
+        // 目标目录内预存的同名链接会让 File::create 穿过链接写到指向位置
+        if is_reparse_path(&out_path) {
+            result = Err(format!(
+                "zip entry '{0}' target '{1}' is a reparse point, refusing to extract",
+                name,
+                out_path.display()
+            ));
+            break;
+        }
+        let mut out = match std::fs::File::create(&out_path) {
+            Ok(f) => f,
+            Err(e) => {
+                result = Err(format!(
+                    "cannot create '{0}' while extracting '{1}': {e}",
+                    out_path.display(),
+                    name
+                ));
+                break;
+            }
+        };
+        let copied = match std::io::copy(&mut entry, &mut out) {
+            Ok(n) => n,
+            Err(e) => {
+                result = Err(format!(
+                    "failed writing '{0}' while extracting '{1}': {e}",
+                    out_path.display(),
+                    name
+                ));
+                break;
+            }
+        };
+        written_files.push(out_path);
+        total_written = total_written.saturating_add(copied);
         if total_written > UNZIP_TOTAL_LIMIT {
-            return Err(format!(
+            result = Err(format!(
                 "zip '{0}' expands beyond the {1} GiB safety limit (possible zip bomb)",
                 zip_path,
                 UNZIP_TOTAL_LIMIT / 1024 / 1024 / 1024
             ));
+            break;
         }
     }
-    Ok(())
+    if result.is_err() {
+        // 失败清理本次已解压文件（逆序: 深层路径先删; 尽力而为，忽略删除错误）
+        for p in written_files.iter().rev() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    result
 }
 
 /// 词法规范化路径: 移除 "." 组件、折叠 ".." 组件（不访问文件系统）
@@ -516,12 +609,16 @@ fn normalize_zip_path(p: &Path) -> PathBuf {
 // ==================== 系统重启（故障恢复 reboot 动作） ====================
 // 自 service_host.rs 搬迁: 按故障恢复策略重启系统
 
-/// 重启系统（InitiateSystemShutdownExW，LocalSystem 默认具备关机特权）
+/// 重启系统（InitiateSystemShutdownExW）: 调用前启用 SeShutdownPrivilege——
+/// 该特权在多数令牌中"存在但禁用"，不启用时 ERROR_PRIVILEGE_NOT_HELD（LocalSystem
+/// 通常可用，但插件可能以虚拟账户/自定义账户上下文执行，reboot 动作会静默失效）
 pub fn reboot_system() -> Result<(), String> {
     use windows::Win32::System::Shutdown::{
         InitiateSystemShutdownExW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_APPLICATION,
     };
     unsafe {
+        // 启用 SeShutdownPrivilege（失败即报错: LocalSystem 下该特权已启用时调用直接成功）
+        enable_shutdown_privilege()?;
         InitiateSystemShutdownExW(
             PCWSTR::null(),
             PCWSTR::null(),
@@ -531,6 +628,52 @@ pub fn reboot_system() -> Result<(), String> {
             SHTDN_REASON_MAJOR_APPLICATION | SHTDN_REASON_FLAG_PLANNED,
         )
         .map_err(|e| format!("InitiateSystemShutdownExW failed: {e}"))
+    }
+}
+
+/// 启用 SeShutdownPrivilege（LookupPrivilegeValueW + AdjustTokenPrivileges，宿主
+/// enable_debug_privilege 同款模板）; 失败返回错误由调用方报告
+fn enable_shutdown_privilege() -> Result<(), String> {
+    use windows::Win32::Foundation::{CloseHandle, LUID};
+    use windows::Win32::Security::{
+        AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+        TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    unsafe {
+        let mut token = windows::Win32::Foundation::HANDLE::default();
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token,
+        )
+        .map_err(|e| format!("OpenProcessToken failed: {e}"))?;
+        let mut luid = LUID::default();
+        let result = LookupPrivilegeValueW(
+            PCWSTR::null(),
+            PCWSTR::from_raw(
+                "SeShutdownPrivilege\0"
+                    .encode_utf16()
+                    .collect::<Vec<u16>>()
+                    .as_ptr(),
+            ),
+            &mut luid,
+        );
+        if let Err(e) = result {
+            let _ = CloseHandle(token);
+            return Err(format!("LookupPrivilegeValueW failed: {e}"));
+        }
+        let tp = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: SE_PRIVILEGE_ENABLED,
+            }],
+        };
+        let r = AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None);
+        let _ = CloseHandle(token);
+        r.map_err(|e| format!("AdjustTokenPrivileges failed: {e}"))?;
+        Ok(())
     }
 }
 
@@ -546,16 +689,8 @@ pub fn notify_webhook(
     proxy: Option<&str>,
 ) -> Result<(), String> {
     // notify 无凭据（凭据在 payload 里），允许跟随重定向——build_agent 的 max_redirects=0
-    // 是给 sspi 的（防 Negotiate/NTLM 令牌中继），此处单独构建可跟随的 agent
-    let mut builder = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(timeout_secs.max(1))));
-    if let Some(proxy_url) = proxy
-        && let Ok(p) = ureq::Proxy::new(proxy_url)
-    {
-        builder = builder.proxy(Some(p));
-    }
-    let agent = ureq::Agent::new_with_config(builder.build());
+    // 是给 sspi 的（防 Negotiate/NTLM 令牌中继），此处传 10 恢复 ureq 默认跟随上限
+    let agent = build_agent(timeout_secs.max(1), proxy, 10)?;
     let resp = agent
         .post(url)
         .header("content-type", "application/json")
@@ -607,7 +742,19 @@ fn redact_webhook_url(url: &str) -> String {
             u.set_fragment(None);
             u.to_string()
         }
-        Err(_) => url.to_string(),
+        // 解析失败（畸形 URL）也可能携带 user:pass@: 剥掉 scheme:// 与首 '/' 之间的
+        // userinfo 段再回退原文——错误消息路径仍可能把含凭据的原文放进输出
+        Err(_) => {
+            let mut s = url.to_string();
+            if let Some(scheme_end) = s.find("://") {
+                let after = &s[scheme_end + 3..];
+                if let Some(at) = after.find('@') {
+                    let host_part = &after[at + 1..];
+                    s = format!("{}{}", &s[..scheme_end + 3], host_part);
+                }
+            }
+            s
+        }
     }
 }
 
@@ -625,13 +772,32 @@ pub fn probe_target(
     timeout_secs: u64,
 ) -> Result<(), String> {
     let timeout = Duration::from_secs(timeout_secs.max(2));
-    let addr = (host, port)
+    // 遍历全部解析地址（双栈主机 IPv4/IPv6 任一可达即成功）: 只试第一个
+    // 地址会在服务仅监听另一协议族时误报失败（健康检查误判 crash 触发无谓强杀重启）
+    let addrs = (host, port)
         .to_socket_addrs()
-        .map_err(|e| format!("probe: cannot resolve {host}:{port}: {e}"))?
-        .next()
-        .ok_or_else(|| format!("probe: no address for {host}:{port}"))?;
-    let mut stream = TcpStream::connect_timeout(&addr, timeout)
-        .map_err(|e| format!("probe: connect to {host}:{port} failed: {e}"))?;
+        .map_err(|e| format!("probe: cannot resolve {host}:{port}: {e}"))?;
+    let mut stream = None;
+    let mut last_err = String::new();
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(e) => last_err = format!("{e}"),
+        }
+    }
+    let mut stream = stream.ok_or_else(|| {
+        format!(
+            "probe: connect to {host}:{port} failed: {}",
+            if last_err.is_empty() {
+                "no address resolved".to_string()
+            } else {
+                last_err
+            }
+        )
+    })?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
 
@@ -656,20 +822,26 @@ pub fn probe_target(
         }
         "mysql" => {
             // MySQL 客户端握手: 初始握书包为 [3 字节长度][1 字节序号][payload]，
-            // payload 首字节（buf[4]）是协议版本（0x0a）或错误包标志（0xff）；
-            // 数据不足 5 字节时按无包头流处理（兼容个别代理），检查 buf[0]
+            // payload 首字节（buf[4]）是协议版本（0x0a）或错误包标志（0xff）。
+            // 必须循环读满至少 5 字节: 单次 read 在 TCP 分段（代理/隧道/MTU 边界）
+            // 下可能只到 4 字节包头，此时 buf[0] 是长度字段的任意值 → 健康检查
+            // 假阴性触发无谓强杀
             let mut buf = [0u8; 128];
-            let n = stream
-                .read(&mut buf)
-                .map_err(|e| format!("probe: mysql read failed: {e}"))?;
-            if n == 0 {
-                return Err("probe: mysql closed connection".into());
+            let mut n = 0usize;
+            while n < 5 {
+                let r = stream
+                    .read(&mut buf[n..])
+                    .map_err(|e| format!("probe: mysql read failed: {e}"))?;
+                if r == 0 {
+                    return Err("probe: mysql closed connection".into());
+                }
+                n += r;
             }
-            let first = if n >= 5 { buf[4] } else { buf[0] };
+            let first = buf[4];
             if first == 0x0a || first == 0x00 {
                 Ok(()) // 协议版本 10 握手包 / 0x00 也视为握手开始
             } else if first == 0xff {
-                let msg_at = if n >= 5 { 5 } else { 1 };
+                let msg_at = 5;
                 Err(format!(
                     "probe: mysql server error: {}",
                     String::from_utf8_lossy(&buf[msg_at..n]).trim()
@@ -739,35 +911,76 @@ pub fn send_email_smtp(
     let to = to.replace(['\r', '\n'], "");
     let subject = subject.replace(['\r', '\n'], "");
     let timeout = Duration::from_secs(timeout_secs.max(5));
-    let stream = TcpStream::connect((addr, port))
-        .map_err(|e| format!("smtp: connect to {host} failed: {e}"))?;
+    // 连接阶段同样受超时约束（connect 无超时版本在 SYN 被丢弃的地址上会走
+    // 系统默认重试序列，最长约 20 秒+，拖慢 crash 告警链路）
+    let addrs = (addr, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("smtp: cannot resolve {host}:{port}: {e}"))?;
+    let mut stream = None;
+    let mut last_err = String::new();
+    for a in addrs {
+        match TcpStream::connect_timeout(&a, timeout) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(e) => last_err = format!("{e}"),
+        }
+    }
+    let stream = stream.ok_or_else(|| {
+        format!(
+            "smtp: connect to {host} failed: {}",
+            if last_err.is_empty() {
+                "no address resolved".to_string()
+            } else {
+                last_err
+            }
+        )
+    })?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
     // 读/写各持一份句柄（clone），避免闭包捕获与后续写入的借用冲突
     let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
     let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
 
-    // 读欢迎行（220）
+    // 读欢迎行（220）: 带 8KB 行上限（与 smtp_expect 一致，防恶意服务器无界输出）
     let mut line = String::new();
     reader
+        .by_ref()
+        .take(8192)
         .read_line(&mut line)
         .map_err(|e| format!("smtp: read greeting failed: {e}"))?;
     if !line.starts_with("220") {
         return Err(format!("smtp: unexpected greeting: {line}"));
     }
-    smtp_expect(&mut writer, &mut reader, "EHLO osmium\r\n", &["250"])?;
+    smtp_expect(
+        &mut writer,
+        &mut reader,
+        "EHLO osmium\r\n",
+        "EHLO",
+        &["250"],
+    )?;
     if username.is_some() {
-        smtp_expect(&mut writer, &mut reader, "AUTH PLAIN\r\n", &["334"])?;
+        smtp_expect(
+            &mut writer,
+            &mut reader,
+            "AUTH PLAIN\r\n",
+            "AUTH PLAIN",
+            &["334"],
+        )?;
         // AUTH PLAIN 凭据: base64("\0user\0pass")
         let user = username.unwrap_or("");
         let pass = password.unwrap_or("");
         let auth = format!("\0{user}\0{pass}");
         let auth_b64 =
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, auth.as_bytes());
+        // display 必须脱敏: 错误消息会拼入 command 原文并回传宿主落日志，
+        // 认证失败（密码过期等最常见故障）时 base64 凭据会明文进日志（一行解码即还原）
         smtp_expect(
             &mut writer,
             &mut reader,
             &format!("{auth_b64}\r\n"),
+            "AUTH PLAIN credentials (redacted)",
             &["235"],
         )?;
     }
@@ -775,18 +988,25 @@ pub fn send_email_smtp(
         &mut writer,
         &mut reader,
         &format!("MAIL FROM:<{from}>\r\n"),
+        "MAIL FROM",
         &["250"],
     )?;
-    smtp_expect(
-        &mut writer,
-        &mut reader,
-        &format!("RCPT TO:<{to}>\r\n"),
-        &["250", "251"],
-    )?;
-    smtp_expect(&mut writer, &mut reader, "DATA\r\n", &["354"])?;
-    // body 规范化换行（\n → \r\n）+ dot-stuffing: 行首 "." 前补 "."，
-    // 否则正文以 "." 开头的行会被服务器误判为 DATA 结束（RFC 5321 §4.5.2）
-    let body_escaped = body.replace("\r\n", "\n").replace('\n', "\r\n");
+    // RCPT TO 必须逐条发送（RFC 5321: 每个收件人一条命令）——
+    // 配置允许多个逗号分隔地址，拼成单条 RCPT 会被多数 MTA 以 501/553 拒绝
+    for rcp in to.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        smtp_expect(
+            &mut writer,
+            &mut reader,
+            &format!("RCPT TO:<{rcp}>\r\n"),
+            "RCPT TO",
+            &["250", "251"],
+        )?;
+    }
+    smtp_expect(&mut writer, &mut reader, "DATA\r\n", "DATA", &["354"])?;
+    // body 规范化换行 + 裸 CR 清洗（RFC 5321 §2.3.8 禁止孤立 \r，部分服务器会按宽松
+    // 策略错切行）+ dot-stuffing: 行首 "." 前补 "."，否则正文以 "." 开头的行会被
+    // 服务器误判为 DATA 结束（RFC 5321 §4.5.2）
+    let body_escaped = body.replace('\r', "").replace('\n', "\r\n");
     let body_stuffed: String = body_escaped
         .split("\r\n")
         .map(|l| {
@@ -802,25 +1022,36 @@ pub fn send_email_smtp(
         &mut writer,
         &mut reader,
         &format!("From: {from}\r\nTo: {to}\r\nSubject: {subject}\r\n\r\n{body_stuffed}\r\n.\r\n"),
+        "message body (redacted)",
         &["250"],
     )?;
-    smtp_expect(&mut writer, &mut reader, "QUIT\r\n", &["221"])?;
+    // QUIT 结果忽略: DATA 收到 250 后邮件已被服务器接收——qmail 类 MTA 及部分反垃圾
+    // 网关会在 250 后立即断连不等 QUIT，此时读/写侧报连接关闭属正常，不能误报发信失败
+    let _ = smtp_expect(&mut writer, &mut reader, "QUIT\r\n", "QUIT", &["221"]);
     Ok(())
 }
 
 /// SMTP 命令交互: 发送命令行并读取响应，校验期望的状态码前缀（3 位数字）；
-/// 多行响应（第 4 字符为 '-'）持续读取
+/// 多行响应（第 4 字符为 '-'）持续读取（上限 64 行，防恶意/故障服务器无限循环——
+/// 单次读取受 read_timeout 约束，但每次都能"成功"读一行即可无限拖长会话）；
+/// display 为错误消息回显文本，凭据类命令须传脱敏名（不回显 command 原文）
 fn smtp_expect(
     writer: &mut TcpStream,
     reader: &mut std::io::BufReader<TcpStream>,
     command: &str,
+    display: &str,
     expect: &[&str],
 ) -> Result<(), String> {
     writer
         .write_all(command.as_bytes())
         .map_err(|e| format!("smtp: send failed: {e}"))?;
     let mut resp = String::new();
+    let mut lines = 0u32;
     loop {
+        lines += 1;
+        if lines > 64 {
+            return Err("smtp: too many response lines".into());
+        }
         resp.clear();
         // 响应行长度上限（8KB）: 防恶意/故障服务器持续输出撑爆内存（单封邮件场景的兜底）
         let mut limited = (&mut *reader).take(8192);
@@ -845,7 +1076,7 @@ fn smtp_expect(
     if !expect.contains(&code) {
         return Err(format!(
             "smtp: unexpected response '{code}' to {0}: {1}",
-            command.trim_end(),
+            display,
             resp.trim_end()
         ));
     }
@@ -893,10 +1124,34 @@ pub fn send_syslog_udp(
     // MSG 清洗: 同样滤掉 CR（\r 可单独注入帧分段，smtp 同源修复已做，此处补上）
     let msg = message.replace(['\r', '\n'], " ");
     let frame = format!("<{pri}>1 {ts} {hostname} {tag} - - - {msg}");
-    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("syslog: bind failed: {e}"))?;
-    let _ = socket.set_write_timeout(Some(Duration::from_secs(timeout_secs.max(2))));
-    socket
-        .send_to(frame.as_bytes(), (addr, port))
-        .map_err(|e| format!("syslog: send to {host} failed: {e}"))?;
-    Ok(())
+    // 遍历全部解析地址（与 probe/smtp 同款）: 固定 bind 0.0.0.0 后 send_to 字符串目标
+    // 由 std 取首个解析地址——AAAA 优先的双栈主机拿到 IPv6 地址会因地址族不匹配
+    // WSAEAFNOSUPPORT，syslog 告警静默丢失；逐地址按协议族建 socket 发送
+    let addrs = (addr, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("syslog: cannot resolve {host}:{port}: {e}"))?;
+    let mut last_err = String::new();
+    for a in addrs {
+        let bind = if a.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+        let socket = match UdpSocket::bind(bind) {
+            Ok(s) => s,
+            Err(e) => {
+                last_err = format!("{e}");
+                continue;
+            }
+        };
+        let _ = socket.set_write_timeout(Some(Duration::from_secs(timeout_secs.max(2))));
+        match socket.send_to(frame.as_bytes(), a) {
+            Ok(_) => return Ok(()),
+            Err(e) => last_err = format!("{e}"),
+        }
+    }
+    Err(format!(
+        "syslog: send to {host} failed: {}",
+        if last_err.is_empty() {
+            "no address resolved".to_string()
+        } else {
+            last_err
+        }
+    ))
 }

@@ -12,7 +12,8 @@ use windows::core::{BOOL, PCWSTR};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Console::{
-    AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
+    ATTACH_PARENT_PROCESS, AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, GetConsoleWindow,
+    SetConsoleCtrlHandler,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
@@ -48,12 +49,21 @@ const HOOK_POSTSTOP_TIMEOUT_MS: u64 = 30_000;
 const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
 /// 插件调用默认超时（秒）: 防恶意/损坏插件挂死宿主（SCM 停止/启动流程不能被插件阻塞）
 const PLUGIN_DEFAULT_TIMEOUT_SECS: u64 = 5;
+/// 插件 stdout 输出上限（字节）: 与 kits 侧 stdin 1MB 上限口径一致，防输出灌爆宿主内存
+const PLUGIN_OUTPUT_LIMIT: usize = 1024 * 1024;
 /// 指标文件滚动阈值（json 追加超过即把当前挪到 .1，仅保留一份，防无限增长占满磁盘）
 pub(crate) const METRICS_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
 /// SCM waitHint 默认值（毫秒）: PENDING 状态上报的预计完成时间（覆盖 prestart 钩子/启动前下载）
 const SCM_WAIT_HINT_DEFAULT_MS: u32 = 3_600_000;
 /// SCM 主循环轮询间隔默认值（毫秒）
 const SCM_SLEEP_DEFAULT_MS: u32 = 500;
+/// 强杀后回收进程句柄的兜底等待（毫秒）: PPL 保护进程可能拒绝终止，超时放弃回收
+const REAP_GRACE_MS: u64 = 2000;
+/// 子进程/钩子日志单行字节上限: 防无换行超长行输出时日志读取线程内存无界增长
+const MAX_LOG_LINE_BYTES: usize = 1024 * 1024;
+/// 故障恢复动作延迟上限（秒，1 年）: 防配置极端值使 Instant + Duration 溢出 panic
+///（SCM 服务模式下 panic 即 abort，宿主崩溃循环）
+const MAX_FAILURE_DELAY_SECS: u64 = 86400 * 365;
 
 // ==================== Job 对象（子进程树生命周期保证） ====================
 
@@ -254,6 +264,9 @@ pub struct ServiceHost {
     last_child_exit_code: i32,
     /// 连续非零退出次数（限制异常重启）
     consecutive_failures: i32,
+    /// 监控强杀待处理标志（runaway/健康检查强杀子进程后置位）:
+    /// tick 检测到子进程消失时据此走崩溃恢复流程而非静默停止服务
+    monitor_kill_pending: bool,
     /// 0=运行中, 1=停止流程中（防 Exited 重入）
     stopping: AtomicBool,
     /// 部署目录（日志/下载相对路径基准）
@@ -279,6 +292,10 @@ pub struct ServiceHost {
     job_assign_failures: u32,
     /// 服务标识（配置 service_name，钩子环境注入 WINSGF_SERVICE_ID 用）
     service_id: String,
+    /// 可选停止探测闭包（test 前台模式注入 Ctrl+C 标志; SCM 模式为 None）:
+    /// 故障恢复延迟等待期间与 scm_stop_requested 一并轮询——前台调试时
+    /// 子进程崩溃后的恢复延迟（默认链最长 60s）期间 Ctrl+C 必须立即生效
+    stop_probe: Option<Box<dyn Fn() -> bool + Send + Sync>>,
 }
 
 /// 日志写入参数（分流出/错、大小滚动、备份份数、zip 归档、reset、定点滚动、out/err 开关、文件名模式）
@@ -394,6 +411,7 @@ impl ServiceHost {
             last_child_pid: 0,
             last_child_exit_code: -1,
             consecutive_failures: 0,
+            monitor_kill_pending: false,
             stopping: AtomicBool::new(false),
             deploy_dir: String::new(),
             start_config: None,
@@ -406,6 +424,7 @@ impl ServiceHost {
             process_count: 1,
             job_assign_failures: 0,
             service_id: String::new(),
+            stop_probe: None,
         }
     }
 
@@ -416,6 +435,11 @@ impl ServiceHost {
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "os".to_string())
+    }
+
+    /// 注入停止探测闭包（test 前台模式用; SCM 模式保持 None）
+    pub fn set_stop_probe<F: Fn() -> bool + Send + Sync + 'static>(&mut self, probe: F) {
+        self.stop_probe = Some(Box::new(probe));
     }
 
     /// 返回 false 表示启动失败（等价于 OnStart 抛异常 → SCM 报告启动失败）
@@ -438,22 +462,17 @@ impl ServiceHost {
 
     /// 以显式配置路径启动宿主（SCM 模式用 exe 旁配置；-m --test 用命令行指定配置，部署目录=配置目录）
     pub(crate) fn on_start_from(&mut self, config_path: &Path) -> bool {
-        // 服务配置缺失/解析失败 → 启动失败事件（错误级别）
+        // 服务配置缺失/解析失败 → 启动失败事件（错误级别）:
+        // 此阶段 log_dir/event_log 尚未应用（apply_log_settings 在后），write_log/write_event
+        // 会静默丢弃——SCM 模式下 stderr 也不可见，失败原因必须走强制事件日志通道
         if !config_path.exists() {
-            self.write_log(
-                "host",
-                &f(
-                    "Service config file not found: {0}",
-                    &[&config_path.display().to_string()],
-                ),
+            let msg = f(
+                "Service config file not found: {0}",
+                &[&config_path.display().to_string()],
             );
-            self.write_event(
-                1004,
-                &f(
-                    "Osmium config file not found: {0}",
-                    &[&config_path.display().to_string()],
-                ),
-            );
+            self.write_log("host", &msg);
+            self.write_event(1004, &msg);
+            self.report_startup_failure(&msg);
             return false;
         }
 
@@ -464,8 +483,10 @@ impl ServiceHost {
                 Ok(c) => c,
                 Err(p) => {
                     let msg = crate::service_core::panic_msg(&*p, "Unknown error");
-                    self.write_log("host", &msg);
-                    self.write_event(1004, &f("Osmium config parse failed: {0}", &[&msg]));
+                    let full = f("Osmium config parse failed: {0}", &[&msg]);
+                    self.write_log("host", &full);
+                    self.write_event(1004, &full);
+                    self.report_startup_failure(&full);
                     return false;
                 }
             };
@@ -740,20 +761,37 @@ impl ServiceHost {
         self.download_threads = config.download_threads;
         // onfailure 动作序列: 未配置 failure_actions 时用 failure_action + restart_delay_ms 构造单动作
         self.failure_actions = failure_action_chain(config);
-        self.runaway_cpu_limit = config.runaway_cpu_limit;
-        self.runaway_memory_limit_mb = config.runaway_memory_limit_mb;
+        // runaway 阈值清洗: 负值/NaN/无穷会导致恒超限强杀（杀-重启循环）或静默失效——
+        // validate_config 预检拦截 + 此处运行期兜底（双防线）
+        self.runaway_cpu_limit = config
+            .runaway_cpu_limit
+            .filter(|v| v.is_finite() && *v > 0.0);
+        self.runaway_memory_limit_mb = config.runaway_memory_limit_mb.filter(|v| *v > 0);
         self.runaway_check_interval_secs = if config.runaway_check_interval_secs > 0 {
             config.runaway_check_interval_secs
         } else {
             30
         };
-        // 效率模式（EcoQoS）: 子进程与宿主各自独立配置
+        // 效率模式（EcoQoS）: 子进程与宿主各自独立配置；阈值清洗（负/NaN/无穷/idle>=busy
+        // 会导致永不进入效率模式或采样翻转，非法组合整体回退默认）
         self.eco_qos_mode = EcoQosMode::parse(config.eco_qos.as_deref());
-        self.eco_qos_idle_pct = config.eco_qos_idle_cpu_pct.unwrap_or(10.0);
-        self.eco_qos_busy_pct = config.eco_qos_busy_cpu_pct.unwrap_or(30.0);
+        let (idle, busy) = sanitize_threshold_pair(
+            config.eco_qos_idle_cpu_pct,
+            config.eco_qos_busy_cpu_pct,
+            10.0,
+            30.0,
+        );
+        self.eco_qos_idle_pct = idle;
+        self.eco_qos_busy_pct = busy;
         self.host_eco_qos_mode = EcoQosMode::parse(config.host_eco_qos.as_deref());
-        self.host_eco_qos_idle_pct = config.host_eco_qos_idle_cpu_pct.unwrap_or(5.0);
-        self.host_eco_qos_busy_pct = config.host_eco_qos_busy_cpu_pct.unwrap_or(20.0);
+        let (host_idle, host_busy) = sanitize_threshold_pair(
+            config.host_eco_qos_idle_cpu_pct,
+            config.host_eco_qos_busy_cpu_pct,
+            5.0,
+            20.0,
+        );
+        self.host_eco_qos_idle_pct = host_idle;
+        self.host_eco_qos_busy_pct = host_busy;
         self.runaway_pid_file = config
             .runaway_pid_file
             .as_deref()
@@ -773,14 +811,15 @@ impl ServiceHost {
         self.runaway_stop_parent_first = config.runaway_stop_parent_first;
         // SCM preshutdown 支持开关（scm_status_params 读取该标志决定是否上报 SERVICE_ACCEPT_PRESHUTDOWN）
         crate::service_core::set_preshutdown_enabled(config.preshutdown);
-        // SCM 状态上报 waitHint 与主循环轮询间隔（毫秒），可配置化（对应 WinSW waitHint/sleepTime）
+        // SCM 状态上报 waitHint 与主循环轮询间隔（毫秒），可配置化（对应 WinSW waitHint/sleepTime）。
+        // 正值按 u32 钳制: i64 直接 as u32 会把超过 u32::MAX 的配置静默截断（模 2^32）
         crate::service_core::set_scm_wait_hint_ms(if config.scm_wait_hint_ms > 0 {
-            config.scm_wait_hint_ms as u32
+            (config.scm_wait_hint_ms as u64).min(u32::MAX as u64) as u32
         } else {
             SCM_WAIT_HINT_DEFAULT_MS
         });
         crate::service_core::set_scm_sleep_time_ms(if config.scm_sleep_time_ms > 0 {
-            config.scm_sleep_time_ms as u32
+            (config.scm_sleep_time_ms as u64).min(u32::MAX as u64) as u32
         } else {
             SCM_SLEEP_DEFAULT_MS
         });
@@ -892,35 +931,49 @@ impl ServiceHost {
         if self.stopping.load(Ordering::SeqCst) {
             return false;
         }
-        // 检查所有实例的退出状态（多个同时退出时取最后一个的退出码）
-        let mut exited_code: Option<i32> = None;
+        // 检查所有实例的退出状态（收集全部退出码: 多实例同 tick 退出时任一非零即按故障处理，
+        // 顺序无关——崩溃不能被同批正常退出掩盖）
+        let mut exited_codes: Vec<i32> = Vec::new();
         for child in self.child.iter_mut() {
             match child.try_wait() {
-                Ok(Some(status)) => exited_code = Some(status.code().unwrap_or(-1)),
+                Ok(Some(status)) => exited_codes.push(status.code().unwrap_or(-1)),
                 Ok(None) => {}
                 Err(_) => return false,
             }
         }
-        let code = match exited_code {
-            Some(code) => code,
-            None => {
-                if self.child.is_empty() {
-                    return false; // 无子进程（启动失败等）
-                }
-                // 全部运行中: 周期检查（采样以主实例为准；多实例共享同配置同行为）
-                self.check_runaway();
-                self.check_child_eco_qos();
-                self.check_host_eco_qos();
-                self.write_metrics(None);
-                self.check_health();
-                self.check_schedules();
-                self.check_reload_flag();
-                // 配置热刷新（autoRefresh）: 配置文件变化时重载并重启子进程
-                if self.auto_refresh {
-                    self.check_config_refresh();
-                }
-                return true; // 仍在运行
+        // 监控强杀（runaway/健康检查）: 强杀已消费退出状态且清空了子进程列表，
+        // 此处视同异常退出走崩溃恢复流程（动作序列 + crash 插件 + 事件 1002），
+        // 而非让服务静默停止（旧行为: 下一个 tick 见空子进程直接 return false）。
+        // 条件必须含 child 为空: 强杀后同一 tick 内 schedule/reload 可能已拉起新子进程
+        //（check_schedules 等与 check_runaway 同分支执行），仅凭 exited_codes 为空无法
+        // 区分"全部运行中"与"无子进程"——旧判定会对健康进程误推 -1 走伪崩溃恢复
+        if self.child.is_empty() && self.monitor_kill_pending {
+            self.monitor_kill_pending = false;
+            exited_codes.push(-1);
+        }
+        let code = if exited_codes.is_empty() {
+            if self.child.is_empty() {
+                return false; // 无子进程（启动失败等）
             }
+            // 全部运行中: 周期检查（采样以主实例为准；多实例共享同配置同行为）
+            self.check_runaway();
+            self.check_child_eco_qos();
+            self.check_host_eco_qos();
+            self.write_metrics(None);
+            self.check_health();
+            self.check_schedules();
+            self.check_reload_flag();
+            // 配置热刷新（autoRefresh）: 配置文件变化时重载并重启子进程
+            if self.auto_refresh {
+                self.check_config_refresh();
+            }
+            return true; // 仍在运行
+        } else if exited_codes.iter().any(|c| *c != 0) {
+            // 任一实例非零退出 → 按故障恢复处理（取第一个非零码）
+            exited_codes.into_iter().find(|c| *c != 0).unwrap_or(-1)
+        } else {
+            // 全部正常退出 → 按最后一个退出码处理
+            exited_codes.into_iter().last().unwrap_or(0)
         };
         // 移除已退出的实例（try_wait 已消费其状态）
         let exited_ids: Vec<u32> = self
@@ -937,9 +990,10 @@ impl ServiceHost {
             "host",
             &f("Child process exited with code {0}", &[&code.to_string()]),
         );
-        // 子进程退出时补写最终指标行（记录最终 CPU/内存与退出码, 保证 metrics 序列完整）
+        // 子进程退出时补写最终指标行（记录最终 CPU/内存与退出码, 保证 metrics 序列完整）。
+        // pid 在移除前捕获: 单实例退出后 child 已空，旧实现拿 first() 直接跳过导致该行永不落盘
         if self.metrics_file.is_some() {
-            self.write_metrics(Some(code));
+            self.write_metrics(Some((code, exited_ids.last().copied())));
         }
 
         // once 模式: 子进程退出即停止服务（不重启、不故障恢复，任务型服务语义）
@@ -1034,12 +1088,17 @@ impl ServiceHost {
         if let Err(e) = self.run_plugin_calls(Some(&crash_plugins), "crash") {
             self.write_log("host", &f("Crash plugin call failed: {0}", &[&e]));
         }
-        // 恢复延迟分段等待: 期间轮询 SCM 停止/关机信号，管理员可随时中断恢复流程
-        //（WinSW 行为对齐: 恢复 delay 中必须能停止服务，不能阻塞 SCM 停止）
-        if action.delay_secs > 0 {
-            let deadline = Instant::now() + Duration::from_secs(action.delay_secs);
+        // 恢复延迟分段等待: 期间轮询 SCM 停止/关机信号（test 前台模式另有 Ctrl+C
+        // 探测闭包一并轮询），管理员可随时中断恢复流程
+        //（WinSW 行为对齐: 恢复 delay 中必须能停止服务，不能阻塞 SCM 停止）。
+        // delay 钳制上限: Instant + Duration 对极端值溢出 panic（SCM 模式即 abort）
+        let delay_secs = action.delay_secs.min(MAX_FAILURE_DELAY_SECS);
+        if delay_secs > 0 {
+            let deadline = Instant::now() + Duration::from_secs(delay_secs);
             while Instant::now() < deadline {
-                if crate::service_core::scm_stop_requested() {
+                let stop_requested = crate::service_core::scm_stop_requested()
+                    || self.stop_probe.as_ref().is_some_and(|p| p());
+                if stop_requested {
                     self.write_log(
                         "host",
                         "Stop requested during recovery delay, aborting recovery",
@@ -1196,7 +1255,7 @@ impl ServiceHost {
                     ],
                 ),
             );
-            self.force_kill();
+            self.kill_for_monitor_failure();
             return;
         }
         // CPU 超限（内核+用户时间差 / 墙钟差，全核累计百分比）
@@ -1226,7 +1285,7 @@ impl ServiceHost {
                                 &[&pct, &limit_str],
                             ),
                         );
-                        self.force_kill();
+                        self.kill_for_monitor_failure();
                         self.runaway_last_sample = None;
                         return;
                     }
@@ -1255,26 +1314,21 @@ impl ServiceHost {
         self.health_last_check = Some(Instant::now());
         let timeout = Duration::from_secs(self.health_check_timeout.max(1));
         let healthy = if let Some(rest) = url.to_ascii_lowercase().strip_prefix("tcp://") {
-            // TCP 探针: 连接成功即健康（目标解析失败视为不健康）
+            // TCP 探针: 连接成功即健康（目标解析失败视为不健康）。
+            // DNS 解析放子线程 + recv_timeout: 系统解析器慢/挂起时不会拖住整个 tick 主循环
+            //（SCM 停止轮询会被延迟）
             parse_tcp_target(rest)
-                .and_then(|(h, p)| {
-                    use std::net::ToSocketAddrs;
-                    (h.as_str(), p)
-                        .to_socket_addrs()
-                        .ok()
-                        .and_then(|mut it| it.next())
-                })
+                .and_then(|(h, p)| resolve_socket_addr(h, p, timeout))
                 .map(|addr| {
                     use std::net::TcpStream;
                     TcpStream::connect_timeout(&addr, timeout).is_ok()
                 })
                 .unwrap_or(false)
-        } else if let Some(rest) = url.strip_prefix("osx://") {
+        } else if url.len() >= 6 && url[..6].eq_ignore_ascii_case("osx://") {
             // 插件协议探针: osx://<kit>?<key=value&...> → run_plugin（如 mysql/redis 握手验证）。
             // 只匹配前缀（协议关键字大小写不敏感），spec 其余部分保持原样——
-            // 整体 to_ascii_lowercase 会破坏大小写敏感的主机名/token
-            self.probe_via_plugin(rest)
-        } else if url[..6].eq_ignore_ascii_case("osx://") {
+            // 整体 to_ascii_lowercase 会破坏大小写敏感的主机名/token；
+            // 长度守卫防短 URL 切片 panic（运行路径不经过 validate_config）
             self.probe_via_plugin(&url[6..])
         } else {
             match &self.health_agent {
@@ -1334,7 +1388,7 @@ impl ServiceHost {
                 ),
             );
             self.health_failures = 0;
-            self.force_kill();
+            self.kill_for_monitor_failure();
         }
     }
 
@@ -1395,17 +1449,11 @@ impl ServiceHost {
                 //（与 auto_refresh 一致，失败保持旧配置运行；不先 stop 会让旧实例残留）
                 "reload" => {
                     self.stop_child_process();
-                    if let Err(e) = self.try_restart_child() {
-                        let msg = f("Schedule reload failed, keeping old config: {0}", &[&e]);
-                        self.write_log("host", &msg);
-                    }
+                    self.restart_with_fallback("Schedule reload failed, keeping old config");
                 }
                 _ => {
                     self.stop_child_process();
-                    if let Err(e) = self.try_restart_child() {
-                        let msg = f("Schedule restart failed: {0}", &[&e]);
-                        self.write_log("host", &msg);
-                    }
+                    self.restart_with_fallback("Schedule restart failed");
                 }
             }
             self.schedule_last[i] = Some(Instant::now());
@@ -1416,7 +1464,8 @@ impl ServiceHost {
     /// reload 标记检测（--reload 命令触发的热刷新通道，不依赖 auto_refresh 配置）:
     /// 部署目录存在 `<配置名>`.reload 文件 → 先优雅停止旧子进程，再重载配置并重启（失败保持旧配置）
     fn check_reload_flag(&mut self) {
-        let Some(config_path) = self.config_path.clone() else {
+        // 借用而非克隆（每 tick 调用，避免无谓分配）
+        let Some(config_path) = self.config_path.as_ref() else {
             return;
         };
         let flag = config_path.with_extension("reload");
@@ -1426,9 +1475,7 @@ impl ServiceHost {
         let _ = std::fs::remove_file(&flag);
         self.write_log("host", "Reload flag detected, reloading config");
         self.stop_child_process();
-        if let Err(e) = self.try_restart_child() {
-            self.write_log("host", &f("Reload failed, keeping old config: {0}", &[&e]));
-        }
+        self.restart_with_fallback("Reload failed, keeping old config");
     }
 }
 
@@ -1442,6 +1489,22 @@ fn parse_daily_time(raw: &str) -> Option<chrono::NaiveTime> {
 /// 定时时刻格式预检（--check 用）: "HH:mm" / "HH:mm:ss" 可解析返回 true
 pub(crate) fn parse_daily_time_check(raw: &str) -> bool {
     parse_daily_time(raw).is_some()
+}
+
+/// 带超时的 DNS 解析（子线程 + channel）: to_socket_addrs 本身无超时，
+/// 系统解析器异常（慢/挂起 DNS）时防阻塞宿主主循环
+fn resolve_socket_addr(host: String, port: u16, timeout: Duration) -> Option<std::net::SocketAddr> {
+    use std::net::ToSocketAddrs;
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(
+            (host.as_str(), port)
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut it| it.next()),
+        );
+    });
+    rx.recv_timeout(timeout).ok().flatten()
 }
 
 /// 解析 osx://`<kit>`?`<key=value&...>` 探针规格为 (kit, payload JSON)。
@@ -1594,12 +1657,19 @@ pub(crate) fn schedule_due(
 
 impl ServiceHost {
     /// 指标导出: metrics_file 配置时每 30s 写入一次（json 追加历史行并按阈值滚动；prometheus
-    /// 整文件重写——# TYPE 行须全局唯一），子进程退出时补写 final 行（含退出码）； 路径为符号链接时跳过
-    fn write_metrics(&mut self, final_exit: Option<i32>) {
+    /// 整文件重写——# TYPE 行须全局唯一），子进程退出时补写 final 行（含退出码）；
+    /// final_exit = (退出码, 退出实例 PID)：pid 必须由调用方传入——
+    /// 单实例退出后 child 列表已空，回退 first() 会导致 final 行永不写入；
+    /// 路径为符号链接时跳过
+    fn write_metrics(&mut self, final_exit: Option<(i32, Option<u32>)>) {
         let Some(path) = self.metrics_file.clone() else {
             return;
         };
-        let Some(pid) = self.child.first().map(|c| c.id()) else {
+        // 运行中采样以主实例为准；final 行优先用退出实例 PID（监控强杀场景 child 已空则跳过）
+        let Some(pid) = final_exit
+            .and_then(|(_, p)| p)
+            .or_else(|| self.child.first().map(|c| c.id()))
+        else {
             return;
         };
         let now = Instant::now();
@@ -1621,7 +1691,7 @@ impl ServiceHost {
         let prom = self.metrics_format == "prometheus";
         let line = match final_exit {
             // 子进程已退出: 周期采样值无意义, 仅记录运行时长与退出码
-            Some(code) => {
+            Some((code, _)) => {
                 if prom {
                     format!(
                         "# TYPE osmium_child_exit gauge\nosmium_child_exit{{pid=\"{pid}\"}} {code}\n\
@@ -1863,6 +1933,8 @@ impl ServiceHost {
             return;
         }
         let config = self.expand_config(&config);
+        // 保存旧配置供回退（启动失败时还原字段并重启，防热刷新失败让服务整体下线）
+        let old_config = self.start_config.clone();
         // 热刷新成功应用 → 同步刷新启动配置缓存（停止阶段语义随之更新）
         self.start_config = Some(config.clone());
         self.config_mtime = mtime;
@@ -1880,6 +1952,17 @@ impl ServiceHost {
                 "host",
                 &f("Child restart after config change failed: {0}", &[&e]),
             );
+            // 回退旧配置重启（旧进程已停止，否则服务整体下线）
+            if let Some(old) = old_config {
+                self.apply_log_settings(&old);
+                self.apply_runtime_fields(&old);
+                if let Err(e2) = self.start_child_process(&old) {
+                    self.write_log(
+                        "host",
+                        &f("Fallback restart with previous config failed: {0}", &[&e2]),
+                    );
+                }
+            }
         }
     }
 
@@ -2147,6 +2230,9 @@ impl ServiceHost {
             );
             spawned += 1;
         }
+        // 新子进程已就绪: 清除监控强杀待处理标志（强杀后同 tick 内被 schedule/reload
+        // 拉起新实例的场景，防下个 tick 对健康进程误判崩溃；tick 侧另要求 child 为空双保险）
+        self.monitor_kill_pending = false;
         // poststart 钩子（主进程启动后，失败不阻断）
         self.run_extensions("start_after");
         // 生命周期插件 phase=start_after（进程已启动不可回滚，失败仅告警）
@@ -2171,6 +2257,32 @@ impl ServiceHost {
         // 重启按新配置执行，同步刷新启动配置缓存（后续停止阶段语义随之更新）
         self.start_config = Some(expanded.clone());
         self.start_child_process(&expanded)
+    }
+
+    /// 重启子进程并在失败时按启动配置兜底重试（热刷新/调度/--reload 场景共用）:
+    /// 调用方已停止旧进程，若此处重启失败且不兜底，下个 tick 见空子进程会让服务整体
+    /// 静默下线——兜底保证"失败保持旧配置运行"的承诺（尽力恢复，两次都失败才停止）
+    fn restart_with_fallback(&mut self, fail_msg: &str) {
+        // 兜底必须用"旧"启动配置: try_restart_child 在启动前就覆盖 start_config 缓存，
+        // 失败时若读该缓存拿到的正是刚失败的同一份新配置，兜底等于重试失败者——
+        // 因此先克隆旧配置，失败后再用于兜底并回滚缓存
+        let old_config = self.start_config.clone();
+        if let Err(e) = self.try_restart_child() {
+            self.write_log("host", &f("{0}: {1}", &[fail_msg, &e]));
+            if let Some(cfg) = old_config {
+                // 回滚启动配置缓存（停止阶段语义恢复为旧配置）后按旧配置重启
+                self.start_config = Some(cfg.clone());
+                match self.start_child_process(&cfg) {
+                    Ok(()) => self.write_log("host", "Child restarted with startup config"),
+                    Err(e2) => self.write_log("host", &f("Fallback restart failed: {0}", &[&e2])),
+                }
+            } else {
+                self.write_log(
+                    "host",
+                    "Fallback restart skipped: no startup config available",
+                );
+            }
+        }
     }
 
     // ==================== 停止策略 & 钩子 ====================
@@ -2281,6 +2393,9 @@ impl ServiceHost {
     /// 保持 Ctrl+C 忽略处理器注册到子进程退出，防止宿主自身被广播误杀。
     fn try_send_ctrl_c(&mut self, pid: u32) -> bool {
         unsafe {
+            // 记录宿主是否原有控制台（test 模式）: FreeConsole 后宿主脱离所在控制台，
+            // 后续 Ctrl+C/输出全部失效——流程结束后尽力恢复附加父控制台
+            let had_console = !GetConsoleWindow().is_invalid();
             let _ = FreeConsole();
             if AttachConsole(pid).is_ok() {
                 // 附加到控制台后再注册忽略 Ctrl+C，防止宿主自身被终止
@@ -2294,6 +2409,9 @@ impl ServiceHost {
                 let exited = wait_child_exit(&mut self.child, self.stop_timeout_secs);
                 let _ = SetConsoleCtrlHandler(Some(ignore_ctrl_c), false);
                 let _ = FreeConsole();
+                if had_console {
+                    let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+                }
                 exited
             } else {
                 self.write_log("host", "Ctrl+C skipped: cannot attach to child console");
@@ -2328,7 +2446,7 @@ impl ServiceHost {
             if self.kill_process_tree {
                 if self.stop_parent_process_first {
                     let _ = child.kill();
-                    let _ = child.wait();
+                    reap_killed_child(child, REAP_GRACE_MS);
                     terminate_pid_tree(pid);
                     continue;
                 }
@@ -2337,12 +2455,20 @@ impl ServiceHost {
             if let Err(e) = child.kill() {
                 kill_errors.push(e.to_string());
             }
-            let _ = child.wait();
+            reap_killed_child(child, REAP_GRACE_MS);
         }
         for e in &kill_errors {
             self.write_log("host", &f("Force kill failed: {0}", &[e]));
         }
         self.child.clear();
+    }
+
+    /// 监控强杀（runaway 超限 / 健康检查连续失败）: 强杀后置位待处理标志，
+    /// 下个 tick 视同异常退出走崩溃恢复流程（动作序列 + crash 插件 + 事件 1002），
+    /// 而不是让服务静默停止（旧行为: 强杀清空子进程后 tick 见空直接停止服务）
+    fn kill_for_monitor_failure(&mut self) {
+        self.force_kill();
+        self.monitor_kill_pending = true;
     }
 
     // ==================== 生命周期钩子 ====================
@@ -2504,6 +2630,13 @@ impl ServiceHost {
         };
         report_event_log(message, event_id, level);
     }
+
+    /// 启动早期失败兜底通道（配置尚未加载，log_dir/event_log 开关不可用）:
+    /// SCM 模式 stderr 不可见，事件日志是唯一可排查渠道——强制写入不经过 event_log 开关
+    fn report_startup_failure(&self, message: &str) {
+        eprintln!("{message}");
+        report_event_log(message, 1004, EVENTLOG_ERROR_TYPE);
+    }
 }
 
 // ==================== 子进程 Command 构造 & 输出消费 ====================
@@ -2588,6 +2721,39 @@ fn wait_child_exit(child: &mut Vec<Child>, timeout_secs: u64) -> bool {
     false
 }
 
+/// 限时回收已强杀的子进程句柄: kill 后轮询 try_wait（PPL 保护进程可能拒绝终止，
+/// 无条件 wait 会无限阻塞拖死停止流程）；超时放弃回收（宿主退出时随之消亡）
+fn reap_killed_child(child: &mut Child, grace_ms: u64) {
+    let deadline = Instant::now() + Duration::from_millis(grace_ms);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+/// 限时等待日志读取线程: 钩子/停止命令脚本派生的孙进程可能继承 stdout/stderr 管道
+/// 写句柄，父进程退出后 read_until 永不 EOF——无条件 join 会无限挂起整个停止流程；
+/// 超时后放弃线程（管道句柄在线程内随流 Drop 关闭，线程自身不泄漏资源）
+fn reap_reader_threads(handles: Vec<thread::JoinHandle<()>>, grace_ms: u64) {
+    let deadline = Instant::now() + Duration::from_millis(grace_ms);
+    for h in handles {
+        while !h.is_finished() {
+            if Instant::now() >= deadline {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let _ = h.join();
+    }
+}
+
 /// 读取子进程输出流并逐行写入日志，直到 EOF；返回线程句柄供等待。
 /// 按字节读行再 lossy 转 UTF-8: 非 UTF-8 输出（GBK 等中文程序）不丢行（read_line(String) 遇无效序列会 Err 并中断，导致后续输出全部静默丢失）
 fn spawn_log_reader<R: Read + Send + 'static>(
@@ -2600,15 +2766,23 @@ fn spawn_log_reader<R: Read + Send + 'static>(
         let mut reader = BufReader::new(stream);
         loop {
             let mut line: Vec<u8> = Vec::new();
-            match reader.read_until(b'\n', &mut line) {
+            // 单行上限（1MB）: 子进程输出不含换行的超长行时防内存无界增长；
+            // 超限则丢弃该行剩余部分（内容截断，不影响后续行对齐）
+            let n = match reader
+                .by_ref()
+                .take((MAX_LOG_LINE_BYTES + 1) as u64)
+                .read_until(b'\n', &mut line)
+            {
                 Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    let text = String::from_utf8_lossy(&line);
-                    let text = text.trim_end();
-                    if !text.is_empty() {
-                        write_log_entry(&log_dir, channel, text, &opts);
-                    }
-                }
+                Ok(n) => n,
+            };
+            if n > MAX_LOG_LINE_BYTES {
+                let _ = reader.read_until(b'\n', &mut Vec::new());
+            }
+            let text = String::from_utf8_lossy(&line);
+            let text = text.trim_end();
+            if !text.is_empty() {
+                write_log_entry(&log_dir, channel, text, &opts);
             }
         }
     })
@@ -2621,7 +2795,7 @@ fn spawn_raw_reader<R: Read + Send + 'static>(
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         // reparse 写穿防护: 重定向目标自身是 junction/symlink 时拒绝写入（防钩子输出写穿到系统文件）
-        if is_reparse_path(std::path::Path::new(&file_path)) {
+        if is_reparse_path(Path::new(&file_path)) {
             return;
         }
         let mut reader = BufReader::new(stream);
@@ -2631,13 +2805,20 @@ fn spawn_raw_reader<R: Read + Send + 'static>(
             .open(&file_path);
         loop {
             let mut line: Vec<u8> = Vec::new();
-            match reader.read_until(b'\n', &mut line) {
+            // 单行上限与 spawn_log_reader 一致（防无换行超长行内存无界增长）
+            let n = match reader
+                .by_ref()
+                .take((MAX_LOG_LINE_BYTES + 1) as u64)
+                .read_until(b'\n', &mut line)
+            {
                 Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    if let Ok(f) = out.as_mut() {
-                        let _ = f.write_all(&line);
-                    }
-                }
+                Ok(n) => n,
+            };
+            if n > MAX_LOG_LINE_BYTES {
+                let _ = reader.read_until(b'\n', &mut Vec::new());
+            }
+            if let Ok(f) = out.as_mut() {
+                let _ = f.write_all(&line);
             }
         }
     })
@@ -2682,6 +2863,7 @@ pub(crate) fn failure_action_chain(
     if let Some(actions) = config.failure_actions.as_ref()
         && !actions.is_empty()
     {
+        // 过滤非法动作 + delay 钳制上限（消费处另有一层钳制，此处保证日志/状态显示一致）
         return actions
             .iter()
             .filter(|a| {
@@ -2690,11 +2872,15 @@ pub(crate) fn failure_action_chain(
                     "restart" | "reboot" | "none"
                 )
             })
-            .cloned()
+            .map(|a| crate::service_config::FailureActionConfig {
+                action: a.action.clone(),
+                delay_secs: a.delay_secs.min(MAX_FAILURE_DELAY_SECS),
+            })
             .collect();
     }
+    // 毫秒转秒并保底 1 秒: <1000ms 的配置截成 0 会让故障恢复无延迟死循环重启
     let delay = if config.restart_delay_ms > 0 {
-        config.restart_delay_ms as u64 / 1000
+        (config.restart_delay_ms as u64 / 1000).max(1)
     } else {
         60
     };
@@ -2721,6 +2907,23 @@ pub(crate) fn failure_action_chain(
             delay_secs: 0,
         },
     ]
+}
+
+/// eco_qos 阈值对清洗: 负值/NaN/无穷回退默认；idle >= busy 的组合（进入/退出条件同时
+/// 满足导致采样翻转）整体回退默认——validate_config 预检拦截 + 此处运行期兜底
+fn sanitize_threshold_pair(
+    idle: Option<f64>,
+    busy: Option<f64>,
+    def_idle: f64,
+    def_busy: f64,
+) -> (f64, f64) {
+    let i = idle
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(def_idle);
+    let b = busy
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(def_busy);
+    if i < b { (i, b) } else { (def_idle, def_busy) }
 }
 
 /// 非启动阶段下载（after_start/after_stop）: 逐条按条目级 stage 过滤执行，失败仅告警，不影响服务生命周期
@@ -2858,7 +3061,7 @@ pub(crate) fn run_hook(
             );
             terminate_pid_tree(pid);
             let _ = child.kill();
-            let _ = child.wait();
+            reap_killed_child(&mut child, REAP_GRACE_MS);
         }
         Some(code) => {
             if code == 0 {
@@ -2882,10 +3085,8 @@ pub(crate) fn run_hook(
         }
     }
 
-    // 等待日志读取线程排空输出后再返回
-    for h in handles {
-        let _ = h.join();
-    }
+    // 等待日志读取线程排空输出（限时回收: 钩子派生孙进程继承管道句柄时 read 永不 EOF）
+    reap_reader_threads(handles, REAP_GRACE_MS);
 }
 
 // ==================== 启动前下载 ====================
@@ -3650,7 +3851,7 @@ fn plugin_path_trusted(path: &Path) -> Result<(), String> {
 
 /// 插件发现结果缓存（按插件目录树 mtime 失效）: osx:// 探针每 30s 调用一次，
 /// 反复递归扫描 + 逐插件 spawn 探测开销大；目录无变化时直接复用列表
-static PLUGIN_CACHE: Mutex<Option<(std::time::SystemTime, Vec<PathBuf>)>> = Mutex::new(None);
+static PLUGIN_CACHE: Mutex<Option<(SystemTime, Vec<PathBuf>)>> = Mutex::new(None);
 
 /// 清空插件发现缓存（测试隔离用: 并行测试可能动态增删插件目录，mtime 相同但内容不同）
 #[cfg(test)]
@@ -3677,8 +3878,8 @@ pub(crate) fn discover_plugins() -> Vec<PathBuf> {
 
 /// 插件目录树最近修改时间（目录自身 mtime；目录 mtime 在文件增删时更新，
 /// 内容就地改写不影响发现列表，无需纳入）
-fn dir_tree_mtime(dir: &Path) -> std::time::SystemTime {
-    let mut latest = std::time::SystemTime::UNIX_EPOCH;
+fn dir_tree_mtime(dir: &Path) -> SystemTime {
+    let mut latest = SystemTime::UNIX_EPOCH;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         if let Ok(md) = std::fs::metadata(&d) {
@@ -3994,7 +4195,7 @@ pub(crate) fn run_plugin(
 /// abort 回调返回 true 时提前中断（调用方按 abort 处理，区别于超时）；
 /// run_hook / run_stop_command 共用（原两处各写一遍轮询+超时逻辑）
 fn wait_child_terminate(
-    child: &mut std::process::Child,
+    child: &mut Child,
     deadline: Instant,
     abort: Option<&dyn Fn() -> bool>,
 ) -> (Option<i32>, bool, bool) {
@@ -4076,11 +4277,15 @@ fn invoke_plugin(
     let writer = thread::spawn(move || {
         let _ = child_stdin.write_all(input.as_bytes());
     });
-    let mut stdout = child.stdout.take().unwrap();
-    // 子线程读 stdout 到 EOF；主线程限时等待，超时强杀插件（防挂死宿主）
+    let stdout = child.stdout.take().unwrap();
+    // 子线程读 stdout 到 EOF；主线程限时等待，超时强杀插件（防挂死宿主）。
+    // 读取带上限（与 kits 侧 stdin 1MB 上限口径一致）: 恶意/损坏插件持续输出
+    // 时截断，超出判失败——防 SYSTEM 宿主内存被灌爆
     let reader = thread::spawn(move || {
         let mut out = String::new();
-        let _ = stdout.read_to_string(&mut out);
+        let _ = stdout
+            .take((PLUGIN_OUTPUT_LIMIT + 1) as u64)
+            .read_to_string(&mut out);
         out
     });
     let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
@@ -4096,15 +4301,21 @@ fn invoke_plugin(
         }
         thread::sleep(Duration::from_millis(50));
     };
-    // 退出码采集: 正常路径 wait 即得；超时分支 kill 后 PPL 保护进程可能拒绝终止——
-    // try_wait 轮询兜底（2s），仍不退出的插件放弃回收（宿主退出时随之消亡），防 wait 无限阻塞
-    let code = if out.is_empty() {
+    // 退出码采集: 统一 try_wait 限时轮询（2s）——空输出分支的 wait 语义是"kill 后
+    // 兜底回收"，非空输出分支的 wait 语义是"读取完成≠进程退出"（插件可能已关闭 stdout
+    // 仍存活做清理/网络操作），无条件 wait 会无限挂死宿主（超时机制被 EOF 旁路）。
+    // 超时后非空输出分支补 kill（协议响应已收到，进程不再被需要）；PPL 保护进程拒绝
+    // 终止时放弃回收（宿主退出时随 Job Object 消亡），防 wait 无限阻塞
+    let code = {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status.code().unwrap_or(-1),
                 Ok(None) => {
                     if Instant::now() >= deadline {
+                        if !out.is_empty() {
+                            let _ = child.kill();
+                        }
                         break -1;
                     }
                     thread::sleep(Duration::from_millis(50));
@@ -4112,17 +4323,21 @@ fn invoke_plugin(
                 Err(_) => break -1,
             }
         }
-    } else {
-        child
-            .wait()
-            .map_err(|e| e.to_string())?
-            .code()
-            .unwrap_or(-1)
     };
     if code != 0 {
         return Err(f(
             "plugin '{0}' exited with code {1}",
             &[&plugin.display().to_string(), &code.to_string()],
+        ));
+    }
+    // 输出超限判定: take(上限+1) 读到上限+1 字节说明被截断（协议响应远小于 1MB）
+    if out.len() > PLUGIN_OUTPUT_LIMIT {
+        return Err(f(
+            "plugin '{0}' output exceeded the {1} MiB limit",
+            &[
+                &plugin.display().to_string(),
+                &(PLUGIN_OUTPUT_LIMIT / 1024 / 1024).to_string(),
+            ],
         ));
     }
     if out.trim().is_empty() {
@@ -4193,27 +4408,35 @@ fn format_log_date(opts: &LogOptions, now: &chrono::DateTime<chrono::Local>) -> 
     }
 }
 
-/// 自定义日志文件名安全校验: 仅允许字母数字与 -_.（与 log_pattern_safe 同款，防路径穿越）
-fn safe_log_name(name: Option<&str>) -> String {
+/// 自定义日志文件名安全校验: 仅允许字母数字与 -_.（与 log_pattern_safe 同款，防路径穿越），
+/// 并显式拒绝 "." / ".."（拼入 join 会落到目录本身/父目录，虽 open 失败无害但校验须完整）
+pub(crate) fn safe_log_name(name: Option<&str>) -> String {
     name.map(|n| n.trim().to_string())
         .filter(|n| {
             !n.is_empty()
+                && n != "."
+                && n != ".."
                 && n.chars()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         })
         .unwrap_or_default()
 }
 
-/// log reset: 清空当日主日志与 err 分离文件（对应 WinSW log mode=reset）
+/// log reset: 清空当日主日志与 err 分离文件（对应 WinSW log mode=reset）;
+/// truncate 前检查 reparse（防日志文件被替换为 symlink 时截断链接目标）
 pub(crate) fn reset_current_logs(log_dir: &str, opts: &LogOptions) {
     let now = chrono::Local::now();
     for channel in ["host", "err"] {
         let name = current_log_name(opts, channel, &now);
+        let target = Path::new(log_dir).join(&name);
+        if is_reparse_path(&target) {
+            continue;
+        }
         let _ = std::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
-            .open(Path::new(log_dir).join(&name));
+            .open(target);
     }
 }
 
@@ -4453,7 +4676,7 @@ pub(crate) fn zip_backup_file(file: &Path, zip_date_format: &str) -> bool {
         )
     };
     // reparse 写穿防护: 归档目标自身是 junction/symlink 时拒绝（防日志归档写穿到系统文件）
-    if is_reparse_path(std::path::Path::new(&zip_path)) {
+    if is_reparse_path(Path::new(&zip_path)) {
         return false;
     }
     let Ok(f) = std::fs::File::create(&zip_path) else {
@@ -5264,7 +5487,7 @@ pub(crate) fn run_stop_command(
         );
         terminate_pid_tree(cmd_pid);
         let _ = child.kill();
-        let _ = child.wait();
+        reap_killed_child(&mut child, REAP_GRACE_MS);
     } else if let Some(code) = code {
         write_log_entry(
             &log_dir,
@@ -5273,7 +5496,6 @@ pub(crate) fn run_stop_command(
             opts,
         );
     }
-    for h in handles {
-        let _ = h.join();
-    }
+    // 等待日志读取线程排空输出（限时回收: 停止命令派生的孙进程继承管道句柄时永不 EOF）
+    reap_reader_threads(handles, REAP_GRACE_MS);
 }

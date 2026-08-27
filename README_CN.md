@@ -1,4 +1,4 @@
-# ✨ Osmium — Windows Service Generator Framework
+﻿# ✨ Osmium — Windows Service Generator Framework
 
 <p align="center">
   <img src="https://img.shields.io/github/followers/NXRKYMANE?style=social" />
@@ -34,8 +34,9 @@ Osmium 使用现代 Rust 2024 语言开发，编译为 **64 位与 32 位双版�
 > 不想用平台框架？想集成到自己的项目？我推荐优先使用 UPX 压缩版（`osmium64-upx.exe` / `osmium32-upx.exe`）——体积非常小、可扩展，非常轻量，而且冷启动与原版差异不大。
 >
 > 没有你想要的功能？项目支持万物皆插件，用任意语言写出属于你自己的插件放入 exe 目录（平台安装放 `exts\`）即可接入——完整插件开发与使用指南见 [插件系统](#插件系统)，os.exe 运行亮绿灯即为可用插件。
->
-> 说明：平台部署需用安装包安装框架（生命周期/日志/管理由 os.exe 完成，缺失则服务无法启动）；`osiml` 本质就是 TOML，只是换个扩展名区分。
+
+> [!TIP]
+> 平台部署需用安装包安装框架——生命周期/日志/管理由 `os.exe` 完成，缺失则服务无法启动；`osiml` 本质就是 TOML，只是换个扩展名区分。
 
 ## 快速开始
 
@@ -54,6 +55,9 @@ os --list
 # 前台调试运行（不安装服务）
 os --test <svc.toml>
 ```
+
+> [!WARNING]
+> 安装/卸载/启停等写操作需要**管理员权限**；平台部署前必须先用安装包安装框架——`os.exe`（含生命周期/日志/管理逻辑）缺失时服务无法启动。集成到自有项目用 inplace 模式可脱离框架目录（见下文[集成模式](#集成模式inplace)）。
 
 ## 支持的命令
 
@@ -104,7 +108,11 @@ service_description = "服务描述"
 service_executable_path = 'C:\app\myapp.exe'
 ```
 
-> TOML 注意：路径含反斜杠时用**单引号字面字符串**（如上），避免基本字符串的 `\` 转义（`"C:\app\..."` 中的 `\a` 是非法转义会解析失败）。
+> [!TIP]
+> 路径含反斜杠时用**单引号字面字符串**（如上），避免基本字符串的 `\` 转义（`"C:\app\..."` 中的 `\a` 是非法转义会解析失败）。
+
+> [!WARNING]
+> TOML **数组表**（`[[...]]`）之后的顶层键会归入数组元素——所有 `[[extensions]]` / `[[plugins]]` / `[[schedules]]` / `[[failure_actions]]` / `[[downloads]]` 等必须放在文件**末尾**（见[完整示例](#完整示例)的注释说明）。
 
 ### 基础功能
 
@@ -189,6 +197,9 @@ service_executable_path = 'C:\app\myapp.exe'
 | `health_check_failures`              | int          | `3`           | 连续失败多少次视为崩溃                                                                                                                                                                                                                                                                                                                                        |
 | `health_check_expected_status`       | int          | `200`         | 期望的 HTTP 状态码（其余视为失败）                                                                                                                                                                                                                                                                                                                            |
 
+> [!TIP]
+> 健康检查连续失败达到阈值 / Runaway 超限强杀子进程时，宿主**不是静默停止服务**——视同子进程异常退出，会走完整的崩溃恢复流程：执行 `failure_actions` 动作序列（默认自动重启）、触发 crash 告警插件（内置 notify/smtp/syslog 通道）并写事件日志 1002。
+
 ### 高级功能 — 定时调度
 
 | 字段              | 类型        | 默认值     | 说明                                                                                                                                                                                                                                                   |
@@ -226,8 +237,13 @@ service_executable_path = 'C:\app\myapp.exe'
 | `downloads`                       | array        | 无                   | 多下载条目：`[{ from, to, sha256?, fail_on_error?, auth?, username?, password?, unsecure_auth?, proxy?, unzip?, stage? }]`——省略字段回退到配置级 `download_*` 值；配置后数组优先于单条 `download_url`，且可执行路径保持 `service_executable_path`                   |
 | `download_unsecure_auth`          | bool         | `false`              | 显式放行 `basic` 认证走明文 `http://`；默认拒绝（凭据明文泄漏）                                                                                                                                                                                                     |
 
-> 安全提示：`http://` 且未提供 `download_sha256` 时，`fail_on_error=true` 直接拒绝启动（防明文传输被篡改）；`basic` 认证走明文 `http://` 时默认拒绝，需 `download_unsecure_auth = true` 显式放行。重定向手动跟随：拒绝 `https→http` 降级，且 `basic` 凭据仅向同源（协议+主机+端口一致）重发——跨主机重定向目标不会收到 Authorization。`sspi` 插件同样手动跟随重定向（拒绝降级、跨源重新协商、令牌不发往重定向目标），并对响应做截断对照。认证 URL 的探测请求在 401/403 时会带凭据重试一次，因此带认证的大文件同样支持分块并行下载。
+> [!WARNING]
+> `http://` 且未提供 `download_sha256` 时，`fail_on_error=true` 直接拒绝启动（防明文传输被篡改）；`basic` 认证走明文 `http://` 时默认拒绝，需 `download_unsecure_auth = true` 显式放行。重定向手动跟随：拒绝 `https→http` 降级，且 `basic` 凭据仅向同源（协议+主机+端口一致）重发——跨主机重定向目标不会收到 Authorization。`sspi` 插件同样手动跟随重定向（拒绝降级、跨源重新协商、令牌不发往重定向目标），并对响应做截断对照。认证 URL 的探测请求在 401/403 时会带凭据重试一次，因此带认证的大文件同样支持分块并行下载。
+> [!IMPORTANT]
 > 密钥保护：`service_password`、`download_password`、共享映射 `password` 在部署写入 `.osiml` 时自动 DPAPI 加密（机器级，密文以 `enc:OSMIUM1:` 前缀版本化标记），明文不落盘；旧版明文配置继续兼容。
+
+> [!WARNING]
+> `--export` 导出的配置**包含 DPAPI 密文**——机器级密文本机任意账户均可解密，导出目录必须限制为仅 SYSTEM / Administrators 可写（如 `C:\ProgramData` 下新建的受保护目录），切勿导出到共享/公开位置。
 
 ### 高级功能 — 日志
 
@@ -279,6 +295,13 @@ service_executable_path = 'C:\app\myapp.exe'
 - **安装自动签名**：exe 旁存在 `osmium-sign.key` 时，`--install` 自动对部署配置签名（平台生成 `<name>.sig`，inplace 生成 `<exe名>.toml.sig`）；也可用 `--sign-config <配置>` 手动签名。
 - **强制校验**：配置里 `require_signed_config = true` 后，宿主在启动/热刷新/崩溃重启时用 `osmium-public.pem` 校验签名——缺失/无效签名记录日志并拒绝启动（fail-closed）。
 - `osmium-sign.key` 必须保密（仅 Administrators 可读）——持有私钥即可签名宿主信任的配置。
+
+### 配置安全提示
+
+> [!WARNING]
+> **字段名拼写错误会被静默忽略**（未知键宽容解析，TOML 兼容性设计）——安全开关拼错（如 `require_signed_config = ture`）会静默降级为默认值；枚举类字段（`download_stage` / `extensions.phase` / `plugins.phase` / `failure_actions` / `eco_qos` 等）拼错则对应功能整链失效。安装前务必执行 `--check <配置>` 预检（逐项校验枚举值与数值范围）。
+
+- **`security_descriptor` 只增不减**：`--refresh` 按配置重写注册属性，但配置移除 SDDL 后服务保留原 DACL（没有安全的"回默认"语义），刷新时会提示；需重装服务才能重置。
 
 ### 开发者功能 — 集成模式
 
@@ -472,6 +495,7 @@ to = "extra.bin"
 
 Osmium 的服务目标是「可执行程序」。要让 .py / .jar / .js / .lua / .ps1 / .bat / .cmd 脚本作为服务，只需把**解释器**填进 `service_executable_path`，脚本路径与参数填进 `service_executable_args`——宿主按普通进程管理，退出码、自动重启、日志、优雅关闭全部照常生效。
 
+> [!TIP]
 > 服务进程默认工作目录是 `C:\Windows\System32`，脚本内请用绝对路径（或自行 `cd`，或配 `working_directory`）。
 
 ### Python 脚本
@@ -590,6 +614,9 @@ service_executable_args = '/c cd /d C:\app && worker.bat'
 
 `deploy_inplace: true` 时 `--install` 把当前 exe **原地注册**为服务：
 
+> [!IMPORTANT]
+> inplace 的 exe 所在位置必须仅 SYSTEM / Administrators 可写（如 Program Files 下的自有目录）——放在 Downloads / Public / 工作区等可写位置会被**拒绝安装**（防止任意用户替换 exe 后以 SYSTEM 权限运行）；`service_name` 必须等于 exe 文件名（否则 SCM 无法分派）。
+
 - 不复制宿主到 ProgramData，ImagePath 直接指向当前 exe；
 - `service_name` 必须等于实际 exe 文件名（如 `os`，exe 改名则以其实际文件名为准），否则 SCM 无法分派；
 - 适合嵌入自有项目独立使用；不参与开机宿主升级与清理，需开发者自行到[官网 Releases](https://github.com/NXRKYMANE/Osmium/releases) 下载新版 `os.exe` 手动升级。
@@ -613,8 +640,10 @@ Osmium 支持万物皆插件：官方的高级功能、第三方的扩展能力�
 
 ## 插件是什么
 
+> [!IMPORTANT]
+> **插件位数必须与宿主匹配**：32 位进程无法启动 64 位可执行文件（反之 64 位宿主可跑 32 位插件）——32 位宿主请用 `osmium32-official-kits.osx`（或你自行编译的 32 位插件），否则调用直接失败（`--extend` 红点；名称后的位数标记 `[64]` / `[32]` / `[unknown]` 可用来核对）。
+
 - 插件就是一个普通程序，把扩展名改成 `.osx` 就行（比如 `osmium-kit.exe` → `osmium64-official-kits.osx`）
-- **插件位数必须与宿主匹配**：32 位进程无法启动 64 位可执行文件（反之 64 位宿主可跑 32 位插件）——32 位宿主请用 `osmium32-official-kits.osx`（或你自行编译的 32 位插件），否则调用直接失败（`--extend` 红点；名称后的位数标记 `[64]`/`[32]`/`[unknown]` 可用来核对）
 - 插件放在宿主 exe 所在目录的任意位置——宿主递归发现所有 `.osx`（跳过 `.` 开头的隐藏目录），独立部署可以直接把插件放在 exe 旁；平台安装仍装 `%ProgramFiles%\Osmium\exts\`
 - 宿主启动时递归扫描 exe 目录下所有 `.osx`，按请求里的 `kit` 字段分发调用
 - **插件不常驻**：每次调用临时拉起，处理完一个请求就退出
@@ -1144,7 +1173,7 @@ Osmium/
 │       ├── service_core.rs    # 核心：SCM API、部署、服务刷新程序、下载引擎
 │       ├── service_host.rs    # 服务宿主：拉起目标进程 + 插件调用
 │       ├── service_config.rs  # TOML 配置模型（serde）
-│       └── service_tests.rs   # 单元测试（191 个，含进程树集成测试）
+│       └── service_tests.rs   # 单元测试（200 个，含进程树集成测试）
 ├── Extension/                 # 官方工具包（外部插件可执行程序，发布为 .osx）
 │   └── osmium-official-kits/  # 单一 bin（64 位构建为 osmium64-official-kits.osx；32 位由 BUILD.ps1 交叉构建为 osmium32-official-kits.osx）
 │       ├── Cargo.toml         # 工具包配置（格式与 Project 一致）
@@ -1153,7 +1182,7 @@ Osmium/
 │           ├── main.rs        # 协议入口：stdin JSON 按 kit 字段分发 → stdout JSON
 │           ├── kits_core.rs   # 共享实现集中文件（同 Project 的 service_core.rs）：
 │           │                  # SSPI 下载 / 共享映射 / 解压 / 重启 / 通知 / 邮件 / Syslog / 探针
-│           └── kits_tests.rs  # 单元 + 集成测试（33 个 + 2 ignored）
+│           └── kits_tests.rs  # 单元 + 集成测试（38 个 + 2 ignored）
 ├── Misc/                      # 图标资源（build.rs / installer 引用）
 │   ├── Osmium.ico             # 安装器 / 分发图标（SetupIconFile）
 │   ├── Osmium.png             # 程序图标源图
@@ -1165,9 +1194,8 @@ Osmium/
 │   └── Extension.png          # .osx 图标源图
 ├── Publish/                   # 构建产物（exe + 安装包，不提交）
 ├── BUILD.ps1                  # 一键构建脚本（Rust 构建与测试 + 安装包）
-├── .gitlab-ci.yml             # GitLab CI（fmt/clippy/test/32 位/audit，Windows runner）
 ├── .github/                   # GitHub 社区模板（Issue / PR）
-├── CHANGELOG.md               # 变更日志（开发记录/版本历史）
+├── CLAUDE.md                  # AI 助手规则 + 开发记录/版本历史
 ├── CODE_OF_CONDUCT.md         # 行为准则
 ├── CONTRIBUTING.md            # 贡献指南
 ├── SECURITY.md                # 安全政策
@@ -1181,7 +1209,7 @@ Osmium/
 Rust 自动化测试覆盖输入校验、启动模式解析、日志清理、进程树收集、ACL 权限判定、下载等核心逻辑：
 
 ```powershell
-# Rust（191 个测试 + 插件 35 个测试 + 2 ignored，含真实进程树集成测试）
+# Rust（200 个测试 + 插件 38 个测试 + 2 ignored，含真实进程树集成测试）
 Set-Location Project
 cargo test
 ```
@@ -1253,6 +1281,9 @@ Copy-Item ..\target\i686-pc-windows-msvc\release\osmium64.exe ..\Publish\osmium3
 
 ## 环境要求
 
+> [!IMPORTANT]
+> 安装/管理服务需要**管理员权限**；服务刷新程序与共享宿主以 SYSTEM 身份运行（仅平台部署涉及）。
+
 - Windows 10+（64 位产物可跑在 x64/x86 系统；32 位产物用于 x86 系统或集成场景，需与宿主位数匹配）
 - 管理员权限
 - 构建工具（仅构建时需要）：
@@ -1269,7 +1300,7 @@ Copy-Item ..\target\i686-pc-windows-msvc\release\osmium64.exe ..\Publish\osmium3
 >
 > 意识到问题的我打算着手写一个自动化服务管理平台，命名为 WSF（Windows Service Framework），这个项目也是纯 Python 写的，其实还是调用的 WinSW 内核。开发到后期发现这个框架非常地臃肿，而且安全问题也很难处理，基本上就是一个能用但是残废的状态，而且 Python 作为一个纯解释语言，冷启动也是慢到令人发指的地步，打包后大小也非常地惊人。
 >
-> 为了彻底解决这个问题，到了 2026 年暑假的时候，我特地去学了 Rust 语言，并且借助吃白饭的神秘蓝色大肥鱼和 WinSW 的源码，直接开发出第一代真正能用的框架。身为一个化学爱好者，我也是参考了开源社区用得比较少的名字，给第一代取名为 Silanes，也就是硅烷；后来项目为了适应 WinSW 全功能（具体操作都放到 CHANGELOG.md 里面了）进行深度开发后，觉得 Silanes 这个名字不符合项目，正式重命名为 Osmium（锇），同时早期的那个快烂完的内存管理项目也演变为 Rust 编写的 Hydride 项目。
+> 为了彻底解决这个问题，到了 2026 年暑假的时候，我特地去学了 Rust 语言，并且借助吃白饭的神秘蓝色大肥鱼和 WinSW 的源码，直接开发出第一代真正能用的框架。身为一个化学爱好者，我也是参考了开源社区用得比较少的名字，给第一代取名为 Silanes，也就是硅烷；后来项目为了适应 WinSW 全功能（具体操作都放到 CLAUDE.md 里面了）进行深度开发后，觉得 Silanes 这个名字不符合项目，正式重命名为 Osmium（锇），同时早期的那个快烂完的内存管理项目也演变为 Rust 编写的 Hydride 项目。
 
 ## 赞助
 

@@ -18,15 +18,15 @@ use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, Terminat
 
 use crate::service_config::{DownloadConfig, ServiceConfig, SharedMapperConfig};
 use crate::service_core::{
-    DownloadAuth, build_dependency_string, can_overwrite_source, compare_versions,
+    DownloadAuth, backup_logs_dir, build_dependency_string, can_overwrite_source, compare_versions,
     decrypt_sensitive, delete_dir_tree, delete_old_logs, deployed_config_path, download_core,
     dpapi_decrypt, dpapi_encrypt, get_file_version, get_own_path, green_dot, has_download,
     is_refresher_reserved_name, is_user_writable, is_valid_service_name, load_config,
-    parse_start_mode, red, red_dot, resolve_redirect_url, safe_delete_dir, scm_sleep_time_ms,
-    scm_status_params, scm_wait_hint_ms, sddl_dacl_grants_non_admin_write,
+    parse_start_mode, red, red_dot, resolve_redirect_url, restore_logs_dir, safe_delete_dir,
+    scm_sleep_time_ms, scm_status_params, scm_wait_hint_ms, sddl_dacl_grants_non_admin_write,
     sddl_owner_is_administrative, secure_directory, security_descriptor_from_sddl,
     set_preshutdown_enabled, set_scm_sleep_time_ms, set_scm_wait_hint_ms, sha256_matches,
-    strip_verbatim_prefix, validate_config, write_deployed_config, write_quick_config,
+    strip_verbatim_prefix, validate_config, write_deployed_config_content, write_quick_config,
 };
 use crate::service_host::{
     LogOptions, apply_log_mode, auto_roll_logs, build_child_command, collect_descendants,
@@ -35,8 +35,9 @@ use crate::service_host::{
     failure_action_chain, http_date_from_mtime, log_pattern_safe, process_alive, process_cpu_100ns,
     process_env_var, process_working_set_mb, redact_url, reset_auto_roll_state, reset_current_logs,
     resolve_download_target, roll_by_time_if_due, roll_if_needed, roll_logs_to_old, run_hook,
-    run_stop_command, runaway_cleanup_pid_file, runaway_exceeded, set_process_priority,
-    warn_if_insecure_download, write_log_entry, write_metrics_file, zip_backup_file,
+    run_stop_command, runaway_cleanup_pid_file, runaway_exceeded, safe_log_name,
+    set_process_priority, warn_if_insecure_download, write_log_entry, write_metrics_file,
+    zip_backup_file,
 };
 
 /// 本地 HTTP 测试服务器: handler 接收 (方法, 请求行列表)，返回 (状态行, 头部, 响应体)；
@@ -951,7 +952,8 @@ fn write_deployed_config_strips_service_password() {
     let src = dir.join("src.toml");
     let dst = dir.join("dst.toml");
     std::fs::write(&src, "service_name = \"my-svc\"\nservice_password = \"sup3r-secret\"\nservice_executable_path = \"C:\\\\app.exe\"\n").unwrap();
-    assert!(write_deployed_config(&src.to_string_lossy(), &dst));
+    let src_content = std::fs::read_to_string(&src).unwrap();
+    assert!(write_deployed_config_content(&src_content, &dst));
     let deployed = std::fs::read_to_string(&dst).unwrap();
     assert!(!deployed.contains("sup3r-secret"));
     assert!(!deployed.contains("service_password"));
@@ -972,7 +974,7 @@ fn write_deployed_config_unparsable_strips_all_credential_keys() {
         [[shared_directory_mappers]]\nlocal_path = \"Z:\"\nremote_path = \"\\\\srv\\share\"\npassword = \"pw-3\"\n";
     // 末尾缺 ] 使整个 TOML 解析失败（非标准配置）
     std::fs::write(&src, content).unwrap();
-    assert!(write_deployed_config(&src.to_string_lossy(), &dst));
+    assert!(write_deployed_config_content(content, &dst));
     let deployed = std::fs::read_to_string(&dst).unwrap();
     for secret in ["pw-1", "pw-2", "pw-3", "pw-4"] {
         assert!(!deployed.contains(secret), "明文凭据不得落盘: {secret}");
@@ -1269,7 +1271,7 @@ fn delete_dir_tree_refuses_junction_root() {
     std::fs::write(target.join("keep/secret.txt"), "x").unwrap();
     let link = unique_temp_dir("jt-link");
     // 用 cmd mklink /J 创建 junction（无需管理员）
-    let ok = std::process::Command::new("cmd.exe")
+    let ok = Command::new("cmd.exe")
         .args([
             "/c",
             "mklink",
@@ -2357,12 +2359,25 @@ fn sha256_matches_missing_file_false() {
 }
 
 #[test]
-fn write_deployed_config_missing_source_false() {
-    let dir = unique_temp_dir("cfgmiss");
-    assert!(!write_deployed_config(
-        &dir.join("nope.toml").to_string_lossy(),
-        &dir.join("out.toml")
-    ));
+fn write_deployed_config_content_uses_atomic_write() {
+    // 原子写: 落盘成功且无 tmp 残留（旧 fs::write 直接截断覆盖，掉电会留撕裂配置）
+    let dir = unique_temp_dir("cfgatw");
+    let dst = dir.join("out.toml");
+    let content = "service_name = \"s\"\nservice_executable_path = \"C:\\\\a.exe\"\n";
+    assert!(write_deployed_config_content(content, &dst));
+    assert!(dst.exists());
+    assert!(
+        std::fs::read_to_string(&dst)
+            .unwrap()
+            .contains("service_name")
+    );
+    // 写入后目录内不得残留 .tmp 文件
+    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "原子写不得残留 tmp 文件");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2463,7 +2478,8 @@ fn write_deployed_config_encrypts_sensitive_fields() {
     )
     .unwrap();
     let dst = dir.join("deployed.osiml");
-    assert!(write_deployed_config(&src.to_string_lossy(), &dst));
+    let src_content = std::fs::read_to_string(&src).unwrap();
+    assert!(write_deployed_config_content(&src_content, &dst));
     let text = std::fs::read_to_string(&dst).unwrap();
     assert!(!text.contains("svc-pass-123"), "部署文件不得含明文密码");
     assert!(!text.contains("dl-pass-456"));
@@ -3576,7 +3592,7 @@ fn zip_backup_file_refuses_reparse_target() {
     std::fs::write(&src, "data").unwrap();
     // 归档目标 = src_dir\2026-08-11.log.zip → 把它做成指向 target 的 symlink
     let zip_target = src_dir.join("2026-08-11.log.zip");
-    let ok = std::process::Command::new("cmd.exe")
+    let ok = Command::new("cmd.exe")
         .args([
             "/c",
             "mklink",
@@ -4211,13 +4227,13 @@ fn backup_restore_logs_preserves_log_dir() {
     std::fs::create_dir_all(&logs).unwrap();
     std::fs::write(logs.join("2026-08-18.log"), "keep-me").unwrap();
 
-    let backup = crate::service_core::backup_logs_dir(&dir, "logs_keep");
+    let backup = backup_logs_dir(&dir, "logs_keep");
     assert!(backup.is_some(), "有 logs 时应成功挪出");
     assert!(!logs.exists(), "挪出后原目录应消失");
 
     // 模拟 force_remove_service 删除宿主目录后还原
     std::fs::remove_dir_all(&dir).unwrap();
-    crate::service_core::restore_logs_dir(&dir, backup);
+    restore_logs_dir(&dir, backup);
     assert_eq!(
         std::fs::read_to_string(dir.join("logs").join("2026-08-18.log")).unwrap(),
         "keep-me",
@@ -4231,7 +4247,7 @@ fn backup_logs_returns_none_without_logs_dir() {
     // 无 logs 目录（首次安装）时不应产生备份，还原为空操作
     let dir = unique_temp_dir("logs_none");
     std::fs::create_dir_all(&dir).unwrap();
-    assert!(crate::service_core::backup_logs_dir(&dir, "logs_none").is_none());
+    assert!(backup_logs_dir(&dir, "logs_none").is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -4726,6 +4742,77 @@ fn validate_config_extended_prechecks() {
         "service_name = \"e\"\nservice_display_name = \"e\"\nservice_description = \"e\"\nservice_executable_path = 'C:\\Windows\\System32\\ping.exe'\nschedules = [{ every_secs = 60, action = \"hook\", command = \"echo x\" }]\nhealth_check_url = \"tcp://127.0.0.1:8080\"\n",
     );
     assert!(validate_config(&f5).is_ok(), "合法配置应通过预检");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn validate_config_flags_bad_enums_and_thresholds() {
+    // 枚举字符串/阈值校验: 拼错的阶段/动作/模式与负值/乱序阈值必须在 --check 阶段拦截
+    let dir = unique_temp_dir("chk3");
+    let mk = |content: &str| {
+        let f = dir.join(format!(
+            "c-{}.toml",
+            std::process::id() + content.len() as u32 % 997
+        ));
+        std::fs::write(&f, content).unwrap();
+        f
+    };
+    let base = "service_name = \"s\"\nservice_display_name = \"s\"\nservice_description = \"s\"\nservice_executable_path = 'C:\\Windows\\System32\\ping.exe'\n";
+    // 拼错的 failure_action / failure_actions[].action（否则静默按 restart 注册或空链停服）
+    assert!(validate_config(&mk(&format!("{base}failure_action = \"restar\""))).is_err());
+    assert!(
+        validate_config(&mk(&format!(
+            "{base}[[failure_actions]]\naction = \"explode\"\n"
+        )))
+        .is_err()
+    );
+    // delay_secs 超 1 年上限（防 Instant + Duration 溢出 panic）
+    assert!(
+        validate_config(&mk(&format!(
+            "{base}[[failure_actions]]\naction = \"restart\"\ndelay_secs = 99999999999\n"
+        )))
+        .is_err()
+    );
+    // 拼错的 download_stage（条目级与配置级）——否则下载条目永不执行
+    assert!(validate_config(&mk(&format!("{base}download_stage = \"before-start\""))).is_err());
+    assert!(
+        validate_config(&mk(&format!(
+            "{base}[[downloads]]\nfrom = \"https://x/y\"\nto = \"C:\\\\y\"\nstage = \"afte_start\"\n"
+        )))
+        .is_err()
+    );
+    // 拼错的 extensions/plugins phase（否则调用永不触发）
+    assert!(
+        validate_config(&mk(&format!(
+            "{base}[[extensions]]\nphase = \"stat\"\ncommand = \"echo x\"\n"
+        )))
+        .is_err()
+    );
+    assert!(
+        validate_config(&mk(&format!(
+            "{base}[[plugins]]\nkit = \"ping\"\nphase = \"before_start\"\n"
+        )))
+        .is_err()
+    );
+    // eco_qos 模式未知值 / 阈值负值 / idle>=busy（auto 模式静默失效或采样翻转）
+    assert!(validate_config(&mk(&format!("{base}eco_qos = \"somtimes\""))).is_err());
+    assert!(
+        validate_config(&mk(&format!("{base}runaway_cpu_limit = -1.0"))).is_err(),
+        "负 runaway_cpu_limit 应报错（否则杀-重启循环）"
+    );
+    assert!(
+        validate_config(&mk(&format!(
+            "{base}eco_qos_idle_cpu_pct = 50.0\neco_qos_busy_cpu_pct = 10.0\n"
+        )))
+        .is_err()
+    );
+    // 合法阈值与阶段不误伤
+    assert!(
+        validate_config(&mk(&format!(
+            "{base}runaway_cpu_limit = 50.0\neco_qos = \"auto\"\neco_qos_idle_cpu_pct = 5.0\neco_qos_busy_cpu_pct = 20.0\n[[failure_actions]]\naction = \"restart\"\ndelay_secs = 10\ndownload_stage = \"after_stop\"\n[[extensions]]\nphase = \"start\"\ncommand = \"echo x\"\n"
+        )))
+        .is_ok()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -5323,5 +5410,202 @@ fn download_chunk_rejects_mismatched_content_range() {
         data,
         "错位 Content-Range 后回退重下，文件内容必须纯净"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ==================== 审计修复批次 6（P1/P2/P3 修复回归） ====================
+
+#[test]
+fn sddl_owner_segment_parses_group_boundary() {
+    // owner SID 截断必须到 G: 段之前: Program Files 新建目录的 SDDL 形如
+    // O:BA G:<本地用户组SID> —— 不截断会把组 SID 拼进 owner 串导致误判非管理员
+    let s = "O:BAG:S-1-5-21-1-2-3-1001D:AI(A;ID;FA;;;BA)";
+    assert!(
+        sddl_owner_is_administrative(s),
+        "O:BA + G:<user-sid> 的所有者应判定为管理员"
+    );
+    assert!(sddl_owner_is_administrative(
+        "O:S-1-5-80-111-222-333G:S-1-5-21-1-2-3D:(A;FA;;;BA)"
+    ));
+    assert!(!sddl_owner_is_administrative(
+        "O:S-1-5-21-1-2-3-1001G:BAD:(A;FA;;;BA)"
+    ));
+}
+
+#[test]
+fn failure_action_chain_clamps_subsecond_restart_delay() {
+    // restart_delay_ms < 1000 不得截成 0 秒（故障恢复零延迟死循环风险），保底 1 秒
+    let cfg: ServiceConfig = toml::from_str("service_name = \"s\"\nservice_display_name = \"s\"\nservice_description = \"s\"\nservice_executable_path = \"C:\\\\a.exe\"\nrestart_delay_ms = 500\n").unwrap();
+    let chain = failure_action_chain(&cfg);
+    assert_eq!(chain[0].delay_secs, 1, "500ms 应保底为 1 秒");
+}
+
+#[test]
+fn is_readonly_command_normalizes_dash_prefix() {
+    // `-m sts`（裸别名）与 `-m --sts`、`--sts` 三种写法的只读判定必须一致
+    // （原实现只收带 -- 形式，裸别名被误要求管理员）
+    for t in [
+        "sts", "--sts", "status", "--status", "chk", "--chk", "tst", "--tst", "sigc", "--sigc",
+        "lst", "--lst", "stsa", "--stsa", "ext", "--ext", "h", "-h", "--help", "help",
+    ] {
+        assert!(
+            crate::service_cli::is_readonly_command(t),
+            "'{t}' 应为只读命令"
+        );
+    }
+    for t in [
+        "ins",
+        "--ins",
+        "install",
+        "--install",
+        "start",
+        "--start",
+        "uin",
+        "--uin",
+        "str",
+        "--str",
+        "kil",
+        "--kil",
+        "rld",
+        "--rld",
+        "-m",
+        "-internal",
+    ] {
+        assert!(
+            !crate::service_cli::is_readonly_command(t),
+            "'{t}' 应要求管理员"
+        );
+    }
+}
+
+#[test]
+fn backup_logs_dir_uses_pid_suffixed_name() {
+    // 备份名含 tag + 进程 PID 后缀（备份目录在 Osmium 数据目录内，与 svcs 同卷——
+    // 跨卷 rename 会静默失败导致更新时历史日志被删）
+    let base = unique_temp_dir("bl-pid");
+    std::fs::create_dir_all(base.join("logs")).unwrap();
+    std::fs::write(base.join("logs/x.log"), "x").unwrap();
+    let backup = backup_logs_dir(&base, "svc1").unwrap();
+    let name = backup.file_name().unwrap().to_string_lossy().to_string();
+    assert!(name.starts_with("logbak-svc1-"), "备份名应含 tag: {name}");
+    assert!(
+        name.ends_with(&std::process::id().to_string()),
+        "备份名应含进程 PID: {name}"
+    );
+    let _ = std::fs::remove_dir_all(&backup);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn restore_logs_dir_refuses_reparse_backup() {
+    // 还原路径是 junction 时拒绝（防 temp 预放链接被 rename 进受保护部署目录后写穿）
+    let target = unique_temp_dir("rl-target");
+    std::fs::create_dir_all(&target).unwrap();
+    let link = unique_temp_dir("rl-link");
+    let ok = Command::new("cmd.exe")
+        .args([
+            "/c",
+            "mklink",
+            "/J",
+            &link.to_string_lossy(),
+            &target.to_string_lossy(),
+        ])
+        .creation_flags(0x08000000)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let base = unique_temp_dir("rl-base");
+    std::fs::create_dir_all(&base).unwrap();
+    if ok {
+        restore_logs_dir(&base, Some(link.clone()));
+        assert!(!base.join("logs").exists(), "reparse 备份不应被还原为 logs");
+    }
+    let _ = std::fs::remove_dir_all(&target);
+    let _ = std::fs::remove_dir_all(&link);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn safe_log_name_rejects_dot_paths() {
+    // "." / ".." 拼入 join 会落到目录自身/父目录，必须拒绝；含点但非纯点正常放行
+    assert!(safe_log_name(Some(".")).is_empty());
+    assert!(safe_log_name(Some("..")).is_empty());
+    assert!(!safe_log_name(Some("app.log")).is_empty());
+    assert!(
+        !safe_log_name(Some("a..b")).is_empty(),
+        "含点但非纯点应放行"
+    );
+}
+
+#[test]
+fn health_check_kill_goes_through_failure_recovery() {
+    // P1#3 回归: 健康检查连续失败强杀子进程后，服务必须走崩溃恢复流程
+    // （failure_actions restart 自动拉起），而不是让服务静默停止——
+    // 旧实现 force_kill 清空子进程后下个 tick 见空直接 return false
+    use crate::service_host::ServiceHost;
+    let dir = unique_temp_dir("hk-recover");
+    let cfg_path = dir.join("h.toml");
+    // 指向本机未监听端口（必失败）；阈值 1 次即强杀；failure_actions=restart 恢复
+    let mut cfg = String::new();
+    cfg.push_str(
+        "service_name = \"h\"\nservice_display_name = \"h\"\nservice_description = \"h\"\n",
+    );
+    cfg.push_str("service_executable_path = 'C:\\Windows\\System32\\ping.exe'\n");
+    cfg.push_str("service_executable_args = \"-n 30 127.0.0.1\"\n");
+    cfg.push_str("health_check_url = \"http://127.0.0.1:9/health\"\n");
+    cfg.push_str("health_check_interval_secs = 1\nhealth_check_timeout_secs = 1\nhealth_check_failures = 1\n");
+    cfg.push_str("[[failure_actions]]\naction = \"restart\"\ndelay_secs = 0\n");
+    std::fs::write(&cfg_path, cfg).unwrap();
+    let mut host = ServiceHost::new();
+    assert!(host.on_start_from(&cfg_path), "宿主应启动成功");
+    let pid1 = host.child.first().unwrap().id();
+    assert!(process_alive(pid1), "子进程应运行中");
+    let mut restarted = false;
+    for _ in 0..60 {
+        if !host.tick() {
+            break; // 服务停止 = 回归失败
+        }
+        if !host.child.is_empty() && host.child.first().unwrap().id() != pid1 {
+            restarted = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(restarted, "健康检查强杀后应触发崩溃恢复重启子进程");
+    for mut c in std::mem::take(&mut host.child) {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn short_health_check_url_does_not_panic() {
+    // P1#1 回归: 短 URL（如 "abc"）不再触发 url[..6] 切片 panic——宿主运行路径
+    // 不经过 validate_config，长度守卫必须兜底（旧实现直接 abort 宿主）
+    use crate::service_host::ServiceHost;
+    let dir = unique_temp_dir("hk-short");
+    let cfg_path = dir.join("s.toml");
+    std::fs::write(
+        &cfg_path,
+        "service_name = \"s\"\nservice_display_name = \"s\"\nservice_description = \"s\"\n\
+         service_executable_path = 'C:\\Windows\\System32\\ping.exe'\n\
+         service_executable_args = \"-n 30 127.0.0.1\"\n\
+         health_check_url = \"abc\"\nhealth_check_interval_secs = 1\nhealth_check_failures = 3\n",
+    )
+    .unwrap();
+    let mut host = ServiceHost::new();
+    assert!(host.on_start_from(&cfg_path), "宿主应启动成功");
+    for _ in 0..5 {
+        assert!(
+            host.tick(),
+            "短健康 URL 下 tick 不应 panic 且服务应保持运行"
+        );
+        thread::sleep(Duration::from_millis(30));
+    }
+    for mut c in std::mem::take(&mut host.child) {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
