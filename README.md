@@ -1391,9 +1391,9 @@ When embedding Osmium in your own Inno Setup installer, watch out for these pitf
 ## Development History
 
 > [!NOTE]
-> Osmium is named after osmium — the densest non-radioactive metal on Earth — in the hope that this project would be just as hard, steady and powerful as the element: it is not merely a simple service wrapper, the powerful lifecycle management and log-stream system make service management easy and free.
+> **Osmium** is named after osmium — the densest non-radioactive metal on Earth — in the hope that this project would be just as hard, steady and powerful as the element: it is not merely a simple service wrapper, the powerful lifecycle management and log-stream system make service management easy and free.
 >
-> Also, the abbreviation of Osmium — OS — echoes its close relationship with the operating system (Operating System).
+> Also, the abbreviation of **Osmium** — **OS** — echoes its close relationship with the operating system (**Operating System**).
 
 
 > Back in 2024, I had basically finished learning Python and wanted to build my own project, but my laptop was so weak — only 8GB of RAM — that I was constantly anxious about memory.
