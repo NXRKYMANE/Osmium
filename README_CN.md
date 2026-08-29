@@ -1287,11 +1287,13 @@ Osmium/
 ├── Publish/                   # 构建产物（exe + 安装包，不提交）
 ├── BUILD.ps1                  # 一键构建脚本（Rust 构建与测试 + 安装包）
 ├── .github/                   # GitHub 社区模板（Issue / PR）
-├── CLAUDE.md                  # AI 助手规则 + 开发记录/版本历史
+├── CLAUDE.md                  # AI 助手规则
+├── CHANGELOG.md               # 开发记录/版本历史
 ├── CODE_OF_CONDUCT.md         # 行为准则
 ├── CONTRIBUTING.md            # 贡献指南
 ├── SECURITY.md                # 安全政策
-├── LICENSE                    # 许可证
+├── LICENSE                    # 许可证（Apache-2.0）
+├── NOTICE                     # 版权归属与第三方组件声明
 ├── README_CN.md               # 中文文档
 └── README.md                  # 英文文档
 ```
@@ -1400,6 +1402,8 @@ Copy-Item ..\target\i686-pc-windows-msvc\release\osmium64.exe ..\Publish\osmium3
 如果这个项目对你有帮助，欢迎 [赞助支持](https://ifdian.net/a/NXRKYMANE)。
 
 ## 许可证
+
+本项目基于 Apache License 2.0 开源——详见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
 
 Copyright © 2026 NXRKYMANE SOFTWARE
 

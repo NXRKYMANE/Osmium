@@ -1291,11 +1291,13 @@ Osmium/
 ├── Publish/                   # Build artifacts (exe + installer, not committed)
 ├── BUILD.ps1                  # One-click build script (Rust build & tests + installer)
 ├── .github/                   # GitHub community templates (issues / PR)
-├── CLAUDE.md                  # AI assistant rules + development log / version history
+├── CLAUDE.md                  # AI assistant rules
+├── CHANGELOG.md               # Development log / version history
 ├── CODE_OF_CONDUCT.md         # Code of conduct
 ├── CONTRIBUTING.md            # Contributing guidelines
 ├── SECURITY.md                # Security policy
-├── LICENSE                    # License
+├── LICENSE                    # License (Apache-2.0)
+├── NOTICE                     # Attribution notice (copyright + third-party)
 ├── README_CN.md               # Chinese documentation
 └── README.md                  # English documentation
 ```
@@ -1402,6 +1404,8 @@ When embedding Osmium in your own Inno Setup installer, watch out for these pitf
 If this project helps you, consider [sponsoring](https://ifdian.net/a/NXRKYMANE).
 
 ## License
+
+Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE) for details.
 
 Copyright © 2026 NXRKYMANE SOFTWARE
 

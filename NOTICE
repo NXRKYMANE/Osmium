@@ -1,0 +1,24 @@
+Osmium — Windows Service Generative Framework
+Copyright 2026 NXRKYMANE SOFTWARE
+
+This product includes software developed by NXRKYMANE SOFTWARE
+(https://github.com/NXRKYMANE/Osmium).
+
+This product is licensed under the Apache License, Version 2.0; a copy of the
+license is distributed as the LICENSE file alongside this notice.
+
+================================================================================
+Third-party components
+================================================================================
+This product depends on third-party crates published on crates.io. Each
+component is distributed under the terms stated in its own source
+distribution; the principal direct dependencies and their license
+expressions (as declared by their authors) are:
+
+  serde, serde_json, toml, chrono, ureq, url, sha2, zip, base64, rsa,
+  windows, windows-core, winresource
+      dual-licensed under MIT OR Apache-2.0 (individual crates may differ;
+      see each crate's manifest for the authoritative terms)
+
+Transitive dependencies inherit the licensing of their respective upstream
+projects and are not listed individually.

@@ -1,7 +1,8 @@
 ﻿[package]
 name = "osmium"
-version = "26.12.1"
+version = "26.12.2"
 edition = "2024"
+license = "Apache-2.0"
 
 [[bin]]
 name = "osmium"

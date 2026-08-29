@@ -27,21 +27,25 @@ fn kit_bin() -> PathBuf {
         .join("osmium-kits.exe")
 }
 
+/// 确保插件二进制存在（缺失时构建当前包；workspace 根 = 本包 Cargo.toml 目录上溯两级）
+fn ensure_built(bin: &std::path::Path) {
+    if bin.exists() {
+        return;
+    }
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let ws_root = manifest.parent().and_then(|p| p.parent()).unwrap();
+    let status = Command::new("cargo")
+        .current_dir(ws_root)
+        .args(["build", "-p", "osmium-official-kits"])
+        .status()
+        .expect("cargo 应可执行");
+    assert!(status.success(), "插件二进制构建失败");
+}
+
 /// 调用插件: 传入 stdin JSON（空串表示无输入），返回 (退出码, stdout, stderr)
 fn invoke(json: &str) -> (i32, String, String) {
     let bin = kit_bin();
-    if !bin.exists() {
-        // 测试目标不会自动构建普通 bin（workspace 根 target），先构建当前包；
-        // workspace 根 = 本包 Cargo.toml 目录上溯两级
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let ws_root = manifest.parent().and_then(|p| p.parent()).unwrap();
-        let status = Command::new("cargo")
-            .current_dir(ws_root)
-            .args(["build", "-p", "osmium-official-kits"])
-            .status()
-            .expect("cargo 应可执行");
-        assert!(status.success(), "插件二进制构建失败");
-    }
+    ensure_built(&bin);
     let mut child = Command::new(bin)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -458,7 +462,9 @@ fn empty_input_silently_exits_without_output() {
 /// 喂超大输入: 子进程只读 1MB 即截断，剩余数据无人消费，写入可能报管道错误——
 /// 循环分块写入并容忍 broken pipe（子进程读满后退出关闭管道）
 fn invoke_large(data: &[u8]) -> (i32, String, String) {
-    let mut child = Command::new(kit_bin())
+    let bin = kit_bin();
+    ensure_built(&bin);
+    let mut child = Command::new(bin)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
