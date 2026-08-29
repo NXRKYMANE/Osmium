@@ -31,11 +31,11 @@ Osmium 使用现代 Rust 2024 语言开发，编译为 **64 位与 32 位双版�
 | 分发安装包     | `osmium-win-x64-setup-v<版本>.exe`（使用非 UPX 版本，仅 64 位；32 位请直接取 exe + 插件独立部署）                                                                                                                                                                                                     |
 | 工具链         | Rust stable + MSVC（i686 交叉 target）                                                                                                                                                                                                                                                                |
 
+> [!TIP]
 > 不想用平台框架？想集成到自己的项目？我推荐优先使用 UPX 压缩版（`osmium64-upx.exe` / `osmium32-upx.exe`）——体积非常小、可扩展，非常轻量，而且冷启动与原版差异不大。
 >
 > 没有你想要的功能？项目支持万物皆插件，用任意语言写出属于你自己的插件放入 exe 目录（平台安装放 `exts\`）即可接入——完整插件开发与使用指南见 [插件系统](#插件系统)，os.exe 运行亮绿灯即为可用插件。
-
-> [!TIP]
+>
 > 平台部署需用安装包安装框架——生命周期/日志/管理由 `os.exe` 完成，缺失则服务无法启动；`osiml` 本质就是 TOML，只是换个扩展名区分。
 
 ## 快速开始
@@ -87,13 +87,17 @@ os --test <svc.toml>
 | `--status-all`                                | 批量状态：遍历全部服务输出状态/注册属性/子进程 PIDs/指标摘要（可简写 --stsa）                                                                                                             |
 | `help` / `-h` / `--help`                      | 显示帮助信息                                                                                                                                                                              |
 
+> [!NOTE]
 > 管理命令均等价于旧写法 `-m --xxx`（前缀可省略）；框架安装后可直接用 `os` 快捷别名代替 `os.exe`。
 
+> [!NOTE]
+> 只读/本地命令免管理员：`--help`、`--list`、`--status`、`--status-all`、`--extend`、`--check`、`--test`、`--sign-config` 可直接运行（SCM 只读查询用最小权限打开）；其余命令（安装/启停/卸载等写操作）仍需管理员权限。
+
+> [!TIP]
 > 所有命令均支持简化别名：`--ins` / `--imp` / `--exp` / `--str` / `--stp` / `--rst` / `--sts` / `--kil` / `--rfs` / `--rld` / `--uin` / `--del` / `--lst`（分别对应安装 / 导入 / 导出 / 启动 / 停止 / 重启 / 状态 / 强杀 / 刷新 / 重载 / 卸载 / 删除 / 列表）；开发者命令 `--tst` / `--chk` / `--sigc` / `--ext` / `--stra` / `--stpa` / `--rsta` / `--stsa`（测试 / 预检 / 签名 / 扩展 / 批量启停 / 批量状态）。
 
+> [!CAUTION]
 > 服务名 `Osmium Service Refresher` 为保留名；服务名需合法：拒绝空名、`.` / `..`（防路径穿越）、路径分隔符与控制字符，长度 ≤ 256。
-
-> 只读/本地命令免管理员：`--help`、`--list`、`--status`、`--status-all`、`--extend`、`--check`、`--test`、`--sign-config` 可直接运行（SCM 只读查询用最小权限打开）；其余命令（安装/启停/卸载等写操作）仍需管理员权限。
 
 ## 配置参考
 
@@ -178,6 +182,7 @@ service_executable_path = 'C:\app\myapp.exe'
 | `syslog_severity`     | int          | `5`（notice）                             | Syslog severity 号（0-7）                                                                               |
 | `syslog_tag`          | string       | `"Osmium"`                                | Syslog 程序名 TAG                                                                                       |
 
+> [!TIP]
 > 不需要固定 crash 时机、或想在其他阶段（如启动后）也通知时，仍可用 `[[plugins]]` 在任意 phase 调用这些 kit（见[插件系统](#插件系统)）。
 
 ### 高级功能 — 资源监控与网络映射
@@ -197,7 +202,7 @@ service_executable_path = 'C:\app\myapp.exe'
 | `health_check_failures`              | int          | `3`           | 连续失败多少次视为崩溃                                                                                                                                                                                                                                                                                                                                        |
 | `health_check_expected_status`       | int          | `200`         | 期望的 HTTP 状态码（其余视为失败）                                                                                                                                                                                                                                                                                                                            |
 
-> [!TIP]
+> [!IMPORTANT]
 > 健康检查连续失败达到阈值 / Runaway 超限强杀子进程时，宿主**不是静默停止服务**——视同子进程异常退出，会走完整的崩溃恢复流程：执行 `failure_actions` 动作序列（默认自动重启）、触发 crash 告警插件（内置 notify/smtp/syslog 通道）并写事件日志 1002。
 
 ### 高级功能 — 定时调度
@@ -239,11 +244,12 @@ service_executable_path = 'C:\app\myapp.exe'
 
 > [!WARNING]
 > `http://` 且未提供 `download_sha256` 时，`fail_on_error=true` 直接拒绝启动（防明文传输被篡改）；`basic` 认证走明文 `http://` 时默认拒绝，需 `download_unsecure_auth = true` 显式放行。重定向手动跟随：拒绝 `https→http` 降级，且 `basic` 凭据仅向同源（协议+主机+端口一致）重发——跨主机重定向目标不会收到 Authorization。`sspi` 插件同样手动跟随重定向（拒绝降级、跨源重新协商、令牌不发往重定向目标），并对响应做截断对照。认证 URL 的探测请求在 401/403 时会带凭据重试一次，因此带认证的大文件同样支持分块并行下载。
-> [!IMPORTANT]
-> 密钥保护：`service_password`、`download_password`、共享映射 `password` 在部署写入 `.osiml` 时自动 DPAPI 加密（机器级，密文以 `enc:OSMIUM1:` 前缀版本化标记），明文不落盘；旧版明文配置继续兼容。
 
 > [!WARNING]
 > `--export` 导出的配置**包含 DPAPI 密文**——机器级密文本机任意账户均可解密，导出目录必须限制为仅 SYSTEM / Administrators 可写（如 `C:\ProgramData` 下新建的受保护目录），切勿导出到共享/公开位置。
+
+> [!IMPORTANT]
+> 密钥保护：`service_password`、`download_password`、共享映射 `password` 在部署写入 `.osiml` 时自动 DPAPI 加密（机器级，密文以 `enc:OSMIUM1:` 前缀版本化标记），明文不落盘；旧版明文配置继续兼容。
 
 ### 高级功能 — 日志
 
@@ -646,6 +652,7 @@ service_executable_args = '/c cd /d C:\app && worker.bat'
 5. **自动停止** — 一轮扫描后自动停止，不常驻后台。
 6. **移除（卸载时）** — Inno Setup 卸载程序调用 `os.exe -internal --uninstall-refresher` 停止并移除该服务。
 
+> [!NOTE]
 > 刷新程序在下次开机时运行；安装器会在安装完成后立即重启之前停止的服务。
 
 ## 插件系统
@@ -751,6 +758,7 @@ smtp_to = "ops@example.com"
 syslog_host = "192.168.1.10:514"
 ```
 
+> [!NOTE]
 > 告警通道（crash 阶段）自动注入 `service_name` / `exit_code` / `failures` 字段，插件可直接读取（缺省告警文本由插件按上下文组装）。
 
 2. **`plugins` 配置驱动**（通用通道，第三方插件也走这个）：在服务配置里声明生命周期调用，可以在任意阶段调用任意插件（包括官方告警插件）：
@@ -1387,6 +1395,11 @@ Copy-Item ..\target\i686-pc-windows-msvc\release\osmium64.exe ..\Publish\osmium3
 
 ## 开发历史
 
+> [!NOTE]
+> Osmium 取名自世界上密度最大的非放射性金属——锇（Osmium），希望本项目像它一样坚硬、稳重、强大：它不只是一个简单的服务封装器，强大的生命周期管理与日志流系统让服务管理轻松自由。
+>
+> 同时，Osmium 的缩写 OS 也呼应了它与操作系统（Operating System）的密切关系。
+
 > 2024 年的时候，我基本上学完了 Python 语言，本想尝试开发属于自己的项目，但当时笔记本电脑性能太拉跨，内存只有 8GB，导致很多时候我对内存感到焦虑。
 >
 > 后来我第一次接触 Minecraft Java 版，也了解到 PCL2 启动器，偶然发现 PCL2 启动器的内存清理非常好用，但是每次都要手动点击，不过意外发现可以通过 `--memory` 参数静默启动 PCL2，使其只运行一次内存清理。这让我来了兴趣，于是用 Python 写了第一个自动化服务，可是 Python 对 Win32 服务支持不是很友好，PyInstaller 打包后总是报错，加上临近中考，我暂时放弃了这个内存清理服务项目。
@@ -1395,7 +1408,9 @@ Copy-Item ..\target\i686-pc-windows-msvc\release\osmium64.exe ..\Publish\osmium3
 >
 > 意识到问题的我打算着手写一个自动化服务管理平台，命名为 WSF（Windows Service Framework），这个项目也是纯 Python 写的，其实还是调用的 WinSW 内核。开发到后期发现这个框架非常地臃肿，而且安全问题也很难处理，基本上就是一个能用但是残废的状态，而且 Python 作为一个纯解释语言，冷启动也是慢到令人发指的地步，打包后大小也非常地惊人。
 >
-> 为了彻底解决这个问题，到了 2026 年暑假的时候，我特地去学了 Rust 语言，并且借助吃白饭的神秘蓝色大肥鱼和 WinSW 的源码，直接开发出第一代真正能用的框架。身为一个化学爱好者，我也是参考了开源社区用得比较少的名字，给第一代取名为 Silanes，也就是硅烷；后来项目为了适应 WinSW 全功能（具体操作都放到 CLAUDE.md 里面了）进行深度开发后，觉得 Silanes 这个名字不符合项目，正式重命名为 Osmium（锇），同时早期的那个快烂完的内存管理项目也演变为 Rust 编写的 Hydride 项目。
+> 为了彻底解决这个问题，到了 2026 年暑假的时候，我特地去学了 Rust 语言，并且借助吃白饭的神秘蓝色大肥鱼和 WinSW 的源码，直接开发出第一代真正能用的框架。身为一个化学爱好者，我也是参考了开源社区用得比较少的名字，给第一代取名为 Silanes，也就是硅烷；后来项目为了适应 WinSW 全功能（具体操作都放到 CHANGELOG.md 里面了）进行深度开发后，觉得 Silanes 这个名字不符合项目，正式重命名为 Osmium（锇）。
+>
+> 同时，早期那个「快烂完」的内存管理项目也演变为 Rust 编写的 Scandium 项目——完全由自研架构编写，脱离 PCL2 启动器内核，并实现了更高效的内存清理方式。
 
 ## 赞助
 

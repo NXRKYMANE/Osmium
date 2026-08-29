@@ -31,11 +31,11 @@ Osmium is written in modern Rust (edition 2024) and compiles into **both 64-bit 
 | Installer       | `osmium-win-x64-setup-v<VERSION>.exe` (non-UPX build, 64-bit only; for 32-bit deploy the exe + plugin standalone)                                                                                                                                                                                                                                                                                                                            |
 | Toolchain       | Rust stable + MSVC (i686 cross target)                                                                                                                                                                                                                                                                                                                                                                                                       |
 
+> [!TIP]
 > Don't want the platform framework? Embedding into your own project? I'd recommend the UPX builds (`osmium64-upx.exe` / `osmium32-upx.exe`) — tiny, extensible and very lightweight, and cold start is barely different from the original.
 >
 > Missing a feature? The project is plugin-everything: write your own plugin in any language and place it under the executable (e.g. `exts\` on platform installs) — see the [Extension Guide](#plugin-system) for full plugin development and usage; a green dot on `os --extend` means your plugin is usable.
-
-> [!TIP]
+>
 > Platform deployment needs the framework installed via the installer — lifecycle / logging / management are done by `os.exe`, without it services cannot start; an `osiml` file is just TOML renamed for convenience.
 
 ## Quick Start
@@ -87,13 +87,17 @@ os --test <svc.toml>
 | `--status-all`                                   | Batch status: state / registration details / child PIDs / metrics summary for every registered service (short alias `--stsa`)                                                                                                                                           |
 | `help` / `-h` / `--help`                         | Print help text                                                                                                                                                                                                                                                         |
 
+> [!NOTE]
 > Management commands are equivalent to the legacy `-m --xxx` form (the prefix is optional); after a framework install you can use the `os` shortcut alias instead of `os.exe`.
 
+> [!NOTE]
+> Read-only / local commands run without administrator: `--help`, `--list`, `--status`, `--status-all`, `--extend`, `--check`, `--test`, `--sign-config` (SCM queries use least-privilege access); all other commands (install/start/stop/uninstall and similar write operations) still require elevation.
+
+> [!TIP]
 > Every command has a short alias: `--ins` / `--imp` / `--exp` / `--str` / `--stp` / `--rst` / `--sts` / `--kil` / `--rfs` / `--rld` / `--uin` / `--del` / `--lst` (install / import / export / start / stop / restart / status / kill / refresh / reload / uninstall / delete / list); developer commands `--tst` / `--chk` / `--sigc` / `--ext` / `--stra` / `--stpa` / `--rsta` / `--stsa` (test / check / sign / extend / batch start / batch stop / batch restart / batch status).
 
+> [!CAUTION]
 > The service name `Osmium Service Refresher` is reserved; service names are validated: empty names, `.` / `..` (path traversal), path separators and control characters are rejected, length capped at 256.
-
-> Read-only / local commands run without administrator: `--help`, `--list`, `--status`, `--status-all`, `--extend`, `--check`, `--test`, `--sign-config` (SCM queries use least-privilege access); all other commands (install/start/stop/uninstall and similar write operations) still require elevation.
 
 ## Config Reference
 
@@ -178,6 +182,7 @@ On a child-process crash the host automatically calls the official alert plugins
 | `syslog_severity`    | int          | `5` (notice)                           | Syslog severity number (0-7)                                                                              |
 | `syslog_tag`         | string       | `"Osmium"`                             | Syslog program-name TAG                                                                                   |
 
+> [!TIP]
 > Need a phase other than crash (e.g. notify after startup)? Use `[[plugins]]` to call these kits at any phase (see the [Extension Guide](#plugin-system)).
 
 ### Advanced — Resource Monitor & Network Mapping
@@ -197,7 +202,7 @@ On a child-process crash the host automatically calls the official alert plugins
 | `health_check_failures`              | int          | `3`           | Consecutive failures that count as a crash                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `health_check_expected_status`       | int          | `200`         | Expected HTTP status code (anything else counts as failure; unused for `tcp://` probes)                                                                                                                                                                                                                                                                                                                                                                                                            |
 
-> [!TIP]
+> [!IMPORTANT]
 > When health checks fail past the threshold or the runaway killer terminates the child, the host does **not silently stop the service** — it treats the kill as an abnormal exit and runs the full failure-recovery flow: the `failure_actions` chain (restart by default), the crash alert plugins (built-in notify / smtp / syslog channels) and event-log 1002.
 
 ### Advanced — Scheduled Tasks
@@ -239,11 +244,12 @@ On a child-process crash the host automatically calls the official alert plugins
 
 > [!WARNING]
 > With `http://` and no `download_sha256`, `fail_on_error=true` refuses to start (protects against tampering in transit). `basic` auth over plain `http://` is refused unless `download_unsecure_auth = true`. Redirects are followed manually: `https→http` downgrade is refused, and `basic` credentials are only re-sent to the same origin (scheme+host+port) — never forwarded to a cross-host redirect target. The `sspi` plugin follows redirects manually too (downgrades refused, negotiation restarts per origin, tokens never sent to redirect targets) and verifies response length against Content-Length. Probe requests for authenticated URLs retry once with credentials on 401/403, so authenticated large files get chunked parallel downloads as well.
-> [!IMPORTANT]
-> Secrets: `service_password`, `download_password` and mapper `password` are DPAPI-encrypted (machine scope, ciphertext marked with the versioned `enc:OSMIUM1:` prefix) in the deployed `.osiml` — plaintext never lands on disk; legacy plaintext configs keep working.
 
 > [!WARNING]
 > `--export` writes the config **including DPAPI ciphertext** — machine-scoped ciphertext can be decrypted by any account on this machine, so the export directory must be restricted to SYSTEM / Administrators only (e.g. a protected directory under `C:\ProgramData`). Never export to shared or public locations.
+
+> [!IMPORTANT]
+> Secrets: `service_password`, `download_password` and mapper `password` are DPAPI-encrypted (machine scope, ciphertext marked with the versioned `enc:OSMIUM1:` prefix) in the deployed `.osiml` — plaintext never lands on disk; legacy plaintext configs keep working.
 
 ### Advanced — Logging
 
@@ -647,6 +653,7 @@ The installer automatically registers a **Service Refresher** (`Osmium Service R
 5. **Auto-stop** — The service stops itself after one full scan; it does not stay resident.
 6. **Removal (uninstall time)** — The Inno Setup uninstaller calls `os.exe -internal --uninstall-refresher` to stop and remove the service.
 
+> [!NOTE]
 > The Service Refresher runs at the next boot; the installer also restarts previously stopped services immediately after install.
 
 ## Plugin System
@@ -755,6 +762,7 @@ smtp_to = "ops@example.com"
 syslog_host = "192.168.1.10:514"
 ```
 
+> [!NOTE]
 > Alert channels (crash phase) automatically receive injected `service_name` / `exit_code` / `failures` fields — the plugin builds the default alert text from them (or use an explicit `text`).
 
 2. **`plugins` config-driven calls** (generic channel — third-party plugins use this too): declare lifecycle calls in the service config, at any phase and for any plugin (including the official alert kits):
@@ -1389,6 +1397,12 @@ When embedding Osmium in your own Inno Setup installer, watch out for these pitf
 
 ## Development History
 
+> [!NOTE]
+> Osmium is named after osmium — the densest non-radioactive metal on Earth — in the hope that this project would be just as hard, steady and powerful as the element: it is not merely a simple service wrapper, the powerful lifecycle management and log-stream system make service management easy and free.
+>
+> Also, the abbreviation of Osmium — OS — echoes its close relationship with the operating system (Operating System).
+
+
 > Back in 2024, I had basically finished learning Python and wanted to build my own project, but my laptop was so weak — only 8GB of RAM — that I was constantly anxious about memory.
 >
 > Later I got into Minecraft Java Edition and came across the PCL2 launcher. Its memory-cleaning feature worked great, but I had to click it manually every time — until I found out I could launch PCL2 silently with the `--memory` parameter to run a single cleanup. That got me interested, so I wrote my first automation service in Python. But Python's Win32 service support was rough, PyInstaller kept failing after packaging, and the high school entrance exam was approaching, so I shelved the memory-cleanup project for a while.
@@ -1397,7 +1411,9 @@ When embedding Osmium in your own Inno Setup installer, watch out for these pitf
 >
 > Realizing the problem, I decided to write an automated service management platform named WSF (Windows Service Framework). It was pure Python too, still calling WinSW underneath. As development went on, the framework turned out to be extremely bloated, and security issues were hard to handle — basically usable but crippled. And as a purely interpreted language, Python's cold start was painfully slow, and the packaged size was shocking.
 >
-> To fix this once and for all, during the summer of 2026 I went out of my way to learn Rust, and with the help of the mysterious fat blue fish that eats free meals plus the WinSW source code, I directly built the first truly usable framework. As a chemistry fan, I also picked a name rarely used in the open-source community — Silanes, the silicon hydrides — for the first generation. But after deep development to cover all of WinSW's features (details are all in CLAUDE.md), I felt Silanes didn't fit the project anymore, so I officially renamed it to Osmium (osmium, the element). At the same time, that half-rotten memory-management project evolved into a Rust-based project called Hydride.
+> To fix this once and for all, during the summer of 2026 I went out of my way to learn Rust, and with the help of the mysterious fat blue fish that eats free meals plus the WinSW source code, I directly built the first truly usable framework. As a chemistry fan, I also picked a name rarely used in the open-source community — Silanes, the silicon hydrides — for the first generation. But after deep development to cover all of WinSW's features (details are all in CHANGELOG.md), I felt Silanes didn't fit the project anymore, so I officially renamed it to Osmium (osmium, the element).
+>
+> Meanwhile, that half-rotten memory-management project has evolved into the Rust-based Scandium project — a fully self-developed architecture decoupled from the PCL2 launcher kernel, with a much more efficient memory-cleaning approach.
 
 ## Sponsor
 
