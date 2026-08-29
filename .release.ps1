@@ -1,5 +1,5 @@
 ﻿# Osmium 一键构建: Rust 构建与测试 + 官方插件 + 安装包
-# 用法: .\BUILD.ps1 [-SkipTests] [-Upx] [-SkipSign]
+# 用法: .\.release.ps1 [-SkipTests] [-Upx] [-SkipSign]
 
 param(
     [switch]$SkipTests,

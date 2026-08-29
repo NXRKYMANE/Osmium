@@ -1,4 +1,4 @@
-## Summary
+﻿## Summary
 
 Briefly describe what this change does and why.
 
@@ -15,7 +15,7 @@ Briefly describe what this change does and why.
 
 ## Verification
 
-- [ ] `.\BUILD.ps1` build passes (Rust unit tests)
+- [ ] `.\.release.ps1` build passes (Rust unit tests)
 - [ ] Installer generated successfully
 
 ## Related Issue

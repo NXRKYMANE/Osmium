@@ -1,8 +1,9 @@
 [package]
 name = "osmium-official-kits"
 # 版本与主项目统一（随主程序同版本发布，不再独立编号）
-version = "26.12.1"
+version = "26.12.2"
 edition = "2024"
+license = "Apache-2.0"
 
 # 官方工具包: 单一 bin（构建后改名为 .osx），按 stdin JSON 的 kit 字段分发到各功能
 [[bin]]

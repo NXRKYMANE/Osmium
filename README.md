@@ -1271,7 +1271,7 @@ Osmium/
 │       ├── service_config.rs  # TOML config model (serde)
 │       └── service_tests.rs   # Unit tests (200, incl. process-tree integration)
 ├── Extension/                 # Official kits (external plugin executables, shipped as .osx)
-│   └── osmium-official-kits/  # Single bin (64-bit builds as osmium64-official-kits.osx; BUILD.ps1 cross-builds the 32-bit osmium32-official-kits.osx)
+│   └── osmium-official-kits/  # Single bin (64-bit builds as osmium64-official-kits.osx; .release.ps1 cross-builds the 32-bit osmium32-official-kits.osx)
 │       ├── Cargo.toml         # Kit config (same format as Project)
 │       ├── build.rs           # EXE version info / icon (Extension.ico)
 │       └── src/
@@ -1289,13 +1289,15 @@ Osmium/
 │   ├── Extension.ico          # .osx plugin icon (installed as icons\osx.ico)
 │   └── Extension.png          # .osx icon source
 ├── Publish/                   # Build artifacts (exe + installer, not committed)
-├── BUILD.ps1                  # One-click build script (Rust build & tests + installer)
+├── .release.ps1               # One-click build script (Rust build & tests + installer)
 ├── .github/                   # GitHub community templates (issues / PR)
-├── CLAUDE.md                  # AI assistant rules + development log / version history
+├── CLAUDE.md                  # AI assistant rules
+├── CHANGELOG.md               # Development log / version history
 ├── CODE_OF_CONDUCT.md         # Code of conduct
 ├── CONTRIBUTING.md            # Contributing guidelines
 ├── SECURITY.md                # Security policy
-├── LICENSE                    # License
+├── LICENSE                    # License (Apache-2.0)
+├── NOTICE                     # Attribution notice (copyright + third-party)
 ├── README_CN.md               # Chinese documentation
 └── README.md                  # English documentation
 ```
@@ -1318,16 +1320,16 @@ cargo test
 The one-click build script produces 3 artifacts (executable + official plugin + installer):
 
 ```powershell
-.\BUILD.ps1
+.\.release.ps1
 ```
 
 **Pipeline**: build 64-bit → build 32-bit (i686 cross) → unit tests → compile the installer with ISCC (Inno Setup 7, 64-bit only). Plugins (compiled with opt-level=z, size-first) are UPX-compressed (`--ultra-brute --lzma`) right at build time as the release artifact (~0.9 MB / ~0.7 MB).
 
 After the installer is built, the script asks whether to also produce an optional UPX-compressed build of the **main executable**. Answering `y` compresses the already-built artifacts directly with UPX (`--lzma`; no opt-level=z rebuild — switching optimization levels triggers a full dependency-tree recompile, which is very slow, and the plain build compresses to ~1.4/1.2 MB, barely different from the z variant), outputting `Publish\osmium64-upx.exe` (~1.4 MB) and `Publish\osmium32-upx.exe` (~1.2 MB) — the normal exe and installer are left untouched.
 
-The script reads the version from `Project\Cargo.toml` and automatically syncs it (plus the copyright year) into `installer.iss`. A failing test aborts the pipeline; use `.\BUILD.ps1 -SkipTests` to skip testing.
+The script reads the version from `Project\Cargo.toml` and automatically syncs it (plus the copyright year) into `installer.iss`. A failing test aborts the pipeline; use `.\.release.ps1 -SkipTests` to skip testing.
 
-**Code signing**: all artifacts (`osmium64.exe` / `osmium32.exe`, both plugins, the installer, `osmium64-upx.exe` / `osmium32-upx.exe`) are Authenticode-signed (SHA256 + RFC 3161 timestamp) when a certificate is available. Certificate sources, in priority order: the `OSMIUM_CERT_PFX` environment variable (plus optional `OSMIUM_CERT_PASSWORD`), or the repo-local dev certificate `Misc\codesign.pfx` (self-signed, `Misc\codesign.pfx` is gitignored and never committed). Without a certificate the pipeline proceeds unsigned with a warning; use `.\BUILD.ps1 -SkipSign` to skip signing explicitly. The self-signed dev certificate produces valid signatures but is not trusted by other machines — for public releases that must clear SmartScreen, sign with a commercial certificate via `OSMIUM_CERT_PFX`.
+**Code signing**: all artifacts (`osmium64.exe` / `osmium32.exe`, both plugins, the installer, `osmium64-upx.exe` / `osmium32-upx.exe`) are Authenticode-signed (SHA256 + RFC 3161 timestamp) when a certificate is available. Certificate sources, in priority order: the `OSMIUM_CERT_PFX` environment variable (plus optional `OSMIUM_CERT_PASSWORD`), or the repo-local dev certificate `Misc\codesign.pfx` (self-signed, `Misc\codesign.pfx` is gitignored and never committed). Without a certificate the pipeline proceeds unsigned with a warning; use `.\.release.ps1 -SkipSign` to skip signing explicitly. The self-signed dev certificate produces valid signatures but is not trusted by other machines — for public releases that must clear SmartScreen, sign with a commercial certificate via `OSMIUM_CERT_PFX`.
 
 ### Build Individually
 
@@ -1338,7 +1340,7 @@ Copy-Item ..\target\release\osmium64.exe ..\Publish\osmium64.exe
 # build the kits → Extension\osmium64-official-kits.osx (see Extension\osmium-official-kits)
 ISCC installer.iss                        # → Publish\osmium-win-x64-setup-v<VERSION>.exe
 
-# 32-bit cross build (needs the i686-pc-windows-msvc target + x86 toolchain, see Save-X86Env in BUILD.ps1)
+# 32-bit cross build (needs the i686-pc-windows-msvc target + x86 toolchain, see Save-X86Env in .release.ps1)
 rustup target add i686-pc-windows-msvc
 cargo build --release --target i686-pc-windows-msvc
 Copy-Item ..\target\i686-pc-windows-msvc\release\osmium64.exe ..\Publish\osmium32.exe
@@ -1403,12 +1405,6 @@ If this project helps you, consider [sponsoring](https://ifdian.net/a/NXRKYMANE)
 
 ## License
 
+Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE) for details.
+
 Copyright © 2026 NXRKYMANE SOFTWARE
-
-
-
-
-
-
-
-

@@ -1267,7 +1267,7 @@ Osmium/
 │       ├── service_config.rs  # TOML 配置模型（serde）
 │       └── service_tests.rs   # 单元测试（200 个，含进程树集成测试）
 ├── Extension/                 # 官方工具包（外部插件可执行程序，发布为 .osx）
-│   └── osmium-official-kits/  # 单一 bin（64 位构建为 osmium64-official-kits.osx；32 位由 BUILD.ps1 交叉构建为 osmium32-official-kits.osx）
+│   └── osmium-official-kits/  # 单一 bin（64 位构建为 osmium64-official-kits.osx；32 位由 .release.ps1 交叉构建为 osmium32-official-kits.osx）
 │       ├── Cargo.toml         # 工具包配置（格式与 Project 一致）
 │       ├── build.rs           # EXE 版本信息 / 图标（Extension.ico）
 │       └── src/
@@ -1285,13 +1285,15 @@ Osmium/
 │   ├── Extension.ico          # .osx 插件图标（安装为 icons\osx.ico）
 │   └── Extension.png          # .osx 图标源图
 ├── Publish/                   # 构建产物（exe + 安装包，不提交）
-├── BUILD.ps1                  # 一键构建脚本（Rust 构建与测试 + 安装包）
+├── .release.ps1               # 一键构建脚本（Rust 构建与测试 + 安装包）
 ├── .github/                   # GitHub 社区模板（Issue / PR）
-├── CLAUDE.md                  # AI 助手规则 + 开发记录/版本历史
+├── CLAUDE.md                  # AI 助手规则
+├── CHANGELOG.md               # 开发记录/版本历史
 ├── CODE_OF_CONDUCT.md         # 行为准则
 ├── CONTRIBUTING.md            # 贡献指南
 ├── SECURITY.md                # 安全政策
-├── LICENSE                    # 许可证
+├── LICENSE                    # 许可证（Apache-2.0）
+├── NOTICE                     # 版权归属与第三方组件声明
 ├── README_CN.md               # 中文文档
 └── README.md                  # 英文文档
 ```
@@ -1314,16 +1316,16 @@ cargo test
 一键构建产出全部 3 个产物（exe + 官方插件 + 安装包）：
 
 ```powershell
-.\BUILD.ps1
+.\.release.ps1
 ```
 
 **流水线**：构建 64 位 → 构建 32 位（i686 交叉）→ 单元测试 → ISCC 编译安装包（Inno Setup 7，仅 64 位）。插件（opt-level=z 体积优先编译）在构建阶段直接 UPX（`--ultra-brute --lzma`）压缩为发行版（约 0.9 MB / 0.7 MB）。
 
 安装包编译完成后，脚本会询问是否生成可选的**主程序** UPX 压缩版。选择 `y` 后直接用已构建的产物做 UPX（`--lzma`）压缩（不再 opt-level=z 重建——切换优化级别会触发整个依赖树重编译，非常慢；实测普通版压缩后约 1.4/1.2 MB，与 z 版差异很小），输出 `Publish\osmium64-upx.exe`（约 1.4 MB）与 `Publish\osmium32-upx.exe`（约 1.2 MB）——不影响普通 exe 与安装包。
 
-脚本从 `Project\Cargo.toml` 读取版本号，自动同步到 `installer.iss`（含版权年份）。测试失败会终止流水线；跳过测试用 `.\BUILD.ps1 -SkipTests`。
+脚本从 `Project\Cargo.toml` 读取版本号，自动同步到 `installer.iss`（含版权年份）。测试失败会终止流水线；跳过测试用 `.\.release.ps1 -SkipTests`。
 
-**代码签名**：找到证书时，全部产物（`osmium64.exe` / `osmium32.exe`、两个插件、安装包、`osmium64-upx.exe` / `osmium32-upx.exe`）都会做 Authenticode 签名（SHA256 + RFC 3161 时间戳）。证书来源按优先级：环境变量 `OSMIUM_CERT_PFX`（可配 `OSMIUM_CERT_PASSWORD`），或仓库内开发证书 `Misc\codesign.pfx`（自签名，已被 gitignore 不会提交）。没有证书时流水线照常运行仅告警；显式跳过签名用 `.\BUILD.ps1 -SkipSign`。自签名开发证书签名有效但不被其他机器信任——公开发行要消除 SmartScreen 警告，请用商业证书经 `OSMIUM_CERT_PFX` 签名。
+**代码签名**：找到证书时，全部产物（`osmium64.exe` / `osmium32.exe`、两个插件、安装包、`osmium64-upx.exe` / `osmium32-upx.exe`）都会做 Authenticode 签名（SHA256 + RFC 3161 时间戳）。证书来源按优先级：环境变量 `OSMIUM_CERT_PFX`（可配 `OSMIUM_CERT_PASSWORD`），或仓库内开发证书 `Misc\codesign.pfx`（自签名，已被 gitignore 不会提交）。没有证书时流水线照常运行仅告警；显式跳过签名用 `.\.release.ps1 -SkipSign`。自签名开发证书签名有效但不被其他机器信任——公开发行要消除 SmartScreen 警告，请用商业证书经 `OSMIUM_CERT_PFX` 签名。
 
 ### 单独构建
 
@@ -1334,7 +1336,7 @@ Copy-Item ..\target\release\osmium64.exe ..\Publish\osmium64.exe
 # 构建插件 → Extension\osmium64-official-kits.osx（见 Extension\osmium-official-kits）
 ISCC installer.iss                        # → Publish\osmium-win-x64-setup-v<版本>.exe
 
-# 32 位交叉构建（需 i686-pc-windows-msvc target + x86 工具链，见 BUILD.ps1 的 Save-X86Env）
+# 32 位交叉构建（需 i686-pc-windows-msvc target + x86 工具链，见 .release.ps1 的 Save-X86Env）
 rustup target add i686-pc-windows-msvc
 cargo build --release --target i686-pc-windows-msvc
 Copy-Item ..\target\i686-pc-windows-msvc\release\osmium64.exe ..\Publish\osmium32.exe
@@ -1401,14 +1403,6 @@ Copy-Item ..\target\i686-pc-windows-msvc\release\osmium64.exe ..\Publish\osmium3
 
 ## 许可证
 
+本项目基于 Apache License 2.0 开源——详见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
+
 Copyright © 2026 NXRKYMANE SOFTWARE
-
-
-
-
-
-
-
-
-
-
