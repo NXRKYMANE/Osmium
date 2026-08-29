@@ -87,13 +87,10 @@ os --test <svc.toml>
 | `--status-all`                                   | Batch status: state / registration details / child PIDs / metrics summary for every registered service (short alias `--stsa`)                                                                                                                                           |
 | `help` / `-h` / `--help`                         | Print help text                                                                                                                                                                                                                                                         |
 
-> [!NOTE]
 > Management commands are equivalent to the legacy `-m --xxx` form (the prefix is optional); after a framework install you can use the `os` shortcut alias instead of `os.exe`.
 
-> [!NOTE]
 > Read-only / local commands run without administrator: `--help`, `--list`, `--status`, `--status-all`, `--extend`, `--check`, `--test`, `--sign-config` (SCM queries use least-privilege access); all other commands (install/start/stop/uninstall and similar write operations) still require elevation.
 
-> [!TIP]
 > Every command has a short alias: `--ins` / `--imp` / `--exp` / `--str` / `--stp` / `--rst` / `--sts` / `--kil` / `--rfs` / `--rld` / `--uin` / `--del` / `--lst` (install / import / export / start / stop / restart / status / kill / refresh / reload / uninstall / delete / list); developer commands `--tst` / `--chk` / `--sigc` / `--ext` / `--stra` / `--stpa` / `--rsta` / `--stsa` (test / check / sign / extend / batch start / batch stop / batch restart / batch status).
 
 > [!CAUTION]
@@ -112,7 +109,6 @@ service_description = "Service description"
 service_executable_path = 'C:\app\myapp.exe'
 ```
 
-> [!TIP]
 > Paths containing backslashes must use **single-quoted literal strings** (as above) — in a basic string like `"C:\app\..."` the `\a` is an illegal escape and parsing fails.
 
 > [!WARNING]
@@ -502,7 +498,6 @@ to = "extra.bin"
 
 Osmium treats the service target as an "executable". To run a .py / .jar / .js / .rb / .lua / .ps1 / .bat / .cmd script as a service, simply put the **interpreter** in `service_executable_path` and the script path plus arguments in `service_executable_args` — the host manages it like any other process: exit codes, auto-restart, logging and graceful shutdown all work as usual.
 
-> [!TIP]
 > The service process default working directory is `C:\Windows\System32`; always use absolute paths inside scripts (or `cd` yourself, or set `working_directory`).
 
 ### Python Scripts
@@ -653,7 +648,6 @@ The installer automatically registers a **Service Refresher** (`Osmium Service R
 5. **Auto-stop** — The service stops itself after one full scan; it does not stay resident.
 6. **Removal (uninstall time)** — The Inno Setup uninstaller calls `os.exe -internal --uninstall-refresher` to stop and remove the service.
 
-> [!NOTE]
 > The Service Refresher runs at the next boot; the installer also restarts previously stopped services immediately after install.
 
 ## Plugin System
@@ -762,7 +756,6 @@ smtp_to = "ops@example.com"
 syslog_host = "192.168.1.10:514"
 ```
 
-> [!NOTE]
 > Alert channels (crash phase) automatically receive injected `service_name` / `exit_code` / `failures` fields — the plugin builds the default alert text from them (or use an explicit `text`).
 
 2. **`plugins` config-driven calls** (generic channel — third-party plugins use this too): declare lifecycle calls in the service config, at any phase and for any plugin (including the official alert kits):

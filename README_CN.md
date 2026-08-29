@@ -87,13 +87,10 @@ os --test <svc.toml>
 | `--status-all`                                | 批量状态：遍历全部服务输出状态/注册属性/子进程 PIDs/指标摘要（可简写 --stsa）                                                                                                             |
 | `help` / `-h` / `--help`                      | 显示帮助信息                                                                                                                                                                              |
 
-> [!NOTE]
 > 管理命令均等价于旧写法 `-m --xxx`（前缀可省略）；框架安装后可直接用 `os` 快捷别名代替 `os.exe`。
 
-> [!NOTE]
 > 只读/本地命令免管理员：`--help`、`--list`、`--status`、`--status-all`、`--extend`、`--check`、`--test`、`--sign-config` 可直接运行（SCM 只读查询用最小权限打开）；其余命令（安装/启停/卸载等写操作）仍需管理员权限。
 
-> [!TIP]
 > 所有命令均支持简化别名：`--ins` / `--imp` / `--exp` / `--str` / `--stp` / `--rst` / `--sts` / `--kil` / `--rfs` / `--rld` / `--uin` / `--del` / `--lst`（分别对应安装 / 导入 / 导出 / 启动 / 停止 / 重启 / 状态 / 强杀 / 刷新 / 重载 / 卸载 / 删除 / 列表）；开发者命令 `--tst` / `--chk` / `--sigc` / `--ext` / `--stra` / `--stpa` / `--rsta` / `--stsa`（测试 / 预检 / 签名 / 扩展 / 批量启停 / 批量状态）。
 
 > [!CAUTION]
@@ -112,7 +109,6 @@ service_description = "服务描述"
 service_executable_path = 'C:\app\myapp.exe'
 ```
 
-> [!TIP]
 > 路径含反斜杠时用**单引号字面字符串**（如上），避免基本字符串的 `\` 转义（`"C:\app\..."` 中的 `\a` 是非法转义会解析失败）。
 
 > [!WARNING]
@@ -501,7 +497,6 @@ to = "extra.bin"
 
 Osmium 的服务目标是「可执行程序」。要让 .py / .jar / .js / .rb / .lua / .ps1 / .bat / .cmd 脚本作为服务，只需把**解释器**填进 `service_executable_path`，脚本路径与参数填进 `service_executable_args`——宿主按普通进程管理，退出码、自动重启、日志、优雅关闭全部照常生效。
 
-> [!TIP]
 > 服务进程默认工作目录是 `C:\Windows\System32`，脚本内请用绝对路径（或自行 `cd`，或配 `working_directory`）。
 
 ### Python 脚本
@@ -652,7 +647,6 @@ service_executable_args = '/c cd /d C:\app && worker.bat'
 5. **自动停止** — 一轮扫描后自动停止，不常驻后台。
 6. **移除（卸载时）** — Inno Setup 卸载程序调用 `os.exe -internal --uninstall-refresher` 停止并移除该服务。
 
-> [!NOTE]
 > 刷新程序在下次开机时运行；安装器会在安装完成后立即重启之前停止的服务。
 
 ## 插件系统
@@ -758,7 +752,6 @@ smtp_to = "ops@example.com"
 syslog_host = "192.168.1.10:514"
 ```
 
-> [!NOTE]
 > 告警通道（crash 阶段）自动注入 `service_name` / `exit_code` / `failures` 字段，插件可直接读取（缺省告警文本由插件按上下文组装）。
 
 2. **`plugins` 配置驱动**（通用通道，第三方插件也走这个）：在服务配置里声明生命周期调用，可以在任意阶段调用任意插件（包括官方告警插件）：
